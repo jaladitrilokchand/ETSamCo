@@ -1,0 +1,441 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: fixPerms
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 06/25/2012 EH  Initial coding.
+# 07/20/2012 EH  Eiminated dependency on reference ACLs being gathered and
+#                saved to a file before the script is run.
+# 07/20/2012 EH  Enabled the script to be used for any reference level and any
+#                target level.
+# 02/01/2013 JVI Report errors returned from 'fs la' command.
+#                Exit when acl hash is not available.
+# 02/05/2013 GFS Updated to gracefully handle the situation where we have a new
+#                component in shipb/ship that doesn't have the corresponding
+#                tkb/tk reference directory.
+# 03/22/2013 GFS Updated help to support new customtkb/customtk dirs.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+# Global variables
+my $release = "";
+my $edaDir = "/afs/eda";
+my $dir = "";
+my @dirList = ();
+my $line = "";
+my $dateTime = "";
+my $refFile = "";
+my @refAcls = ();
+my $command = "";
+my $tgtCompRlsDir = "";
+my $refCompRlsDir = "";
+my %refLevelAclsHash = ();
+
+# Program variables
+my $appName = "fixPerms";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help         = "";
+my $noCmdExec    = 0;
+my $verbose      = 0;
+my $tgtLevel     = "";
+my $refLevel     = "";
+my $component    = "";
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+#my @tokens = ();
+my $rc  = $ERROR;
+my $startDir = $ENV{"PWD"};
+my $progRC = "";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+print "Reference path: $refCompRlsDir\n";
+print "Target path:    $tgtCompRlsDir\n\n";
+
+# Exit gracefully if there's no reference directory (for new components)
+if (! -d $refCompRlsDir) {
+  print("WARNING: refernce path does not exist ... nothing to do\n");
+  exit $OK;
+}
+
+# Get reference level ACLs (that will be applied to target level)
+chomp($dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+print "$dateTime Getting reference level ACLs\n\n";
+%refLevelAclsHash = GetAclsHash($refCompRlsDir);
+if (! scalar(%refLevelAclsHash)) {
+  print( "ERROR: unable to create ACL hash for $refCompRlsDir\n");
+  exit $ERROR;
+}
+
+print "Found " . scalar(%refLevelAclsHash) . " reference dirs\n";
+
+
+print "fs commands will be executed from the target path\n\n";
+
+#------------------------------------------------------------------------------
+# Shift focus to target level where access is to be set
+#------------------------------------------------------------------------------
+
+# Check if start directory exists
+unless (-d $tgtCompRlsDir) {
+  print "ERROR: $tgtCompRlsDir does not exist\n";
+  exit $ERROR;
+}
+
+# Make the target component release directory the current directory
+chdir($tgtCompRlsDir);
+
+# Recursively identify all of the subdirectories below the target
+# component release directory (current directory).
+chomp(@dirList = `find . -type d `);
+
+# Iterate through each subdirectory below <component>/<release>
+foreach $dir (sort(@dirList)) {
+
+  # Remove the leading ./ from directory entry returned by find command.
+  # Without this, $dir looks like "./essinc".
+  $dir =~ s,^.\/,,;
+
+  # Ignore the case of the component/version root directory by itself
+  next if ($dir eq ".");
+
+  # Run the appropriate subroutine depending on whether the current directory 
+  # exists in the reference location.
+  if (exists $refLevelAclsHash{$dir}) {
+    SetAccessFromRefLevel($dir);
+  }
+  else {
+    CopyAclFromDestCompRlsDir($dir);
+  }
+  print "\n";
+}
+
+CleanExit("Application complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints description and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script updates ACLs for subdirectories under a \"target\" level 
+component/release directory to be the same as ACLs found in a \"reference\"
+level component/release directory.
+
+There is also a short list of IDs or groups that are always given access in the
+target directories.
+
+Likewise, there are some IDs or groups that are never given access in the
+target directories, even if they are present in the reference directory.
+
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-reflevel ref level> <-tgtlevel target_level> <-c component> 
+           [-r release] [-h] [-k] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  reflevel  = level to copy ACLs from (ie, prod, shipb or customtk/tk14.13)
+  tarlevel  = level to apply ACLs to (ie, shipb, shi or customtk/tk14.13)
+  component = component to be updated
+  release   = Tool Kit release (13.1 or 14.1). [default = 14.1]
+  -h         (optional) application help
+  -k         (optional) Show commands, but don't execute them (for debugging)
+  -y         (optional) Verbose
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('reflevel=s'  => \$refLevel,
+	      'tgtlevel=s'  => \$tgtLevel,
+	      'c=s'        => \$component,
+	      'r=s'        => \$release,
+	      'k'          => \$noCmdExec,
+	      'y'          => \$verbose,
+	      'help|h|?'   => \$help) || return $ERROR;
+
+  # If help requested, show usage
+   if ($help) {
+     printHelp();
+     return $ERROR;
+   }
+
+  # Validate required input
+  if (! $component) {
+    print "ERROR: Component (-c) is a required parameter\n";
+    return $ERROR;
+  }
+
+  if (! $refLevel) {
+    print "ERROR: target level (-reflevel) is a required parameter\n";
+    return $ERROR;
+  }
+
+  if (! $tgtLevel) {
+    print "ERROR: target level (-tgtlevel) is a required parameter\n";
+    return $ERROR;
+  }
+
+  $tgtCompRlsDir = "$edaDir/$tgtLevel/$component/$release";
+  $refCompRlsDir = "$edaDir/$refLevel/$component/$release";
+  if (! -e $refCompRlsDir && $tgtLevel =~ /15\.1\.0/) {
+    $refCompRlsDir = "$edaDir/$refLevel/$component/14.1";
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetAccessFromRefLevel()
+# Purpose: Set access from reference level
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SetAccessFromRefLevel {
+
+  my ($dir) = @_;
+
+  my $grp = "";
+  my $permissions = "";
+
+  # Clear the existing ACL and add svnlib admin access first to insure that
+  # we will have authority to add the remaining group/permission pairs.
+  # svnlib:write and svnlib:read are also being added here because in some
+  # cases they are not present in the reference directories.
+  $command = "fs sa -clear $dir svnlib rlidwka";
+  #$command .= " einslib rlidwka"; # tk_src test
+  $command .= " svnlib:write rlidwk";
+  $command .= " svnlib:read rl";
+  $command .= " system:administrators rlidwka";
+
+  print "$command\n";
+
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    `$command`;
+  }
+
+  # Iterate through each reference group/access pair for current directory
+  foreach $grp (sort(keys %{$refLevelAclsHash{$dir}})) {
+
+    # Don't need bradmin id at this time. Since it is a member of 
+    # system:administrators group, it already has admin rights.
+    next if ($grp eq "bradmin");
+
+    # Don't bother with svnlib AFS ID since it was added above.
+    # Same for svnlib:write and svnlib:read.
+    next if ($grp eq "svnlib");
+    next if ($grp eq "svnlib:write");
+    next if ($grp eq "svnlib:read");
+
+    # Get the permissions associated with this group
+    $permissions = $refLevelAclsHash{$dir}{$grp};
+
+    # Set the group/access found in the reference to the current target
+    # directory.
+    $command = "fs sa $dir $grp $permissions";
+    print "$command\n";
+
+    # Skip command execution if the -k option was specified
+    unless ($noCmdExec) {
+      `$command`;
+    }
+  }
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CopyAclFromDestCompRlsDir()
+# Purpose: Copy ACL from target component release directory
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CopyAclFromDestCompRlsDir {
+
+  my ($dir) = @_;
+
+  # When the current target directory does not exist in the reference location,
+  # copy the ACL from the target component/release directory to current 
+  # directory.
+  #
+  # Use the fs sa -clear option to remove existing permissions before setting
+  # the new permissions.
+  $command = "fs copyacl -clear -f $tgtCompRlsDir -t $dir";
+  print "$command\n";
+
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    `$command`;
+  }
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetAclsHash()
+# Purpose: Read ACL for each subdirectory under component/release and write
+#          the ACL to a hash.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub GetAclsHash {
+
+  my ($refDir) = @_;
+
+  my @acl = ();
+  my $grp = "";
+  my $permissions = "";
+  my %AclsHash = ();
+
+  # Return immediately if the component release directory is not readable
+  if (! -R "$refDir") {
+    print "Directory is not readable ..  $dir\n";
+    return %AclsHash;
+  }
+
+  chdir("$refDir");
+
+  # Recursively identify all of the subdirectories below the current directory
+  chomp(my @dirList = `find . -type d `);
+
+  # Iterate through each subdirectory below <component>/<release>
+  foreach $dir (@dirList) {
+    #print "Dir: $dir\n" if ($verbose);
+
+    my @tokens = ();
+
+    # Remove the leading ./ from directory entry returned by find command.
+    # Without this, $dir looks like "./essinc".
+    $dir =~ s,^.\/,,;
+
+    if (-d $dir) {
+
+      # Get ACL for current directory
+      my @unfiltered_acl = `fs la $dir`;
+      my $rc = $? >> 8;
+      if ( $rc == 0 ) {
+	chomp( @unfiltered_acl );
+	@acl = grep( !/Access list for/ && !/Normal rights/, @unfiltered_acl );
+      }
+      else {
+	print "ERROR: Unable to determine the access control list for ";
+	print "'$refDir/$dir'. 'fs la' ";
+	print "returned $rc. \n";
+	%AclsHash = ();
+	return %AclsHash;
+      }
+    }
+    else {
+      print "WARNING: $refDir/$dir directory ";
+      print "does not exist\n";
+      @acl = ();
+    }
+
+    # @acl contains fs la output
+    foreach $line (@acl) {
+
+        # Remove leading and trailing spaces
+        $line =~ s/(^\s+|\s+$)//g;
+
+        @tokens = split(/ +/, $line);
+        $grp = $tokens[0];
+        $permissions = $tokens[1];
+        $AclsHash{$dir}{$grp} = $permissions;
+        #print "-> $dir $grp $permissions\n" if ($verbose);
+    }
+  }
+
+  return %AclsHash;
+
+}

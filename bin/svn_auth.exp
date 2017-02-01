@@ -1,0 +1,55 @@
+#!/usr/bin/expect -f
+#=================================================================================================
+# Program Name: svn_auth.exp
+#
+# Author(s)   : A. Magnan
+#
+# Purpose     : Authenticates the functional ID against the EDA SVN 14.1 repository.
+#
+# Function    : This script tries to auto-authenticate our eTree defined functional IDs against
+#               the SVN server when challenged. If SVN authentication is requested, this script 
+#               will automatically provide the proper responses.  
+#
+# Notes       : (1) eTree defined functional IDs are hdplib@us.ibm.com, einslib@us.ibm.com, and
+#                   synlib@us.ibm.com.
+#               (2) Functional ID password stored in /tmp/local/$USER/$USER.funcid file which is 
+#                   set up on local machine so can only be read by the AFS $USER id.
+#               (3) Functional ID password is passed to this script from the svnUpdate Perl script.
+#               (4) Ensure that SVN environment variable is set up for the Subversion code location
+#                   and svn command call. (e.g. /afs/btv/data/subversion/bin/svn)
+#               (5) Ensure that the $user/.subversion directory is set up with AFS access for 
+#                   ONLY $user and the AFS system admins.
+#
+# Revisions   : 0.0 09/21/10 AM Initial version
+#               0.1 10/08/10 AM Increased timeout from 30 to 120, removed "expect eof" statement.
+#               0.2 12/09/10 AM Updated to support recent change to an encrypted SVN password.
+#               0.3 12/10/10 AM Updated answer to store encrypted password.
+#=================================================================================================
+log_user 1
+set timeout 120
+set svnLoc $env(SVN)
+set svnCmd {update}
+set user $env(LOGNAME)
+set pw [lindex $argv 0]
+
+spawn $svnLoc $svnCmd
+expect {
+    "Password for '$user" {
+        send -- "\r"
+        expect "Username:"
+        send -- "$user@us.ibm.com\r"
+        expect "Password for '$user@us.ibm.com':"
+        send -- "$pw\r"
+        expect "Store password unencrypted (yes/no)?"
+        send -- "yes\r"
+        return
+        }
+   "At revision "  {
+        puts "Already authenticated...new authentication not required.\n" 
+        return
+        }
+   "Skipped '.'"  {
+        puts "This is not an SVN WC.\n" 
+        return
+        }
+}

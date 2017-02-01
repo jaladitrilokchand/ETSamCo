@@ -1,0 +1,12 @@
+#!/usr/bin/env tclsh
+
+set REPORT /afs/eda/data/edainfra/cmpSVN2PROD
+
+set components [ exec  /afs/eda/data/edainfra/tools/enablement/prod/bin/getComponents -t 14.1.0 -q ]
+
+foreach component [ split $components "," ]  {
+# set rc [ catch  { exec /afs/eda/data/edainfra/tools/enablement/prod/bin/cmpSVN2PROD $component > $REPORT/$component.html 2>&1 } error ]
+  set rc [ catch  { exec /afs/eda/data/edainfra/tools/enablement/prod/bin/cmpSVN2PROD $component > $REPORT/$component.html } error ]
+  if { $rc > 0 } { puts $error }
+}
+

@@ -1,0 +1,1635 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: customtk.engine
+# CREATOR: Gregg Stadtlander
+#    DATE: 03/19/2013
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 03/19/2013 GFS  Initial coding.
+# 03/27/2014 GFS  Added ignoreBomCheck switch
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use SVNutils;
+use TKutils;
+
+
+# Global variables
+my $BIN          = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $SVN          = "/afs/eda/tools/bin/svn";
+my $SVN_URL      = "https://greenjiffy.fishkill.ibm.com/eda/tk";
+my $EXCLUDES_DIR = "/afs/eda/data/edainfra/rsync_excludes";
+my $AUTH_ID      = "svnlib";
+my $LOCK         = "l";
+my $UNLOCK       = "u";
+
+
+# Program variables
+my $appName = "customtk.engine";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dryRun          = 0;
+my $component       = "";
+my $dbMode          = "";
+my $release         = "";
+my $selfStoreRls    = "";
+my $logFile         = "";
+my $srcTk           = "";
+my $tgtTk           = "";
+my $cmdLineArgs     = "";
+my $noLocking       = 0;
+my $ignoreBom       = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc  = $ERROR;
+my $startDir = $ENV{"PWD"};
+my $progRC = "";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { print "INT\n"; handleInterruption(); exit $ERROR; };
+$SIG{'QUIT'}  = sub { print "QUIT\n"; handleInterruption(); exit $ERROR; };
+$SIG{__DIE__} = sub { print "DIE\n"; handleInterruption(); };
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Is user authorized to run this script?
+if (! TKutils::IsAuthorized($AUTH_ID, $dryRun)) {
+  print "ERROR: user not authorized to run this application\n";
+  exit $ERROR;
+}
+
+# Enable logging
+my $logDir = "/afs/eda/data/edainfra/logs/$tgtTk/customtk";
+if (SetupLogging($component, $logDir) != $OK) {
+  CleanExit("ERROR: Unable to complete $appName initalization", $ERROR);
+}
+
+# Set the source and target locations
+my $srcBuildLoc     = "";
+my $srcShipLoc      = "";
+my $tgtBuildLoc     = "";
+my $tgtShipLoc      = "";
+SetLocations($srcTk, \$srcBuildLoc, \$srcShipLoc);
+SetLocations($tgtTk, \$tgtBuildLoc, \$tgtShipLoc);
+print "srcTk      : $srcTk\n";
+print "tgtTk      : $tgtTk\n";
+print "srcBuildLoc: $srcBuildLoc\n";
+print "srcShipLoc : $srcShipLoc\n";
+print "tgtBuildLoc: $tgtBuildLoc\n";
+print "tgtShipLoc : $tgtShipLoc\n";
+
+my $startEvent = GetEvent($tgtBuildLoc, "START");
+my $successEvent = GetEvent($tgtBuildLoc, "SUCCESS");
+my $failEvent = GetEvent($tgtBuildLoc, "FAIL");
+
+# Set the source and target SVN branches
+my $srcBranch = SetBranch($srcTk, $component, $srcBuildLoc, "");
+print "SRC branch: $srcBranch\n";
+
+my $tgtBranch = SetBranch($tgtTk, $component, $tgtBuildLoc, "");
+print "TGT branch: $tgtBranch\n";
+
+# Retrieve latest revision for component in $srcBuildLoc
+my $srcBuildRev = "";
+($rc, $srcBuildRev) = GetLatestRevision_SVN($srcBuildLoc, $srcBranch, $srcTk);
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to determine revision for $srcBuildLoc",
+	    $ERROR);
+}
+print "SRC build rev: $srcBuildRev\n";
+
+# Reset the source branch -- needed for 14.1 transition from trunk to 14.1.build
+if (($srcBranch =~  /build/) || ($srcBranch eq "trunk")) {
+  $srcBranch = SetBranch($srcTk, $component, $srcBuildLoc, $srcBuildRev);
+  print "RESET ==> SRC branch: $srcBranch\n";
+}
+else {
+  print "No branch RESET needed\n";
+}
+
+# Exit if this component has already been processed1
+if (BranchCheck($component, $tgtBranch)) {
+  print "Component $component has already completed CTK processing\n";
+  chomp(my $logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  CleanExit("\n$logDate $appName complete", $OK);
+}
+
+# Log CTK start event for this TK/component
+TKutils::LogComponentEvent($tgtTk, $component, $tgtBuildLoc, $startEvent,
+			   $logFile, $verbose, $dryRun);
+
+# Lock $srcBuildLoc directory if not already locked
+if (LocationLockMgr($srcBuildLoc, $LOCK) > 0) {
+  CleanExit("ERROR: Unable to lock $srcBuildLoc directory", $ERROR);
+}
+
+# Rsync $srcBuildLoc to new $tgtBuildLoc
+if (RsyncSrc2Tgt() > 0) {
+  CleanExit("ERROR: Unable to copy contents of source to target", $ERROR);
+}
+
+# Create new branch in SVN (turn off CM then turn back on)
+if (CreateBranch() > 0) {
+  CleanExit("ERROR: Unable to create $component branch $tgtBranch in SVN",
+	    $ERROR);
+}
+
+# Convert new $tgtBuildLoc directory into SVN working copy
+if (CreateSvnWC() > 0) {
+  CleanExit("ERROR: Unable to create SVN working copy", $ERROR);
+}
+
+# Update timestamps in new $tgtBuildLoc directory
+if (UpdateTimeStamps() > 0) {
+  CleanExit("ERROR: Unable to update timestamps", $ERROR);
+}
+
+# Selectively replace symlinks with files for include and private
+# directories if object is a file in $srcBuildLoc.
+if (ChgIncludeLinks() > 0) {
+  CleanExit("ERROR: Unable to convert include/private symlinks", $ERROR);
+}
+
+# Create $tgtBuildLoc symlink to new tk14.1.n/component directory
+if (CreateSymlink() > 0) {
+  CleanExit("ERROR: Unable to create symlink (tk14.1.n/component)", $ERROR);
+}
+
+# Change Makefile symlinks in $tgtBuildLoc that point to $srcBuildLoc
+if (ChgProdLinks() > 0) {
+  CleanExit("ERROR: Unable to correct Makefile symlinks", $ERROR);
+}
+
+# Synchronize $tgtBuildLoc permissions to match $srcBuildLoc permissions
+my $refLocation = $srcBuildLoc;
+$refLocation = "tkb" if ($srcBuildLoc eq "prod");
+print "refLocation = $refLocation\n";
+print "tgtBuildLoc = $tgtBuildLoc\n";
+if (SyncPermissions($refLocation, $tgtBuildLoc) > 0) {
+  CleanExit("ERROR: Unable to update $tgtBuildLoc permissions.", $ERROR);
+}
+
+# Determine if this component is required in $tgtShipLoc.
+if (IsDelivered() && ($tgtBuildLoc !~ /xtinct/)) {
+
+  # Advance $tgtBuildLoc to $tgtShipLoc and runs setup_xmit_dirs to create
+  # .ship* directories.
+ if (AdvanceBuild2Ship() > 0) {
+    CleanExit("ERROR: Unable to advance $component to $tgtShipLoc", $ERROR);
+  }
+
+  # Synchronize $tgtShipLoc permissions to match $srcShipLoc permissions
+ if (SyncPermissions($srcShipLoc, $tgtShipLoc) > 0) {
+    CleanExit("ERROR: Unable to update $tgtShipLoc permissions.", $ERROR);
+  }
+
+  # Execute BOM check to compare $tgtShipLoc deliverables to
+  # $srcShipLoc deliverables.
+  if (BomChecker() > 0) {
+    CleanExit("ERROR: Differences found between $tgtShipLoc and $srcShipLoc",
+	      $ERROR);
+  }
+
+}
+
+# Add branch for tkx.y.z/component
+if (BranchAdd($tgtTk, $component, $tgtBranch) > 0) {
+  CleanExit("ERROR: Unable to add the branch name to $srcTk", $ERROR);
+}
+
+# Update contents of the .update file (for CNYA use)
+if (CreateUpdateFile() > 0) {
+  CleanExit("ERROR: Unable to update the .update file", $ERROR);
+}
+
+# Unlock $srcBuildLoc directory (only if no errors)
+if (LocationLockMgr($srcBuildLoc, $UNLOCK) > 0) {
+  CleanExit("ERROR: Unable to unlock $srcBuildLoc directory", $ERROR);
+}
+
+# Update TK 14.1.n component stage to new TK state (preview or custom)
+if (SetStageName($component, $tgtTk) > 0) {
+  CleanExit("ERROR: Unable to set new TK stage", $ERROR);
+}
+
+# Log AGTS end event for this TK/component
+chomp(my $logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+
+CleanExit("\n$logDate $appName complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+
+  my ($message, $rc) = @_;
+
+  # Display the exit message
+  print "$message\n";
+  print "Return code: $rc\n";
+
+  # Cd back to starting directory
+  chdir($startDir) if (defined($startDir));
+
+  # Log appropriate event
+  if ($rc == $OK) {
+    TKutils::LogComponentEvent($tgtTk, $component, $tgtBuildLoc, $successEvent,
+			       $logFile, $verbose, $dryRun);
+  }
+  else {
+    TKutils::LogComponentEvent($tgtTk, $component, $tgtBuildLoc, $failEvent,
+			       $logFile, $verbose, $dryRun);
+  }
+
+  close(STDOUT);
+
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script executes the \"Custom TK\" process for an individual component.
+It can be run at AGTS or when a new custom TK is needed.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-src srcTk> <-tgt tgtTk> <-c component>
+                  [-nolock] [-dryrun] [-ignoreBom] [-db dbmode] [-y] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  srcTk     = Source Tool Kit version (ie, 14.1.1 ...)
+  tgtTk     = Target Tool Kit version (ie, 14.1.2 ...)
+  component = Component name to be processed (e.g., einstimer)
+  -nolock   = (optional) Do not lock source location during this process
+              (used for testing or if developers don't want src loc locked)
+  -ignoreBom = Ignore the BOM check results .. at least don't fail
+  -dryrun   = (optional) Dry run (disables commands that write to CM DB)
+  dbmode    = database mode (e.g., prod or dev) default: prod
+  -h          (optional) application help
+  -y          (optional) Verbose (print the invocation of each command)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  my $rc = $OK;
+  my $command = "";
+
+  # Capture command line arguments for logging (before GetOptions deletes them)
+  $cmdLineArgs = join(' ', @ARGV);
+
+  # Parse command line arguments
+  GetOptions ('src=s'       => \$srcTk,
+	      'tgt=s'       => \$tgtTk,
+              'comp|c=s'    => \$component,
+              'dryrun'      => \$dryRun,
+              'nolock'      => \$noLocking,
+              'ignoreBom'   => \$ignoreBom,
+              'db=s'        => \$dbMode,
+              'y'           => \$verbose,
+              'help|h|?'    => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $srcTk) {
+    print "ERROR: Source tool kit(-src) must be specified\n";
+    return $ERROR;
+  }
+  if (! $tgtTk) {
+    print "ERROR: Target tool kit(-src) must be specified\n";
+    return $ERROR;
+  }
+  if (! $component) {
+    print "ERROR: component (-c) must be specified\n";
+    return $ERROR;
+  }
+
+  # Set the  DB mode
+  $dbMode = "-db $dbMode" if ($dbMode);
+
+  # Validate the component and TKs
+  if (! TKutils::ValidateTkComp($srcTk, $component)) {
+    print "ERROR: component($component) NOT a member of tool kit ($srcTk)\n";
+    return $ERROR;
+  }
+  if (! TKutils::ValidateTkComp($tgtTk, $component)) {
+    print "ERROR: component($component) NOT a member of tool kit ($tgtTk)\n";
+    return $ERROR;
+  }
+
+  # Construct the Tool Kit release in 14.x format
+  $release = TKutils::GetRelease($srcTk, ".");
+
+  # Construct the Tool Kit release in 140x format 
+  $selfStoreRls = TKutils::GetRelease($srcTk, "0");
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RsyncSrc2Tgt()
+# Purpose: Copy srcBuildLoc content to tkx.y.z repository
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub RsyncSrc2Tgt {
+
+  # Exclude based on the filter file.
+  # TODO ... Need to document requirement to add filter file/symlink when new
+  #          component is created.
+  my $excludeDef = "--exclude-from $EXCLUDES_DIR/$component";
+  print "Copying contents of $srcBuildLoc/$component/14.1 to ";
+  print "tk$srcTk/$component/14.1\n";
+
+  # Construct the command
+  my $rsyncCmd = `which rsync`;
+  chomp $rsyncCmd;
+
+  my $command = "$rsyncCmd -rlptvz";
+  $command .= " --delete-excluded $excludeDef";
+  $command .= " /afs/eda/$srcBuildLoc/$component/$release/";
+  $command .= " /afs/eda/tk$tgtTk/$component/$release";
+
+  # Run the command
+  my @results;
+  if (TKutils::RunCommand($command, \@results, $dryRun, $verbose) > 0) {
+    print "ERROR: Unable to copy contents of $srcBuildLoc/$component/14.1 to ";
+    print "tk$tgtTk/$component/14.1\n";
+    print @results;
+    return $ERROR;
+  }
+
+  # Log the advance $srcBuildLoc to $tgtBuildLoc event
+  my $advEvent = GetAdvanceEvent($tgtBuildLoc);
+  $rc = LogComponentEvent_new($component, $srcBuildLoc, $advEvent,
+  			      "Advanced by $appName", $verbose, $dryRun,
+  			      $srcTk, $tgtTk);
+  if ($rc != $OK) {
+    print "ERROR: Unable to log $advEvent for $srcBuildLoc";
+    return $ERROR;
+  }
+
+  # Set the revision and log the advance event for tgtBuildLoc
+  my ($rc2, $rev) =  GetLatestRevision_DB($srcBuildLoc, $srcTk);
+  print "Setting revision in $tgtBuildLoc to $rev\n";
+  $command = "$BIN/compUp.add ";
+  $command .= " -t $tgtTk";
+  $command .= " -srctk $srcTk";
+  $command .= " -c $component";
+  $command .= " -l $tgtBuildLoc";
+  $command .= " -r $rev";
+
+  if (TKutils::RunCommand($command, \@results, $dryRun, $verbose) > 0) {
+    print "ERROR: Unable to set the revision for $tgtBuildLoc\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateBranch()
+# Purpose: Create toolKit version branch in SVN
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateBranch {
+
+  print "Creating SVN branch $tgtBranch from $srcBranch ($component)\n";
+  print " -> Latest $component revision in $srcBuildLoc: $srcBuildRev\n";
+
+  # Turn off Change Management temporarily if it is already on.
+  # This is required because SVN copy does a SVN commit under the covers which
+  # would normally require a CR.
+  #return $ERROR if (TurnOffChgMgmt($srcTk, $component, $srcBranch) > 0);
+
+  # Delete the SVN component branch before attempting a new SVN copy.
+  # Otherwise, the trunk gets copied under the existing tk14.1.n branch.
+  # Further attempts to do SVN copy without removing the existing one result in
+  # "svn: Path 'branches/tk14.1.1/trunk' already exists" error msgs.
+  if (SVNutils::IsSvnTkBranch($component, $tgtBranch)) {
+    DeleteSvnBranch();
+  }
+
+  # Create the SVN branch
+  my $rc1 = SVNutils::CopyTkBranch("$SVN_URL/$component", $srcBranch,
+				   $tgtBranch, $srcBuildRev, $dryRun,
+                                   $verbose);
+
+  # Turn on Change Management
+  #my $rc2 = TurnOnChgMgmt($srcTk, $component, $srcBranch, $dbMode);
+  #return $ERROR if ($rc1 != $OK || $rc2 != $OK);
+
+  # Verify that Change Management did get turned on
+  if (! IsChgMgmtOn($component, $srcBranch)) {
+    print "ERROR: Not able to verify that Change Management is ON for ";
+    print "       $component in toolkit $srcTk\n";
+    return $ERROR;
+  }
+
+  if (CheckRevisions($srcBuildLoc,$srcBranch,$srcTk,$tgtBuildLoc,$tgtBranch,$tgtTk) != $OK) {
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : IsChgMgmtOn()
+# Purpose: Determine if Change Management is on or off for the current
+#          component and branch.
+# RCs    : 0 = CM off
+#          1 = CM on
+#------------------------------------------------------------------------------
+sub IsChgMgmtOn {
+
+  my ($comp, $tgtBranch) = @_;
+
+  # Construct the command
+  my $command = "$BIN/branchCheck";
+  $command .= " -c $comp";
+  $command .= " -b $tgtBranch";
+  $command .= " $dbMode";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  my $cmState = $results[0];
+  chomp $cmState if (! $dryRun);
+  return 1 if ($dryRun);
+
+  return $cmState;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateSvnWC()
+# Purpose: Retrieve source code from SVN toolKit version branch
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateSvnWC {
+
+  print "Creating SVN working copy in $tgtBranch/$component/$release\n";
+
+  # Construct the command
+  my $command = "$BIN/scheckout";
+  $command .= " $component";
+  $command .= " $SVN_URL/$component/branches/$tgtBranch";
+  $command .= " /afs/eda/$tgtBranch/$component/$release";
+  $command .= " 2>&1";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($component eq "tools") {
+    print "WARNING: tools component failed to component SVN checkout due\n";
+    print "         to aix and linux symlinks commited to SVN\n";
+    print "         This is a known and expected situation .. continue on\n";
+    return $OK;
+  }
+  elsif ($rc > 0) {
+    print "ERROR: Unable to create working copy in ";
+    print "$tgtBranch/$component/$release\n";
+    print @results;
+    return $ERROR;
+  }
+
+
+  # Validate the files checked out from SVN.
+  # We got a good rc from svn copy, now validate the results.
+  #
+  # Use equivalent functionality found in validate_svn_file_checkout()
+  #   Examples of raw svn copy msgs are in ...filelist files
+  #   /afs/eda/u/svnlib/logs/dec/dec14.verity.1401.checkout.filelist
+  #   Examples of scrubbed results are in ...results files
+  #   /afs/eda/u/svnlib/logs/dec/dec14.verity.1401.checkout.results
+  #
+  # The following are acceptable results:
+  #   An "E" in  column 1.
+  #   An "U" in  column 2.
+  #   The string "Checked" at the beginning of the line.
+  #   The string "Updated" at the beginning of the line.
+  # Anything else is a problem and needs to be corrected.
+  #
+  # Note that if a rerun of AGTS is made for a component, the original SVN 
+  # branch has to be deleted and then recreated. After that point, there are
+  # no messages returned from the svn copy (via scheckout), even if there
+  # is unusual file status that would have been expected.
+  my $line = "";
+  my @filteredResults = ();
+  foreach $line (@results) {
+    next if (substr($line, 0, 1) eq "E");
+    next if ($line =~ /^Checked/);
+    next if ($line =~ /^Updated/);
+    next if (substr($line, 0, 2) eq " U");
+    push (@filteredResults, $line);
+  }
+
+  if (@filteredResults) {
+    print "ERROR: The following objects had unexpected codes from SVN copy ";
+    print "that need to be corrected:\n";
+    print join("\n", @filteredResults);
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateSymlink()
+# Purpose: Create symlinks from $tgtBuildLoc to tk repository
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateSymlink {
+
+  print "Creating symlink from $tgtBuildLoc/$component/14.1 to ";
+  print "$tgtBranch/$component/14.1\n";
+
+  # Create the customtkb/tk14.1.x/component dir
+  if ($tgtBuildLoc =~ (/xtinct|custom/)) {
+    my $path2 = "/afs/eda/$tgtBuildLoc/$component";
+    if (! -d $path2) {
+      print "$tgtBranch/$component/14.1\n";
+      mkpath($path2) if (! -d $path2);
+    }
+  }
+  
+  # Convert customtkb/tk14.1.x to customtkb for update_lc_complink
+  my $location = $tgtBuildLoc;
+  if ($location =~ /custom/) {
+    my @tokens = split(/\//, $location);
+    $location = $tokens[0];
+  }
+
+  # update_lc_complink -t 14.1.<x> -c etreetest3 -s $tgtBuildLoc -O create -g
+  # update_lc_complink -t 14.1.<x> -c etreetest3 -s $tgtBuildLoc -O delete -g
+  my $command = "$BIN/update_lc_complink";
+  $command .= " -t $tgtTk";
+  $command .= " -c $component";
+  $command .= " -s $location";
+  $command .= " -O create";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to create symlink from $tgtBuildLoc/$component/14.1 ";
+    print " to tk$tgtTk/$component/14.1\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetLatestRevision_alt($loc, $branch)
+# Purpose: Retrieve latest revision for component in $loc or branch
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub GetLatestRevision_alt {
+
+  my ($loc, $branch) = @_;
+
+  my $revision = "";
+  my $rc = $ERROR;
+
+  # Get the revision from the SVN repos
+  if (($branch ne "") && ($loc ne "prod")) {
+    $rc = SVNutils::GetLastRevision($component, $branch, \$revision);
+
+  }
+  # Get the revision from the database repos
+  else {
+    my $command = "$BIN/getRevisionsTk";
+    $command .= " -t $srcTk";
+    $command .= " -c $component";
+    $command .= " -l $loc";
+    $command .= " -latest";
+    $command .= " $dbMode";
+
+    # Run the command
+    my @results;
+    $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+    $revision = $results[0];
+    chomp $revision;
+
+  }
+
+  return ($rc, $revision);
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : GetLatestRevision_SVN($loc, $branch, $tk)
+# Purpose: Retrieve latest revision for component in $loc or branch
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub GetLatestRevision_SVN {
+
+  my ($loc, $branch, $tk) = @_;
+
+  my $revision = "";
+  my $rc = $ERROR;
+
+  # Get the revision from the SVN repos
+  if (($branch ne "") && ($loc ne "prod")) {
+    $rc = SVNutils::GetLastRevision($component, $branch, \$revision);
+  }
+  # Get the revision from the database repos
+  else {
+    my $command = "$BIN/getRevisionsTk";
+    $command .= " -t $tk";
+    $command .= " -c $component";
+    $command .= " -l $loc";
+    $command .= " -latest";
+    $command .= " $dbMode";
+
+    # Run the command
+    my @results;
+    $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+    $revision = $results[0];
+    chomp $revision;
+
+  }
+
+  return ($rc, $revision);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetLatestRevision_DB($loc, $tk)
+# Purpose: Retrieve latest revision for component in $loc
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub GetLatestRevision_DB  {
+
+  my ($loc, $tk) = @_;
+  my $rc = 0;
+
+  # Construct the command
+  my $command = "$BIN/getRevisionsTk";
+  $command .= " -t $tk";
+  $command .= " -c $component";
+  $command .= " -l $loc";
+  $command .= " -latest";
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my @results;
+  $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if (($rc > 0) || ($results[0] =~ /No/)) {
+    print "ERROR: Unable to determine latest revision for $loc";
+    print "$tgtShipLoc\n";
+    print @results;
+    $rc = $ERROR;
+  }
+
+  my $revision = $results[0];
+  chomp($revision);
+
+  return ($rc, $revision);
+
+}
+
+
+
+#------------------------------------------------------------------------------
+# Name   : AdvanceBuild2Ship()
+# Purpose: Advance from $tgtBuildLoc to $tgtShipLoc
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub AdvanceBuild2Ship {
+
+  print "Advancing $component from $tgtBuildLoc to $tgtShipLoc\n";
+
+  # Construct the command
+  my $command = "$BIN/svnAdvance";
+  $command .= " -r $component.$selfStoreRls";
+  $command .= " -s $tgtBuildLoc";
+  $command .= " -d $tgtShipLoc";
+
+  # For dryrun, disable the use of svnLog in svnAdvance to log events in CM DB
+  $command .= " -z" if ($dryRun);
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to advance $component from $tgtBuildLoc to ";
+    print "$tgtShipLoc.\n";
+    print @results;
+    return $ERROR;
+  }
+
+  # Set the revision and log the advance event for tgtBuildLoc
+  my ($rc2, $rev) =  GetLatestRevision_DB($srcBuildLoc, $srcTk);
+  print "Setting revision in $tgtShipLoc to $rev\n";
+  $command = "$BIN/compUp.add ";
+  $command .= " -t $tgtTk";
+  $command .= " -srctk $srcTk";
+  $command .= " -c $component";
+  $command .= " -l $tgtShipLoc";
+  $command .= " -r $rev";
+
+  if (TKutils::RunCommand($command, \@results, $dryRun, $verbose) > 0) {
+    print "ERROR: Unable to set the revision for $tgtBuildLoc\n";
+    print @results;
+    return $ERROR;
+  }
+
+  # Verify revisions in $tgtShipLoc match $tgtBuildLoc
+  if (CheckRevisions($tgtShipLoc, "", $tgtTk, $tgtBuildLoc, "", $tgtTk) != $OK) {
+    return $ERROR;
+  }
+
+  # Create .ship* directories for transmittal window
+  SetupXmitDirs();
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : BomChecker()
+# Purpose: Compare Bill of Materials between $tgtShipLoc and tk levels
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub BomChecker {
+
+  print "Executing BOM comparison between $component in $srcShipLoc and ";
+  print "$tgtShipLoc (previous Tool Kit)\n";
+
+  # Construct the command
+  my $command = "$BIN/bomChecker";
+  $command .= " -c $component";
+  if ($tgtShipLoc ne "ship") {
+    $command = "$BIN/bomChecker.exact";
+    if ($srcTk ne "14.1.build") {
+      $command .= " -src $srcTk";
+    }
+    else {
+      $command .= " -src 14.1.10"; # This is the TK in prod during 14.1.8e
+      $command .= " -ignoreTgtAdds";
+    }
+    $command .= " -tgt $tgtTk";
+    $command .= " -c $component";
+  }
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "Differences were found\n";
+    print @results;
+    $rc = $ERROR if ($tgtShipLoc ne "ship");
+  }
+
+  if ($ignoreBom) {
+    print "At user's request ignoring BOM differences\n";
+    return $OK;
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetupLogging($component, $logDir)
+# Purpose: Enable logging
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SetupLogging {
+
+  my ($comp, $logDir) = @_;
+
+  # Create $logDir if it does not already exist
+  mkpath($logDir) if (! -d $logDir);
+
+  # Open log file for script messages
+  chomp(my $logDate = `date +%C%y%m%d\_%H%M%S`);
+  $logFile = "$logDir/$appName" . "_" . $comp . "_" . $logDate . ".log";
+  print "Log: $logFile\n" if ($verbose);
+
+  # Open a filehandle for a log file only
+  if (! open (STDOUT, "| tee -a $logFile")) {
+    print "ERROR: unable to open log file $logFile  $!\n";
+    return $ERROR;
+  }
+
+  chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  chomp(my $machine = `hostname`);
+  print "\n$dateTime on $machine invoked $appName $cmdLineArgs\n\n";
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : TurnOffChgMgmt($toolKit, $component, $tgtBranch)
+# Purpose: Turn off Change Management if it is already on (it should be).
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub TurnOffChgMgmt {
+
+  my ($tk, $comp, $tgtBranch) = @_;
+
+  # Turn off Change Management if it's on
+  return $OK if (! IsChgMgmtOn($comp, $tgtBranch));
+
+  my $command = "$BIN/branchDelete";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " -b $tgtBranch";
+  $command .= " $dbMode";
+  $command .= " 2>&1";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to turn off Change Management for $component in ";
+    print "toolkit $tk\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : TurnOnChgMgmt($toolKit, $component, $tgtBranch, $dbMode)
+# Purpose: Turn on Change Management.
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub TurnOnChgMgmt {
+
+  my ($tk, $comp, $tgtBranch, $db) = @_;
+
+  # Add the new branch to turn on CM
+  BranchAdd($tk, $comp, $tgtBranch);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : BranchAdd($toolKit, $component, $tgtBranch)
+# Purpose: Add/register a new branch in the DB.
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub BranchAdd {
+
+  my ($tk, $comp, $tgtBranch) = @_;
+  print "Adding branch($tgtBranch) to $tk $component\n";
+
+  my $tgtBranchPresent = BranchCheck($comp, $tgtBranch);
+  if ($tgtBranchPresent) {
+    print " -> branch already exists\n";
+    return $OK;
+  }
+
+
+  # Construct the command
+  my $command = "$BIN/branchAdd";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " -b $tgtBranch";
+  $command .= " $dbMode";
+  $command .= " 2>&1";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to add $tgtBranch to $tk $comp in DB";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateUpdateFile()
+# Purpose: Create .update file
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub CreateUpdateFile {
+
+  print "Updating contents of the .update file (for CNYA use)\n";
+
+  # Construct the command
+  chomp(my $timedate = `(date +"%D %H:%M")`);
+  my $command = "echo";
+  $command .= " \"$component.$selfStoreRls $timedate advance\"";
+  $command .= " > /afs/eda/$tgtBranch/$component/$release/.update";
+  $command .= " 2>&1";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to create or update .update file\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetStageName($component, $tk)
+# Purpose: Update TK component stage based on the tool kit
+# RCs    : 0 = OK
+#          otherwise ERROR
+#------------------------------------------------------------------------------
+sub SetStageName {
+
+  my ($component, $tk) = @_;
+
+  print "Updating stage or TK $tk $component stage ...\n";
+
+  # Determine the new stage name based on the TK
+  my $stage = "";
+  TKutils::GetTkStage($tk, \$stage);
+
+  # Construct the command
+  my $command = "$BIN/updateTkComp";
+  $command .= " -t $tk";
+  $command .= " -s $stage";
+  $command .= " -c $component";
+  $command .= " $dbMode";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to update TK $tk $component to $stage in DB";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : BranchCheck($component, $branch)
+# Purpose: Determine if a branch for this component already exists with
+#          the tk14.1.n name.
+# RCs    : 0 = branch is off
+#          1 = branch is on
+#------------------------------------------------------------------------------
+sub BranchCheck {
+
+  my ($comp, $branch) = @_;
+
+  # Construct the command
+  my $command = "$BIN/branchCheck";
+  $command .= " -c $comp";
+  $command .= " -b $branch";
+  $command .= " $dbMode";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+  my $present = $results[0];
+  chomp $present if (! $dryRun);
+
+  return $present;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateBranch()
+# Purpose: Update the branch name for this component from trunk to tk14.1.n
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub UpdateBranch {
+
+  print "Updating TK $srcTk $component branch name from \"$srcBranch\" to ";
+  print "\"$tgtBranch\" in DB\n";
+
+  # Determine if this component's branch already exists in the target tk
+  my $tgtBranchPresent = BranchCheck($component, $tgtBranch);
+  return $OK if ($tgtBranchPresent);
+
+  # Construct the command
+  my $command = "$BIN/branchUpdate";
+  $command .= " -t $srcTk";
+  $command .= " -c $component";
+  $command .= " -b $srcBranch";
+  $command .= " -n $tgtBranch";
+  $command .= " $dbMode";
+  $command .= " 2>&1";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to update TK $srcTk $component branch name ";
+    print "from \"$srcBranch\" to \"$tgtBranch\" in CM DB\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateTimeStamps()
+# Purpose: Update the file timestamps in tk14.1.n to match prod.
+#          Files and directories are updated, but not symlinks.
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub UpdateTimeStamps {
+
+  my $command = "";
+
+  my $tgtLoc = $tgtBuildLoc;
+  if ($tgtBuildLoc =~ /xtinct|custom/) {
+    my @tokens = split(/\//, $tgtBuildLoc);
+    $tgtLoc = pop(@tokens);
+  }
+
+  my $refTree = "/afs/eda/$srcBuildLoc/$component/$release";
+  my $tgtTree = "/afs/eda/$tgtLoc/$component/$release";
+
+  print "Updating timestamps under $tgtTree directory to match " .
+    "timestamps in $refTree\n";
+
+  # Verify reference and target trees exist. Need to end up with $reftree as
+  #   the current directory for the find command below.
+  if (! chdir("$tgtTree")) {
+    print "ERROR: unable to cd to $tgtTree  $!\n";
+    return $ERROR;
+  }
+  if (! chdir("$refTree")) {
+    print "ERROR: unable to cd to $refTree  $!\n";
+    return $ERROR;
+  }
+
+  # Construct the commands used to update the file timestamps.
+  #
+  # The touch -r option replicates the times found on files and directories in
+  #   $refTree to the matching file in $tgtTree.
+  # The touch -c option avoids the creation of empty files that do not already
+  #   exist in $tgtTree.
+  # Double quotes around {} are required to handle spaces in file names.
+  # Symlinks are ignored (! -type l).
+  $command = "find . ! -type l | ";
+  $command .= "xargs -i sh -c \"touch -r \\\"{}\\\" -c \\\"$tgtTree/{}\\\"\"";
+  $command .= " 2>&1";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to update timestamps below ";
+    print "$tgtTree directory to match timestamps in $refTree\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : DeleteSvnBranch()
+# Purpose: Delete component branch in SVN
+# RCs    : 0 = OK
+#          8 = 
+#------------------------------------------------------------------------------
+sub DeleteSvnBranch {
+
+  my $msg = "Deleting CTK branch prior to rerun of testing";
+  my $rc = SVNutils::DeleteTkBranch($component, $tgtBranch, $msg,
+				    $dryRun, $verbose);
+
+  if ($rc != $OK) {
+    print "ERROR: Unable to delete the old component branch in SVN\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LocationLockMgr($location, $lockAction)
+# Purpose: Lock/unlock specified location AFS directory
+#          (change ACLs and set/remove lock file)
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub LocationLockMgr {
+
+  my ($loc, $action) = @_;
+
+  if ($noLocking) {
+    print "WARNING: user disabled source location locking/unlocking\n";
+    return $OK;
+  }
+
+  # Don't attempt to lock location if a lock file already exists.
+  # Attempting to lock when already locked results in an error from
+  # the LocationLockMgr script.
+  my $lockFile = "/afs/eda/$loc/$component/$release/.lock_compLockMgr";
+  return $OK if (($action eq $LOCK) && (-e $lockFile));
+
+  print "Initiating $action of $loc\n";
+
+  # Construct the command
+  my $command = "$BIN/compLockMgr";
+  $command .= " -r $release";
+  $command .= " -c $component";
+  $command .= " -level $loc";
+  $command .= " -$action";
+  $command .= " 2>&1";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to $action $loc directory\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetupXmitDirs()
+# Purpose: Create .ship* dirs for transmittal window
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SetupXmitDirs {
+
+  # Construct the command that creates the .ship* dirs that provide a 
+  # transmittal window
+  my $command = "$BIN/setup_xmit_dirs";
+  $command .= " -t $tgtTk";
+  $command .= " -c $component";
+  $command .= " -x $tgtShipLoc";
+  $command .= " -i $srcShipLoc";
+  $command .= " 2>&1";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to create .ship* dirs for transmittal window\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : IsDelivered()
+# Purpose: Determine if this component should be advanced to $tgtShipLoc
+# RCs    : 1 = delivered
+#          0 = not delivered
+#------------------------------------------------------------------------------
+sub IsDelivered {
+
+  # Construct a list of delivered components
+  my @delComps = TKutils::GetComponents($srcTk, "", "DELIVERED,TEST_SUPPORT");
+
+  my $rc = 0;
+  $rc = 1 if (grep(/^$component$/, @delComps));
+
+  print "Is delivered: $rc\n" if ($verbose);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SyncPermissions()
+# Purpose: Synchronize AFS ACLs beneath target level/component/release
+#          directory to match AFS ACLs for equivalent subdirectories under a
+#          reference level/component/release directory.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SyncPermissions {
+
+  my ($reflevel, $tgtlevel) = @_;
+
+  # Construct the command that synchronizes $tgtBuildLoc permissions to match 
+  # $srcNuildLoc permissions
+  my $command = "$BIN/fixPerms";
+  $command .= " -reflevel $reflevel";
+  $command .= " -tgtlevel $tgtlevel";
+  $command .= " -c $component";
+  $command .= " -r $release";
+  $command .= " 2>&1";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to complete synchronization of $tgtlevel permissions";
+    print "       to match $reflevel permissions\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ChgProdLinks()
+# Purpose: Find symlinks that point to $tgtBuildLoc/tools/14.1 and convert to
+#          point to ../tools/14.1
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub ChgProdLinks {
+
+  # Construct the command that fixes $tgtBuildLoc/tools/14.1 synlinks
+  my $command = "$BIN/chgProdLinks";
+  $command .= " -t $tgtTk";
+  $command .= " -l tk$tgtTk";
+  $command .= " -c $component";
+  if ($srcBuildLoc !~ /customtk/) {
+    $command .= " -r $srcBuildLoc";
+  }
+  else {
+    $command .= " -r tk$srcTk";
+  }
+  $command .= " 2>&1";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to fix $srcBuildLoc/tools/14.1 synlinks\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ChgIncludeLinks()
+# Purpose: Selectively replace symlinks with files for include and private
+#          directories if object is a file in prod location.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub ChgIncludeLinks {
+
+  # Construct the command
+  my $command = "$BIN/chgIncludeLinks";
+  $command .= " -t $tgtTk";
+  $command .= " -c $component";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Bad return code from chgIncludeLinks\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CheckRevisions($loc1, $branch1, $tk1, $loc2, $branch2, $tk2)
+# Purpose: Verifies the latest revision in $loc1 matches latest revision
+#          in $loc2
+# RCs    : 0 = OK
+#          8 = ERROR (no match)
+#------------------------------------------------------------------------------
+sub CheckRevisions {
+
+  my($loc1, $branch1, $tk1, $loc2, $branch2, $tk2) = @_;
+
+  # Get the latest revision for each location
+  my ($rc1, $rev1) = GetLatestRevision_DB($loc1, $tk1);
+  my ($rc2, $rev2) = GetLatestRevision_DB($loc2, $tk2);
+
+  if (($rc1 != $OK) || ($rc2 != $OK)) {
+    print "ERROR: unable to determine revision for $loc1\n" if ($rc1 != $OK);
+    print "ERROR: unable to determine revision for $loc2\n" if ($rc2 != $OK);
+    return $ERROR;
+  }
+
+  # Retrun error they don't match
+  if (! $dryRun && ($rev1 != $rev2)) {
+    print "ERROR: revisions in $loc1 and $loc2 do not match.\n";
+    print "       $loc1($branch1) revision: $rev1\n";
+    print "       $loc2($branch2) revision: $rev2\n";
+    return $ERROR;
+  }
+
+  print "Revisions match between $loc1 and $loc2\n";
+  print " -> $loc1 revision: $rev1\n";
+  print " -> $loc2 revision: $rev2\n";
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetBranch($tk, $comp, $loc)
+# Purpose: Determine the branch name from the tool kit
+# RCs    : Branch name
+#------------------------------------------------------------------------------
+sub SetBranch {
+
+  my($tk, $comp, $loc, $rev) = @_;
+
+  my $branch = "empty";
+  $loc = "build" if ($loc eq "prod");
+
+  my $wc = "/afs/eda/$loc/$comp/$release";
+  if (! -e $wc) {
+    $branch = "tk$tk"; # new branch name
+  }
+  elsif ($rev eq "") {
+    my $rc = SVNutils::GetBranch($tk, $comp, $loc, \$branch);
+    if ($rc != $OK) {
+      print "WARNING: Unable to query SVN for branch\n";
+      $branch = "tk$tk";
+    }
+  }
+  else {
+    my $rc = SVNutils::GetBranchDb($tk, $comp, $rev, \$branch);
+    if ($rc != $OK) {
+      print "WARNING: Unable to query DB for branch\n";
+      $branch = "tk$tk";
+    }
+  }
+
+  $branch =~ s/branches\///g;
+
+  return $branch;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetLocations($tk, \$refBuildLoc, \$refShipLoc)
+# Purpose: Sets the build and ship locations based on the TK stage
+# RCs    : 0 = OK
+#          8 = ERROR (no match)
+#------------------------------------------------------------------------------
+sub SetLocations {
+
+  my($tk, $refBuildLoc, $refShipLoc) = @_;
+
+  # Get the TK's stage
+  my $stage = "";
+  TKutils::GetTkStage($tk, \$stage);
+  print "Stage: $stage for $tk\n" if ($verbose);
+
+  # If development then build = prod and ship = tk
+  # if preview then build = shipb and ship = ship
+  # otherwise build = customtkb/tkx.y.z and ship = customtk/tkx.y.z
+  $$refBuildLoc = "prod";
+  $$refShipLoc = "tk";
+  if (lc($stage) eq "preview") {
+    $$refBuildLoc = "shipb";
+    $$refShipLoc = "ship";
+  }
+  elsif (lc($stage) =~ /customtk/) {
+    $$refBuildLoc = "customtkb/tk$tk";
+    $$refShipLoc = "customtk/tk$tk";
+  }
+  elsif (lc($stage) =~ /xtinct/) {
+    $$refBuildLoc = "xtinct/tk$tk";
+    $$refShipLoc = "xtinct/tk$tk";
+  }
+  elsif (lc($stage) eq "production") {
+    $$refBuildLoc = "tkb";
+    $$refShipLoc = "tk";
+  }
+
+  print "Location (build): $$refBuildLoc for $tk\n";
+  print "Location (ship) : $$refShipLoc for $tk\n";
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetEvent($location, $eventType)
+# Purpose: Construct the event name
+# RCs    : event name
+#------------------------------------------------------------------------------
+sub GetEvent {
+
+  my($loc, $type) = @_;
+
+  my $name = "CUSTOMTK_" . uc($type);
+  if (uc($loc) =~ /SHIP/) {
+    $name = "AGTS_" . uc($type);
+  }
+  elsif (uc($loc) =~ /XTINCT/) {
+    $name = "XTINCT_" . uc($type);
+  }
+
+  print "Event: $name for $loc and $type\n" if ($verbose);
+
+  return $name;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetAdavnceEvent($location, )
+# Purpose: Construct the advance event name
+# RCs    : event name
+#------------------------------------------------------------------------------
+sub GetAdvanceEvent {
+
+  my($loc) = @_;
+
+  my $name = "ADVANCED_TO_SHIPB"; # For AGTS
+  if (uc($loc) =~ /XTINCT/) {
+    $name = "ADVANCED_TO_XTINCT";
+  }
+  elsif (uc($loc) =~ /CUSTOM/) {
+    $name = "ADVANCED_TO_CUSTOMTKB";
+  }
+
+  print "Advance Event: $name for $loc\n" if ($verbose);
+
+  return $name;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LogComponentEvent_new($component, $location, $event, $message,
+#          verbose, $dryRun, $tgtTk)
+# Purpose: Log a tool kit/component specific event
+# RCs    : Return code
+#------------------------------------------------------------------------------
+sub LogComponentEvent_new {
+
+  my ($comp, $loc, $event, $message, $verbose, $dryRun, $srcTk, $tgtTk) = @_;
+
+  print " Logging TK/Component event ($event) ...\n" if ($verbose);
+
+  # Construct the command
+  my $EDAINFRA = "/afs/eda/data/edainfra";
+  my $BIN = "$EDAINFRA/tools/enablement/prod/bin";
+  my $SVN_LOG = "$BIN/svnLog";
+  my $command = "$SVN_LOG";
+  $command .= " -t $srcTk";
+  $command .= " -tgttk $tgtTk";
+  $command .= " -c $comp";
+  $command .= " -e $event";
+  $command .= " -l $loc";
+  $command .= " -m \"$message\"" if ($message);
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+  return $rc;
+
+}

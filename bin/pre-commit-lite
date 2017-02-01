@@ -1,0 +1,174 @@
+#!/usr/bin/env tclsh
+
+##################################
+##################################
+# Pre-Commit Hook History
+# yy/mm/dd   author rel  comment
+#=============================================================================================
+# 11/08/08   SET    1.0  initial creation of pre-commit-lite pre-commit hook for non-toolkit tools
+
+set hook_rel 1.0
+
+# keep track of when mail is sent, to reduce number of mail sent for one commit
+set no_mail_sent 1
+
+# if switched on (1), this causes a log file to be written
+set write_log 1
+
+# optimistic setting,  reset if any problems detected
+# some problems allow continued processing, but need a non-zero return at the end for message handling
+set no_msg 1
+
+# Passed parms are the Repository name, and the Transaction number
+set REPOS [ lindex $argv 0 ]
+set TXN   [lindex $argv 1 ]
+
+
+set WHEREDAT  [exec hostname]
+switch -- $WHEREDAT {
+        "bluejiffium.btv.ibm.com" {
+          # it's on the bluejiffium SSL certificate
+           set URLPREFIX "bluejiffium.btv.ibm.com"
+           set primary_server 0
+        }
+        default {
+           # Assume on edasvn machine (aka greenjiffy) the SSL certificate for edasvn is for greenjiffy
+           set URLPREFIX "greenjiffy.fishkill.ibm.com"
+           set primary_server 1
+        }
+}
+
+# Where to find the ETree infrastructure code
+set INFRAPATH "/afs/eda/data/edainfra/tools"
+
+# What to prefix log file names in e-mail with, so that they are clickable URLs
+set LOGURLPREFIX "http://w3.eda.ibm.com"
+
+#####
+##  Using last directory in REPOS as Component Name
+##  2nd to last directory will determine whether this is a Prod or Dev commit
+set repos_split [split $REPOS /]
+set COMPONENT [lindex $repos_split end]
+set STAGE     [lindex $repos_split end-1]
+
+
+
+switch -- $STAGE {
+        "dscrt" {
+          set run_mode PROD
+        }
+        default {
+          # Assume DEVelopment mode (safe) for all other cases
+          set run_mode DEV
+        }
+}
+
+#set run_mode PROD
+#set run_mode MIXED
+#set run_mode DEV
+
+switch -- $run_mode {
+        "PROD" {
+           set cmd_path  "$INFRAPATH/enablement/prod/bin"
+           set hookextension_path  "$INFRAPATH/pttools/prod/hue/$COMPONENT/"
+           set db_mode PROD
+           set logdir "$INFRAPATH/user/logs"
+        }
+        "MIXED" {
+           # Run production level command scripts, but direct updates to DEV db2 database
+           set cmd_path  "$INFRAPATH/enablement/prod/bin"
+           set hookextension_path  "$INFRAPATH/pttools/dev/hue/$COMPONENT/"
+           set db_mode DEV
+           set logdir "$INFRAPATH/user/logs/dev"
+        }
+        default {
+          # Assume DEVelopment mode (safe) for all other cases
+           set cmd_path  "$INFRAPATH/enablement/dev/bin"
+           set hookextension_path  "$INFRAPATH/pttools/dev/hue/$COMPONENT/"
+           set db_mode DEV
+           set logdir "$INFRAPATH/user/logs/dev"
+        }
+} ; # end of run_mode switches
+
+if { $primary_server } {
+  # a "G" prefix on the db_mode switch to the DB2 API
+  set db_mode "G$db_mode"
+} else {
+  # On alternate server, a "B" prefix on the db_mode switch to the DB2 API
+  set db_mode "B$db_mode"
+}
+
+
+set file "$logdir/pre_commit_lite_[clock format [clock seconds] -format %Y%m%d.%H%M%S]"
+set logfile $file\_log
+if { $write_log } {
+  if { [catch {open $logfile w 0755} logfile_fid] } {
+      if { [ catch {exec echo "Unable to create/write $logfile" | mail -s "SVN $db_mode Hook Pre-Commit-Lite Logfile Error Detected" sturnbul@us.ibm.com } sm_result] } {
+      }
+      set write_log 0
+   }
+}
+
+if { $write_log } {
+  puts $logfile_fid "Pre-commit SVN Hook processing log"
+  puts $logfile_fid "REPOS: $REPOS"
+  puts $logfile_fid "Running on $WHEREDAT"
+  puts $logfile_fid "Run Mode set as $run_mode"
+}
+
+###############
+##
+## Component Specific Early Hook Extension Support
+##
+##
+###############
+if { [ file exists $hookextension_path/pre-commit-early ] } {
+   if { $write_log } {
+     puts $logfile_fid "Early Hook Extension: $hookextension_path/pre-commit-early"
+   }
+   if { [catch {exec $hookextension_path/pre-commit-early $REPOS $TXN 2>@1 }  ext_out] } {
+     puts stderr "Pre-Commit Early Extension for $COMPONENT returned the following message."
+     puts stderr $ext_out
+     if { $write_log } {
+       puts $logfile_fid "Pre-Commit Early Extension for $COMPONENT returned the following message."
+       puts $logfile_fid $ext_out
+     }
+     set no_msg 0
+   }
+}
+###############
+## End of Component Specific Early Hook Extension Support
+###############
+
+
+###############
+##
+## Component Specific Late Hook Extension Support
+##
+##
+###############
+if { [ file exists $hookextension_path/pre-commit-late ] } {
+   if { $write_log } {
+     puts $logfile_fid "Late Hook Extension: $hookextension_path/pre-commit-late"
+   }
+   if { [catch {exec $hookextension_path/pre-commit-late $REPOS $TXN 2>@1 }  ext_out] } {
+     puts stderr "Pre-Commit Late Extension for $COMPONENT returned the following message."
+     puts stderr $ext_out
+     if { $write_log } {
+       puts $logfile_fid "Pre-Commit Late Extension for $COMPONENT returned the following message."
+       puts $logfile_fid $ext_out
+     }
+     set no_msg 0
+   }
+}
+###############
+## End of Component Specific Late Hook Extension Support
+###############
+
+if { $write_log } { close $logfile_fid }
+if { $no_msg } {
+  exit 0
+} else {
+  exit 1
+}
+

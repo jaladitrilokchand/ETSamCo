@@ -1,0 +1,386 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: findMissingStates
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 09/16/2010 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+#
+# Global variables
+#
+
+# Program name
+my $appName = "findMissingStates";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $release    = "";
+my $component  = 0;
+my %revStates;
+my $verbose    = 0;
+my $help       = "";
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+
+#-----------------------------------------------------------------------------
+#                 M A I N   P R O G R A M
+#-----------------------------------------------------------------------------
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    #printSyntax();
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+#
+# Define custom perl libs path and modules
+#
+use lib '/afs/btv/data/edainfra/tools/enablement/prod/libperl';
+use IcofFile;
+
+
+#
+# Display initial information.
+#
+print "\n";
+print "Program:   $appName\n";
+print "Release:   $release\n";
+print "Component: $component\n";
+
+
+#
+# Determine the latest revision in build, dev and prod by reading the 
+# LEVELHIST files.
+#
+my $afsRevBuild = GetLatestRevFromAfs("build");
+my $afsRevDev = GetLatestRevFromAfs("dev");
+my $afsRevProd = GetLatestRevFromAfs("prod");
+
+print "\n";
+print "Latest revision for BUILD is $afsRevBuild\n";
+print "Latest revision for DEV is $afsRevDev\n";
+print "Latest revision for PROD is $afsRevProd\n";
+print "\n";
+
+
+#
+# Read all Functional Updates for this release and component from the ETREE
+# database.  Create a hash of revisions and states.
+#
+GetUpdatesFromDb($release, $component);
+
+
+#
+# Cycle through all the revStates (read from DB) and flag any in the 
+# incorrect state.
+#
+# All revisions <= afsRevBuild revision should BUILT, DEV_OK or PROD_OK
+# All revisions <= afsRevDev revision should BUILT, DEV_OK
+# All revisions <= afsRevProd revision should PROD_OK
+#
+my @badRevisions = ();
+my $revision = 0;
+foreach $revision (sort(keys(%revStates))) {
+  #print "State of revision $revision is ($revStates{$revision})\n";
+
+  my $myState = $revStates{$revision};
+  if ($revision <= $afsRevProd) {
+    if ($myState ne "PROD_OK") {
+      push(@badRevisions, "Revision $revision shound be PROD_OK ($myState)");
+    }
+  }
+  elsif ($revision <= $afsRevDev) {
+    if ($myState ne "DEV_OK") {
+      push(@badRevisions, "Revision $revision shound be DEV_OK ($myState)");
+    }
+  }
+  elsif ($revision <= $afsRevBuild) {
+    if ($myState ne "BUILT") {
+      push(@badRevisions, "Revision $revision shound be BUILT ($myState)");
+    }
+  }
+  else {
+    if ($myState !~ /COMMIT/) {
+      push(@badRevisions, "Revision $revision shound be COMMIT* ($myState)");
+    }
+  }
+
+}
+
+
+# Dump the bad log file to the screen
+if (scalar(@badRevisions) > 0) {
+  print "Revisions with incorrect state\n";
+  print "-------------------------------\n";
+  print join("\n", (sort(@badRevisions)));
+  print "\n";
+  print "\n";
+  print "Found " . scalar(@badRevisions) . " revision in the incorrect state\n";
+}
+else {
+  print "All revisions appear to be in the correct state\n";
+}
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+# ------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub handleInterruption {
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+}  # End of handleInterruption
+
+
+# ------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub handleDIE {
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+}  # End of handleDIE
+
+
+# ------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Compares the CodeUpdate states against the LEVELHIST entries to ensure the
+states were updated correctly by the svnAdvance commands.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-r release> <-c component> [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  -r ToolKit release [like 14.1 14.2 ...].
+  -c ToolKit component name (like einstimer, model ...)
+  -h (optional) Application help
+  -y (optional) Verbose mode 
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}       # End of printHelp
+
+
+# ------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+# ------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('rel|r=s'      => \$release,
+              'comp|c=s'     => \$component,
+              'verbose|y'    => \$verbose,
+              'help|h|?'     => \$help
+	      ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the release and component
+  my $msg = "";
+  if (! $release) {
+    $msg .= "The ToolKit release (-r) must be specified.";
+  }
+  if (! $component) {
+    $msg .= "The ToolKit component (-c) must be specified.";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : GetLatestRevFromAfs
+# Purpose: Read the highest SVN revision from the LEVELHIST file
+# RCs    : 0 = OK
+#          8 = ERROR
+# ------------------------------------------------------------------------------
+sub GetLatestRevFromAfs {
+
+  my ($location) = @_;
+
+  # Read the LEVELHIST file
+  my $lhFile = "/afs/eda/$location/$component/$release/LEVELHIST";
+  my @contents = ();
+  if (! IcofFile::ReadFileToList($lhFile, \@contents, 0)) {
+    print "WARNING: unable to read the LEVELHIST file contents\n";
+    print "         File: $lhFile\n";
+    return $ERROR;
+  }
+
+  # Parse the LEVELHIST file contents looking for the highest SVN revision.
+  my $found = 0;
+  my $latestRev = 0;
+  foreach $entry (@contents)  {
+    if ($entry =~ /DB_ID/) {
+      $found = 1;
+      next;
+    }
+    next if (! $found);
+
+    # Look for a blank line which denotes this revision is complete
+    if ($entry !~ /^\d+/) {
+      $found = 0;
+      next;
+    }
+
+    @tokens = split(/  /, $entry);
+    my $revision = $tokens[0];
+
+    # There are a couple odd entries (1758 and 1761) which need investigating
+    if ($revision < 1758) {
+      $latestRev = $revision if ($revision > $latestRev);
+    }
+
+
+  }
+
+  return $latestRev;
+
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : GetUpdatesFromDb
+# Purpose: Create a hash of revisions and current states from the ETREE database
+# RCs    : 0 = OK
+#          8 = ERROR
+# ------------------------------------------------------------------------------
+sub GetUpdatesFromDb {
+
+  # Query ETREE database for all updates for this release and component.
+  my $command = "/afs/btv/data/edainfra/tools/enablement/prod/bin/showFuncUpdates -r $release -c $component -a";
+  #print "Running command: $command\n";
+  my @results = `$command`;
+
+  #print "Found " . scalar(@results) . " results ...\n";
+
+  # Parse the results.
+  # Looking for these entries in the output.
+  #  SVN Revision: 9
+  #  Current State: DEV_OK
+  my $found = 0;
+  my $revision = 0;
+  my $state = "";
+  foreach $entry (@results)  {
+    chomp($entry);
+    #print "Entry: $entry\n";
+
+    if ($entry =~ /SVN Revision/) {
+      @tokens = split(/: /, $entry);
+      $revision = $tokens[1];
+      #print "Found REVISION $revision\n";
+      $found = 1;
+      next;
+    }
+
+    next if (! $found);
+
+    if ($entry =~ /Current State/) {
+      @tokens = split(/: /, $entry);
+      $state = $tokens[1];
+      #print "Found STATE $state\n\n";
+      $revStates{$revision} = $state;
+      $found = 0;
+    }
+
+  }
+
+}
+
+

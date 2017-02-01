@@ -1,0 +1,452 @@
+#!/usr/bin/env perl
+#use warnings;
+#use strict;
+#=============================================================================
+#    FILE: set_tkver_acls
+#
+#    DEPT: AZYX
+#    DATE: 12/05/2011
+#
+# OUTPUTS:
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# Create the AFS ACLs in a TK Version Tree from the EDA PROD definition contained 
+# in a given component/release tree (/afs/eda/tk14.1.{n}/{component}/14.1
+#
+#-NOTES---------------------------------------------------------------------
+# (1) Reads the .aclFile, located in the component/release treetop in EDA PROD, 
+#     to get the ACL definition.
+# (2) The .aclFile is created whenever prodLockMgr is run.
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 12/19/11 AM  Initial version
+#=============================================================================
+#=============================================================================
+#                              FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub help {
+  print "\nHELP:\nScript to create component/release tree AFS ACLs from EDA PROD definition.\n";
+	print " (/afs/eda/prod/{component}/14.1)\n";
+	print "\nUsage: set_tkver_acls -t <Toolkit version> -c <component> [-g] [-h]\n";
+	print "\nInput parameters:\n";
+	print "  -t <EDA Toolkit release version> e.g. 14.1.{n}\n";
+	print "  -c <component_name>\n";
+	print "  -g [Debug mode ON - no execution of data updates - will see what would execute]\n";
+	print "  -h This help\n";
+	print "\nNOTES:\n";
+	print "  1) The EDA Toolkit version and component name is required.\n";
+	print "\n";
+	exit 1;
+} # end help
+
+sub process_cmd_line {	
+  # --------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+  # Parms defined:  -c <component_name>
+  #                 -g [Debug mode ON - no execution of data updates - will see what would execute.]
+  #                 -h [help]
+  #                 -t <Toolkit version>    e.g. 14.1.0
+  # -------------------------------------------------------------- 
+	getopts('c:ght:');
+
+  $compName  = "$opt_c";
+  $tkVersion = "$opt_t";
+
+	# Set DEBUG mode
+	if ($opt_g) {
+		$DEBUG = 1;
+	}
+	else {
+		$DEBUG = 0;
+	}
+	
+	if ( ${opt_h} ) { help(); }
+
+} # end process_cmd_line
+
+sub display_script_parms {
+	#
+	# Display the input parameters entered on the command line
+	#
+	my ($compName, $tkVersion) = @_;
+	
+	print "------------------------------------------------------ \n";
+	print " Parms Read By Program:        \n";
+	print " $fullScrName \n";
+	print "------------------------------------------------------ \n";
+	print "TK Version     = \"$tkVersion\"\n";
+	print "Component name = \"$compName\" \n";
+	if ($opt_g) { print "DEBUG Mode     = \"ON\" \n"; }
+	else { print "DEBUG Mode     = \"OFF\" \n"; }
+	print "------------------------------------------------------ \n\n";
+} # end display_script_parms
+
+sub max_rc {
+	#
+	# return the rolling maximum return code
+	#
+	my ($rc, $maxrc) = @_;
+	
+	if ($rc > $maxrc) {
+		$maxrc = $rc;
+	}
+	return ($maxrc);
+} # end max_rc
+
+sub check_userID {
+	#
+	# AFS ID svnlib must be used to execute this script
+	#
+	my ($userID, $debug, @authID) = @_;
+  my ($found) = 1;
+	
+	foreach $id (@authID) {
+		if ($debug) {
+			print "userID: \"$userID\"  authID: \"$id\"\n";
+		}
+		if ( $userID eq $id ) {
+			$found = 0;
+			last;
+		}
+	}
+  return ($found);
+} # end check_userID
+
+sub create_timestamp {
+	#
+	# Get date and time info from system
+	#
+	
+	@months = qw(jan feb mar apr may jun jul aug sep oct nov dec);
+	
+  ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+	
+  $year = $year + 1900;
+	
+	$month = $mon + 1;
+  $monthName = $months[$mon];
+	$monthDay = $monthName . $mday;
+	
+  $date_now = $month . "/" . $mday . "/" . $year;
+	
+  if ($min < 10) {
+    $newmin = "0" . $min;
+  }
+  else {
+    $newmin = $min;
+  }
+  $time_now = $hour . ":" . $newmin;	
+} # end create_timestamp
+
+sub trimStr {
+	my ($string) = @_;
+	$string =~ s/^\s+//;
+	$string =~ s/\s+$//;
+	return ($string);
+} # end trimStr
+
+sub read_ACL_from_file {
+#
+# Get the list of AFS access permissions from the hidden file in EDA PROD
+#
+	my ($aclPath, $debug) = @_;
+	my $rc = 0;
+	my %aclFileData = ();
+	my $subName = "read_ACL_from_file";
+	my $aclCnt = 0;
+	my $totalCnt = 0;
+
+  my $aclFile = "$aclPath/.aclFile";
+
+	# Read AFS ACLs at aclPath
+	chdir ($aclPath) or die "[$subName ERROR]: Can't change directory to $aclPath.\n";
+	
+	# Open hidden file to read the ACL info
+	unless (open(ACLFILE, "$aclFile")) {
+		die ("Input file $aclFile cannot be opened.\n");
+	}
+	
+	@aclList = <ACLFILE>;
+	close (ACLFILE);
+	
+	# Process each AFS ACL entry
+	foreach $item (@aclList) {
+		chomp ($item);
+		$aclEntry = trimStr ($item);
+		if ($debug) {
+			print "\n[$subName] Original ACL entry: $aclEntry\n";
+		}
+		# These are the AFS ACL entries we want
+		$aclCnt++;
+		$totalCnt++;
+		if ($debug) {
+			print "[$subName] ACL entry, $aclEntry, will be processed.\n";
+		}
+		
+		# Build a hash containing the ACL name and the access value
+		($aclName, $aclAccess) = split (" ", $aclEntry);
+		if ($debug) {
+			print "[$subName] aclName: \"$aclName\"   aclAccess: \"$aclAccess\"\n\n";
+		}
+		$aclFileData{$aclName} = $aclAccess;
+	}
+	
+	if ($debug) {
+		print "[$subName] *** There were $aclCnt out of $totalCnt ACL entries to be processed.\n\n";
+	}
+
+	# Send back the ACL entries to be processed.
+	return (%aclFileData);
+	
+} # end read_ACL_from_file
+
+sub write_ACL {
+	#
+	# Apply the filtered list of ACLs and their access permissions to a particular directory
+	#
+	my ($aclPath, $debug, %aclData) = @_;
+	my $rc = 0;
+	my $subName = "write_ACL";
+	my ($aclName, $aclAccess);
+	my $aclCnt = 0;
+	my $saCmd = "";
+
+	chdir ($aclPath) or die "[$subName ERROR]: Can't change directory to $aclPath.\n";
+	
+	# Assign the ACLs to $aclPath recursively.
+	print "\n[$subName] These ACLs will be assigned to $aclPath:\n";
+	while (($aclName, $aclAccess) = each (%aclData)) {
+
+		# Filter the svnlib and system AFS ACLs by name.
+		if ($aclName =~ /^svnlib/) {
+			print "[$subName] Filtered out \"$aclName\"\n";
+			next;
+		} elsif ($aclName =~ /^amagnan$/) {
+			print "[$subName] Filtered out \"$aclName\"\n";
+			next;
+		} elsif ($aclName =~ /^system:administrators$/) {
+			print "[$subName] Filtered out \"$aclName\"\n";
+			next;
+		} elsif ($aclName =~ /^bradmin$/) {
+			print "[$subName] Filtered out \"$aclName\"\n";
+			next;
+		} elsif ($aclName =~ /^system:anyuser$/) {
+			print "[$subName] Filtered out \"$aclName\"\n";
+			next;
+		}
+		else {
+			# Process the ACL into TK Version Tree
+			$aclCnt++;
+			print "\n[$subName] aclName: \"$aclName\"   aclAccess: \"$aclAccess\"\n";
+			$saCmd = "${scriptPath}/set_acl_np . $aclName $aclAccess 2>&1";
+			print "[$subName] saCmd: \"$saCmd\"\n";
+			
+			TkCommon::runcmd ("$saCmd", "$debug");
+			$rc = $? >> 8;
+			if ($rc) {
+				print "[ERROR]: $aclName was NOT changed to access permissions of \"$aclAccess\".\n\n";
+			}
+			else {
+				if ($debug) {
+					print "*** In DEBUG mode: Will not make any changes to ACL at $aclPath.\n\n";
+				}
+				else {
+					print "[INFO]: $aclName changed to access permissions of \"$aclAccess\".\n\n";
+				}
+			}
+		}
+	} # while loop
+	
+	print "\nTotal ACLs processed: $aclCnt\n";
+	return ($rc);
+	
+} # end write_ACL
+
+sub create_tkver_ACL {
+	#
+	# Create the component/release trees in TK Version Tree by reading the
+  # access permissions stored in the .aclFile data in EDA PROD.
+	#
+	my ($prodPath, $treePath, $debug) = @_;
+	my $rc = 0;
+	my $maxRC = 0;
+	my %aclSrcData = ();
+	my $subName = "create_tkver_ACL";
+	my $aclCnt = 0;
+	
+	print "\n[$subName] prodPath: $prodPath\n";
+	print "[$subName] treePath: $treePath\n";
+	print "[$subName] debug: $debug\n\n";
+	
+	# Read the ACLs found in the prodPath
+	%aclSrcData = read_ACL_from_file ($prodPath, $debug);
+	
+	# Print the ACLs that were read
+	print "[$subName] ACLs read from $prodPath are:\n";
+	foreach $item (sort keys %aclSrcData) {
+		$aclCnt++;
+		print "$item\n";
+	}
+	print "[$subName] Total ACLs processed: $aclCnt\n";
+	
+	# Assign the ACLs to treePath
+	$rc = write_ACL ($treePath, $debug, %aclSrcData);
+
+	return ($rc);
+	
+} # end create_tkver_ACL
+
+sub log_execution {
+	#
+	# Define the logging, execution timestamps
+	#
+	my ($when, $compType, $logPath, $logSuffix) = @_;
+	my $tkVer = "";
+	
+	if ($when eq "start") {
+
+    # Convert tkVersion for use in log file name
+    $tkVer = TkCommon::convert_tkVersion ($tkVersion, "selfstore");
+
+		# Set up the log file
+		create_timestamp;
+		$datetime = "$date_now at $time_now";
+
+		$logFile = "${logPath}/logs/${monthName}/${monthDay}.${compType}.${tkVer}.${scriptName}.${logSuffix}";
+		unless (open(STDOUT, "| tee -ai $logFile")) {
+			die ("Output file $logFile cannot be opened.\n");
+		}
+		
+		# Log the start time
+		print ("\n#\n");
+		print ("# $fullScrName started at $datetime by $userID\n");
+		print ("#\n");
+		
+		# Display the command line input parms
+		display_script_parms ($compName, $tkVersion);
+		
+	} elsif ($when eq "end") {
+
+		create_timestamp;
+		$datetime = "$date_now at $time_now";
+		
+		# Log the end time
+		print ("\n#\n");
+		print ("# $fullScrName ended at $datetime by $userID\n");
+		print ("#\n");
+		
+	} else {
+		print "ERROR: log_execution: Can't figure out when I need to log!\n";
+	}
+} # end log_execution
+
+#=============================================================================
+#                                   MAIN ROUTINE
+#=============================================================================
+use Env;
+use File::Basename;
+use Getopt::Std;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+our $rc = 0;
+our $maxRC = 0;
+
+our $opt_c = "";
+our $opt_t = "";
+
+# Command line variables set via subroutine
+our $tkVersion = "";
+our $compName = "";
+our $DEBUG = 0;
+
+our $scriptName = "set_tkver_acls";
+our $fullScrName = $0;
+our $codePath = "/afs/eda/data";
+our $scriptPath = "${codePath}/edainfra/tools/enablement/dev/bin";
+our $logSuffix = "log";
+
+# Only AFS ID svnlib should run this script to update the TK version tree!!!
+our $rlseID = "svnlib";
+our $userID = $LOGNAME;
+my (@authID) = ($rlseID);
+$rc = check_userID ($userID, 0, @authID);
+if ($rc) {
+  print "\nERROR: You MUST run this script as AFS ID \"@authID\" to manage the locks!!!\n\n";
+  exit 8;
+} else {
+	print "\nINFO: Running script using authorized AFS ID.\n\n";
+}
+
+# Get inputs from command line
+process_cmd_line;
+
+# Make sure the required parameters are provided
+if ($tkVersion eq "") {
+  print "\nERROR: Missing Toolkit version.\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+if ($compName eq "") {
+  print "\nERROR: Missing component name.\n";
+  print "       You must specify the EDA TK component name, using the -c switch.\n\n";
+  exit 8;
+}
+
+# Ensure tkVersion is in correct format
+$rc = TkCommon::check_tkVersion ($tkVersion);
+if ($rc != 0) {
+  print "\nERROR: Toolkit version specified in an invalid format!\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+} else {
+	# Define the EDA release
+	$release = TkCommon::convert_tkVersion ($tkVersion, "release");    # Release, e.g. 14.1
+}
+
+# Define the top path information
+$edaTop = "/afs/eda";                          # Top path of EDA
+$prodTop = "${edaTop}/prod";                   # Top path of EDA PROD location
+$tkTreeTop = "${edaTop}/tk${tkVersion}";       # Top path of EDA TK Version Tree location
+$logPath = "/afs/eda/u/svnlib";                # Top path of script logs
+
+# Define the EDA PROD component tree location
+$prodDir = "${prodTop}/${compName}/${release}";
+
+# Define the TK Version component tree location
+$tkTreeDir = "${tkTreeTop}/${compName}/${release}";
+
+#
+# Perform the AFS ACL creation operation
+#
+if (-d $prodDir) {
+  if (-d $tkTreeDir) {
+		# Start the log process
+		log_execution ("start", $compName, $logPath, $logSuffix);
+		
+		# Perform the AFS ACL creation operation
+		print "\n*** Creating AFS ACLS for component \"$compName\" in TK $tkVersion.\n";
+		$rc = create_tkver_ACL ($prodDir, $tkTreeDir, $DEBUG);
+		if ($rc != 0) {
+			print "\n[ERROR]: Failed in AFS ACL creation for component \"$compName\" in TK $tkVersion.\n";
+		}
+	}
+	else {
+		print "\n[ERROR]: Unable to locate Toolkit Version component tree for $compName/$release in TK $tkVersion.\n";
+	}
+}
+else {
+	print "\n[ERROR]: Unable to locate EDA PROD component tree for $compName/$release in TK $tkVersion.\n";
+}
+
+# Tell user where the LOG file is located
+print "\nLOG file located at $logFile.\n\n";
+
+log_execution ("end", "", $logPath, $logSuffix);
+close (STDOUT);
+
+$maxRC = max_rc ($rc, $maxRC);
+exit ($maxRC);

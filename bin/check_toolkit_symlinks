@@ -1,0 +1,239 @@
+#! /bin/sh -
+
+usage()
+{
+  cat <<End_of_Usage
+
+    $progname toolkit_install_dir
+	(use -H for more detailed help)
+
+End_of_Usage
+}
+
+long_usage()
+{
+  cat <<End_of_Long_Usage
+
+    $progname - report symlinks in a toolkit installation 
+                that point somewhere outside the installation 
+                (eg to a previous version of the toolkit).
+ 		'stale' links (links that point to something
+		that no longer exists) are also included in the 
+		report.
+
+                the report is written to standard output.
+
+    USAGE: $progname [OPTIONS] toolkit_install_dir
+
+    OPTIONS:
+
+        -h        - help (synopsis)
+        -H        - help (detailed)
+
+
+End_of_Long_Usage
+}
+
+
+# ----------
+#
+#  Date        Userid    Description
+#  ----        ------    -----------
+#  20Dec12     jvi       Support multi-volume cte toolkit installations
+#  01Dec12     jvi       Initial version
+
+
+# ----------
+# create a regular expression to be used to determine whether a link points
+# outside a toolkit. in most cases the resolved name of the toolkit top will
+# do. to get around a cte limit of 4G per volume, a more complicated toolkit
+# structure exists where the toolkit components are stored in one of several
+# volumes. the main toolkit directory is essentially a directory of links
+# into the different volumes. 
+#
+# for example, the tools/edatools dir in cte contains, among others a toolkit
+# dir named tk14.1.2 and directories called vol1, vol2, and vol3. the toolkit 
+# components in the installation are stored in vol1, vol2, and vol3. the 
+# tk12.1.2 dir is a directory of links pointing into the vol directories.
+# so when a link in the toolkit is encountered, it's resolved name must begin 
+# with either the resolved toolkit name or the resolved name of one of the 
+# vol1, vol2, vol3 directories. this function will create a regexp like
+# 'tools/edatools/(tk14.1.2|vol1|vol2|vol3)'  
+ 
+
+top_regexp() 
+{
+
+  top=$1
+
+
+  # ----------
+  # if the toolkit name does not have a /cte/ qualifier just return the tk name
+  # unchanged
+
+  if [ "$top" = "${top%/cte/*}" ]
+  then
+    printf "%s\n" $top
+    return
+  fi
+
+
+  # ----------
+  # in the current cte structure the toolkit top resolves to a directory of
+  # symlinks to the toolkit components. the links currently begin with 
+  # "../vol<xx>". collect them into a stream to pass to an awk script that
+  # will remove duplicate vol<xx> qualifiers and build the regexp
+
+  {
+
+    for d in `/bin/ls $top`
+    do
+      f=${top}/$d
+      if [ -L "$f" ]
+      then
+	dd=`readlink $f`
+	printf "\t%s\n" $dd
+      fi
+    done
+
+  } | gawk -F/ '
+
+
+
+    # ----------
+    # only use links that begin with "../vol"
+  
+    $1 ~ /\.\.$/ && $2 ~ /^vol/  { ++vols[$2] } 
+
+
+    # ----------
+    # the vol qualifiers have been collected. build the regexp.
+
+    END {
+      vol_cnt = 0
+      for ( v in vols ) {
+        if ( vol_cnt != 0 ) { vol_str = vol_str "|" }
+        vol_str = vol_str v
+        ++vol_cnt
+      }
+
+      # if no vol<xx> qualifiers, return the toolkit top unchanged
+      if ( vol_cnt > 0 ) {
+        match( top, /^\/.*\// )
+  	top_stem = substr( top, RSTART, RLENGTH )
+        top_final_qual = substr( top, RLENGTH + 1 )
+        printf "%s(%s|%s)\n", top_stem, top_final_qual, vol_str
+      } else {
+        print top
+      }
+    }
+
+    ' top="$top" 
+
+}
+
+
+# =============
+# this script is used to report on any symlinks that exist in a toolkit's
+# installation and point somewhere outside of the installation. 'find -type l'
+# is used to locate the links. each link is resolved using gnu 'readlink -e'.
+# if the resolved name does not begin with the name of resolved install dir,
+# add it to the report. 'stale' links (identified by a non-zero rc from 
+# readlink) are also included in the report.
+
+progname=${0##*/}
+
+
+# -------------
+# support help options
+
+while getopts hH var
+do
+  case "$var" in
+    h) usage;      exit ;;
+    H) long_usage; exit ;;
+    *);;
+  esac
+done
+shift $(( $OPTIND - 1 ))
+
+
+# -------------
+# check that a toolkit installation dir was passed 
+
+if [ $# -lt 1 ] 
+then
+  printf "\n    toolkit_install_dir not specified\n"; usage; exit
+fi
+if [ ! -d $1 ] 
+then
+  printf "\n    specified toolkit_install is not a directory\n"; usage; exit
+fi
+
+
+# -------------
+# this script requires gnu readlink (specifically the -e option). linux
+# has it in /usr/bin. aix has it in /opt/xsite... find, printf and awk are
+# also in /usr/bin
+
+PATH=/usr/bin:/opt/xsite/contrib/bin
+
+
+# -------------
+# our linux 4.4 systems include a version of readlink that that does not support
+# the '-e' option but does support '-f'. the descriptions in the helps makes the
+# old '-f' and the new '-e' look the same. use the readlink version to determine
+# which option to use
+
+opt=`readlink --version | awk '/^readlink/ {o = $NF<5.97 ? "f" : "e"; print o }'`
+
+
+# -------------
+# save the passed toolkit name and resolve any symbolic links in its qualifiers
+
+passed_top=$1
+top=`readlink -$opt $passed_top` 
+
+
+# -------------
+# the resolved links below need to begin with the name of the top of the toolkit
+# tree. in some cases that check is simple. other cases (multi volume server
+# installations) are not as simple. build a regexp that will be used to match 
+# resolved link names
+ 
+prefix_regexp=`top_regexp $top` 
+printf "\nPassed toolkit install dir: %s resolves to %s\n\n" $passed_top $prefix_regexp
+
+
+# -------------
+# for each link in the installation, add an entry to a stream of 
+# [link resolved_name] pairs. the stream gets piped to awk which tests that
+# each resolved_name begins with the resolved name of the toolkit install dir.
+# when 'readlink -e' sees a broken link, no output is returned and a non-zero
+# return code is set. in that case use readlink with out the '-e' to get the
+# value of the link without resolving it so that a reasonable error message
+# can be created.
+
+{
+
+  for link in `find $top -type l -print`
+  do
+    file=`readlink -$opt $link`
+    if [ $? -ne 0 ]
+    then
+      file=`readlink $link`
+      printf "Link %s is set to %s which does not exist.\n" $link $file
+    else
+      printf "%s\t%s\n" $link $file
+    fi
+  done
+
+} | awk '
+
+    # the entry for broken links has more than two fields. just print it as is.
+    NF != 2 { print }
+
+    $2 !~ prefix { printf "  Link %s resolves to %s which is not in the toolkit.\n", $1, $2 }
+
+        ' prefix="^$prefix_regexp" 
+

@@ -1,0 +1,10 @@
+#!/usr/bin/env ksh
+MY_BIN="/afs/eda/data/edainfra/tools/enablement/dev/bin"
+MY_SCRIPT="${MY_BIN}/check.findWcs -l ship $@"
+
+# Execute the script
+print "Running .. $MY_SCRIPT"
+$MY_SCRIPT
+
+exit $?
+

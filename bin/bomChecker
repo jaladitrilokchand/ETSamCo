@@ -1,0 +1,641 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: bomChecker
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#    DATE: 04/28/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 04/28/2012 EH  Initial coding.
+# 05/25/2012 EH  Updated output directory and added -O to valid_file() filter.
+# 09/24/2012 EH  Updated for 14.1.2 ship to tk processing
+# 02/04/2013 JVI Updated for 14.1.4 AGTS
+#                Add check for consistency between aix and linux .ship dirs
+# 02/20/2013 JVI Add check of prod to "tk only" checking.
+#                Add -tk and -resultsDir options 
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+# Global variables
+my $BIN        = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $GET_COMP   = "$BIN/getComponents ";
+my $release    = "14.1";
+my $stubDir    = "/afs/eda";
+my $resultsDir = "/afs/eda/data/edainfra/bom/ship2tk_agts";
+
+# Program name
+my $appName = "bomChecker";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $component  = "";
+my $toolKit    = "";  # Only used to determine list of components
+my $help       = "";
+my $msg        = "";
+my $element    = "";
+my %sumShip    = ();
+my %sumTk      = ();
+my %combinedHash = ();
+my @tokens     = ();
+my $exceptionText = "";
+my $exceptionMsg = "";
+my $noResults  = "";
+my $noResultsSuffix = "";
+my $shipPlatDir = "";
+my $differencesFound = 0;
+
+# Reference
+
+# Target for update
+my $outputDir = "";
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+# For now I have copied valid_file() from xmit_common to this script to avoid
+# warning messages when I use the line below. This needs to be revisited.
+#do "/afs/eda/data/edainfra/tools/enablement/prod/bin/xmit_common";
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# Define the current directory
+#
+my $startDir = $ENV{"PWD"};
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+$outputDir = "$resultsDir";
+
+# Create output directory if it does not exist
+if (! -d "$outputDir") {
+  `mkdir -p $outputDir`;
+}
+
+
+# Query the database to create a list of components in this Tool Kit
+my $command;
+my @results;
+my @components = ();
+if ($component) {
+  push(@components, $component);
+}
+else {
+  #$command = $GET_COMP . " -t $toolKit -q -ct DELIVERED,BUILD_SUPPORT,TEST_SUPPORT ";
+  $command = $GET_COMP . " -t $toolKit -q -ct DELIVERED,TEST_SUPPORT ";
+  chomp(@results = `$command`);
+  @components = split(/,/, $results[0]);
+}
+
+#---------------------------------------------------------------------------
+# Iterate thru each component, evaluating each of the two levels in turn.
+#---------------------------------------------------------------------------
+
+my $error_cnt = 0;
+
+foreach $component (@components) {
+
+  %combinedHash = ();
+  $exceptionText = "";
+  $exceptionMsg  = "";
+  
+  # Do not try to process this this component if the ship component version
+  # directory does not exist
+  if (! -d "$stubDir/ship/$component/$release") {
+    $exceptionText = "_NOT_IN_ship";
+    $exceptionMsg  = "WARNING: Directory $stubDir/ship/$component/$release not found. BOM comparison cannot be completed.";
+  }
+
+  # Do not try to process this this component if the tk component version
+  # directory does not exist
+  elsif (! -d "$stubDir/tk/$component/$release") {
+    $exceptionText = "_NOT_IN_tk";
+    $exceptionMsg  = "WARNING: Directory $stubDir/tk/$component/$release not found. BOM comparison cannot be completed.";
+  }
+
+  else {
+  
+    #-----------------------------------------------------------------------------
+    # Summarize the component files in ship and tk
+    #-----------------------------------------------------------------------------
+    %sumShip = processLevelComponent("ship", $component);
+   
+    %sumTk = processLevelComponent("tk", $component);
+    
+    MergeResults();
+    
+    $differencesFound = DifferencesFound();
+    
+  }
+  
+  # Open output file
+  $noResultsSuffix = "_ZO" unless($differencesFound);
+  open(OUTFILE, ">$outputDir/$component$exceptionText$noResultsSuffix.html") || die "open $outputDir/$component.html failed";
+  print OUTFILE "<pre>\n";
+  
+  if ($exceptionMsg) {
+  
+    # Either the ship area or the tk area component directories do not exist. Put a msg in output file and go to next component.
+    print OUTFILE dateTimeStamp() . "  $exceptionMsg\n";
+    print "$exceptionMsg\n";
+  }
+  else {
+  
+    # Both ship and tk directories where found. Continue processing.
+    print OUTFILE dateTimeStamp() . "  Listing differences between $release tk/$component and $release ship/$component .ship-PLAT entries.\n";
+    print OUTFILE                   "                     valid_file() and .dont_ship filtering has been applied.\n\n";
+    print "\nDifferences were found and are listed below and in https://w3.eda.ibm.com/$outputDir/$component$exceptionText$noResultsSuffix.html\n";
+  }
+
+  # Write results for this component to stdout and to a file
+  @tokens = ();
+  $noResults = 1;
+  foreach $element (sort(keys %combinedHash)) {
+    next if $element eq "";
+    @tokens = split(/;/, $combinedHash{$element});
+
+    # Exclude files with subroutine from xmit_common
+    if (! valid_file($element)) {
+      next;
+    }
+
+    if (($tokens[0] eq "TK") && ($tokens[1] eq " ")) {
+      $noResults = 0;
+      if ( -e "/afs/eda/prod/$component/$release/$element" ) { 
+	print         "TK/PROD   only  $element\n";
+	print OUTFILE "TK/PROD   only  $element\n";
+      }
+      else {
+	print         "TK   only  $element\n";
+	print OUTFILE "TK   only  $element\n";
+      }
+    }
+    elsif (($tokens[0] eq " ") && ($tokens[1] eq "SHIP")) {
+      $noResults = 0;
+      print         "SHIP only  $element\n";
+      print OUTFILE "SHIP only  $element\n";
+    }
+  }
+  
+  if (($noResults) || ($exceptionMsg)) {
+    print OUTFILE "\nNo results to report for $component\n";
+    print         "No BOM comparison results to report for $component\n";
+  }
+  else {
+    ++$error_cnt;
+  }
+  
+}
+
+exit ($error_cnt ? $ERROR : $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}  # End of handleInterruption
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}  # End of handleDIE
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Compares bill of materials for ship and tk levels of one or all components.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName [ -c component ] [ -tk toolkit ] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  -c          individual component
+  -tk         toolkit name (eg 14.1.4) to retrieve list of all components
+  -resultsDir directory to store bomChecker output (/afs/eda/data/edainfra/bom/ship2tk_agts)
+  -h          Application help (optional)
+
+  Either -c (for single component) or -tk (for all components) must be
+  specified. 
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+}
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('c=s'          => \$component,
+	      'tk|t=s'       => \$toolKit,
+	      'resultsDir=s' => \$resultsDir,
+	      'help|h|?'     => \$help
+      ) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Either component or toolkit must be specified
+  if ( ! ( $component || $toolKit ) ) {
+    print "[$appName] Either -c or -tk must be specified.\n";
+    return $ERROR;
+  }
+
+  # FIXME - currently the toolkit is not passed (at least by agts) since 
+  # originally toolkit was hardcoded and only needed when all components were 
+  # to be checked in a single call. release was hardcoded also. at some point 
+  # toolkit should be required even when processing a single component, just 
+  # so the release can be derived from the toolkit.
+  if ( ! $toolKit ) { $toolKit = "14.1.4"; }
+
+  # Define Tool Kit release in 14.x format
+  my $rc = 0;
+  ($rc, $release) = TkCommon::convert_tkVersion ($toolKit, "release"); 
+  if ( $rc != 0 ) {
+    print "[$appName] ERROR: Tool Kit $toolKit could not be converted to a release version\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processLevelComponent($level, $component)
+# Purpose: Process entries for specified level and component
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub processLevelComponent {
+
+  my ($level, $component) = @_;
+  my %sumHashShip = ();
+  my @dotShip = ();
+  my %dotShipHash = ();
+  my @dotShipLinux = ();
+  
+  my @dontShipEntries = ();
+  my %dontShipHash = ();
+  
+  my $dontShipEntry; 
+  my $dotShipEntry; 
+  my $dontShipFile;
+    
+  # Get a list of AIX .ship entries
+  $shipPlatDir = "/afs/eda/$level/$component/$release/.ship-64-rs_aix61";
+  my $aixShipPlatDir = $shipPlatDir;
+  if (! -d $shipPlatDir) {
+    print "ERROR: $shipPlatDir not found. Skipping this component.\n";
+    #next;
+    return %sumHashShip;
+  }
+  chdir($shipPlatDir);
+  print "In $shipPlatDir ...\n";
+  open (DOT_SHIP, "find -L *  |")
+   or die "Cannot read find command results $!\n";
+  chomp(@dotShip = <DOT_SHIP>);
+  close(DOT_SHIP);
+   
+  # Add AIX   dot ship entries to   %dotShipHash
+  foreach $dotShipEntry (@dotShip) {
+    $dotShipHash{$dotShipEntry} = "";
+  }
+
+  # Get a list of Linux .ship entries
+  $shipPlatDir = "/afs/eda/$level/$component/$release/.ship-64-amd64_linux26_RH5";
+  if (! -d $shipPlatDir) {
+    print "ERROR: $shipPlatDir not found. Skipping this component.\n";
+    #next;
+    return %sumHashShip;
+  }
+  chdir($shipPlatDir);
+  print "In $shipPlatDir ...\n";
+  open (DOT_SHIP, "find -L *  |")
+   or die "Cannot read find command results $!\n";
+  chomp(@dotShipLinux = <DOT_SHIP>);
+  close(DOT_SHIP);
+
+  if ( 0 ) {
+  # check that linux and aix versions of .ship contain the eame entries
+  my %dotShipLinuxHash = ();
+  foreach $dotShipEntry ( @dotShipLinux ) {
+    if (! exists $dotShipHash{$dotShipEntry}) {
+      print "WARNING: $dotShipEntry is present in $shipPlatDir but not in $aixShipPlatDir.\n";
+    }
+    $dotShipLinuxHash{$dotShipEntry} = "";
+  }
+  foreach $dotShipEntry ( @dotShip ) {
+    if (! exists $dotShipLinuxHash{$dotShipEntry}) {
+      print "WARNING: $dotShipEntry is present in $aixShipPlatDir but not in $shipPlatDir.\n";
+    }
+  }  
+  }
+
+  # Add Linux dot ship entries to    %dotShipHash (already exists)
+  foreach $dotShipEntry (@dotShipLinux) {
+    if (! exists $dotShipHash{$dotShipEntry}) {
+      $dotShipHash{$dotShipEntry} = "";
+    }
+  }
+  
+  # Get a list of .dont_ship entries
+  $dontShipFile = "/afs/eda/$level/$component/$release/.dont_ship";
+  if (-e $dontShipFile) {
+    open(DONT_SHIP, "$dontShipFile") || die "open $dontShipFile failed";
+    chomp(@dontShipEntries = <DONT_SHIP>);
+    close(DONT_SHIP);
+  }
+  
+  foreach $dontShipEntry (@dontShipEntries) {
+    $dontShipHash{$dontShipEntry} = "";
+  }
+  
+  #---------------------------------------------------------------------------
+  # Summarize results for ship component in    %sumHashShip
+  # Remove the entries identified in .dont_ship file
+  #---------------------------------------------------------------------------
+  foreach $element (keys %dotShipHash) {
+    
+    if (! exists $dontShipHash{$element}) {
+      $sumHashShip{$element} = "";
+    }   
+  }
+
+  return %sumHashShip;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : MergeResults()
+# Purpose: Merge the results from ship and tk into one hash.
+#          At the same time, set the value of each element to indicate if the
+#          the hit came from TK, SHIP or both.
+# RCs    : 0 = 
+#          1 = 
+#------------------------------------------------------------------------------
+sub MergeResults {     
+
+  # Merge the component results in %combinedHash
+  foreach $element (sort(keys %sumShip)) {
+    next if $element eq "";
+
+    # Identify elements in both tk and ship
+    if (exists $sumTk{$element}) {
+      $combinedHash{$element} = "TK;SHIP;";
+    }
+
+    # Identify elements only in ship
+    else {
+      $combinedHash{$element} = " ;SHIP;";
+    }
+  }
+
+  # Identify elements only in tk
+  foreach $element (sort(keys %sumTk)) {
+    next if $element eq "";
+    if (! exists $sumShip{$element}) {
+      $combinedHash{$element} = "TK; ;";
+    }
+  }
+  
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : DifferencesFound()
+# Purpose: Determine if there are differences to report
+# RCs    : 0 = no differences found
+#          1 = differences found
+#------------------------------------------------------------------------------
+sub DifferencesFound {  
+
+  # Determine if there are differences to report - DifferencesFound()
+  # This needs to be done here to decide what name to use for the output file.
+  my @tokens = ();
+  my $differencesFound = 0;
+  foreach $element (sort(keys %combinedHash)) {
+    next if $element eq "";
+    @tokens = split(/;/, $combinedHash{$element});
+
+    # Exclude files with subroutine from xmit_common
+    if (! valid_file($element)) {
+      next;
+    }
+
+    if (($tokens[0] eq "TK") && ($tokens[1] eq " ")) {
+      $differencesFound = 1;
+      last;
+    }
+    elsif (($tokens[0] eq " ") && ($tokens[1] eq "SHIP")) {
+      $differencesFound = 1;
+      last;
+    }
+  }
+
+  return $differencesFound;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# FUNCTION: dateTimeStamp()
+#   SYNTAX: dateTimeStamp()
+#  PURPOSE: Return datetime stamp in yyyy-mm-dd hh:mm:ss format
+#
+#  PARAMS IN: n/a
+# PARAMS OUT: n/a
+#
+# RETURN CODES: n/a
+#------------------------------------------------------------------------------
+sub dateTimeStamp {
+  my ($sec, $min, $hr, $day, $month, $year) = (localtime) [0..5];
+  my $datetime = sprintf "%04d-%02d-%02d %02d:%02d:%02d",
+         $year + 1900,
+         $month + 1,
+         $day,
+         $hr,
+         $min,
+         $sec;
+  return $datetime;
+}
+
+
+#===============================================================================
+#
+# general purpose filter: return (nothing) if file is to be excluded,
+# otherwise return 't'
+#
+#===============================================================================
+sub valid_file {
+
+  my ($file) = @_;
+
+  # filter to remove files from deliverables
+  if ($file =~ /-O\.dll/) # optimized dlls
+    {
+      return;
+    }
+  elsif ($file =~ /-O\.exp/) # optimized exp files
+    {
+      return;
+    }
+  elsif ($file =~ /-O$/) # optimized files ending with '-O'
+    {
+      return;
+    }
+  elsif ($file =~ /dll(-64)*\/\./) # dotfiles in dll dir
+    {
+      return;
+    }
+  elsif ($file =~ /bin(-64)\/*\./) # dotfiles in bin dir
+    {
+      return;
+    }
+  elsif ($file =~ /prev.ship.list/) # previous filelist
+    {
+      return;
+    }
+  elsif ($file =~ /prior.ship.list/) # prior filelist
+    {
+      return;
+    }
+  elsif ($file =~ /~$/) # xemacs/emacs backup files
+    {
+      return;
+    }
+  elsif ($file =~ /imp$/) # files ending 'imp'
+    {
+      return;
+    }
+  elsif ($file =~ /loadmap$/) # loadmap files
+    {
+      return;
+    }
+  elsif ($file =~ /-g$/) # debug dlls  (end of file??)
+  #elsif ($file =~ /-g/) # debug dlls, possible change discussed with Gregg and Jody, 3/2012
+    {
+      return;
+    }
+  elsif ($file =~ /-pg/) # profiling dlls
+    {
+      return;
+    }
+  elsif ($file =~ /[Mm]akefile/) # Makefiles
+    {
+      return;
+    }
+  elsif ($file =~ /[-_.]pure/) # purify files
+    {
+      return;
+    }
+  elsif ($file =~ /-quant/) # quant? files
+    {
+      return;
+    }
+  elsif ($file =~ /_auto_loads.tcl/) # _auto_loads.tcl
+    {
+      return;
+    }
+  else {
+  }
+
+  return("t");
+
+}

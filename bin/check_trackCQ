@@ -1,0 +1,330 @@
+#!/usr/bin/perl
+
+# given a CQ return selfstore file and toolkit info in said file name
+
+$tracklist_path = "/afs/eda/common/httpd/current/docs/tracklist";
+$report_path = "/afs/eda/u/edareport/html/CMVCentries";
+#$Report = "/usr/lpp/cmvc/bin/Report";
+$Report = "Report";
+# FIXTHIS
+$Report = "Report";
+
+# Only want to print the abstract once
+$TRUE = 1;
+$FALSE = 0;
+$NoAbstractYet = $TRUE;
+
+@levelhist_path = ("/afs/eda/ship", "/afs/eda/shipb", "/afs/eda/prod", "/afs/eda/dev", "/afs/eda/build");
+@tk_lhist_path  = ("/afs/eda/tk", "/afs/eda/tkb");
+
+$login = `whoami`;
+chomp $login;
+
+$hostname = `hostname -s`;
+chomp $hostname;
+
+use File::Basename;
+use Getopt::Std;
+
+
+sub help
+  {
+    print "\ncheck_track [-c] [-t] <track>\n\n";
+
+    print "..where <track> is a CQ or CR number.  Must be the full MDSCMS00nnnnnn number.\n ";
+    print "For CQs, be sure to specify the tk_injectionrequest number NOT the tk_patch number.\n ";
+    print "\t-a\tLook in all areas, don't give up once the track is found\n\n";
+
+    print "\t-t\tadditionally check tkb and tk if no selfstore entries are found\n\n";
+    print "\t-x\tadditionally check xtinct areas if no selfstore entries are found\n\n";
+
+    print "This script will attempt to find an entry in the tracklist summaries\n";
+    print "to determine if the CMVC defect/feature has been incorporated in a selfstore \n";
+    print "file or installed in a toolkit.  If it has not, the script will attempt to find\n";
+    print "the state of the associated tracks, whether it has been incorporated in\n";
+    print "a build, or promoted up through dev, prod, shipb, or ship.\n\n";
+
+    print "To get check_track to report all the places it finds a track invoke:\n\n";
+    print "\tcheck_trackCQ -tax <track>\n\n";
+
+  }
+
+sub print_foundInFile
+  {
+    # The CQ may appear multiple times in the LEVELHIST file, get the first match and use it
+    @firstSplit = split ("\n" , $result);
+    # The line will have MDCMS #, then abstract, separated by :,     
+    # Split that line into the file name and abstract
+    @splitArray = split (":" , $firstSplit[0]);
+    
+    # Pull out the abstract
+    $abstract =  $splitArray[1];
+    # Build LEVELHIST file name where we found the match
+    $FoundInFile = "$path/$comp/14.1/LEVELHIST";
+                
+    # If we have not yet printed out the abstract do that now    
+    if ($NoAbstractYet == $TRUE) 
+      {
+        print "$track: $abstract\n\n";
+        $NoAbstractYet = $FALSE; 
+      } 
+    # Then print out which LEVELHIST file we found the match in              
+    print "$track found in $FoundInFile\n"; 
+  }
+                
+sub print_track_release
+  {
+    # This routine is called to search through the LEVELHIST files to see where 
+    # the CQ has been extracted. 
+
+    # special xtinct search
+    if($opt_x)
+     {
+       # get the path listing for the xtinct director
+       @x_lhist_path = glob("/afs/eda/xtinct/tk14*");
+       # print "x_path: @x_lhist_path\n";
+            
+       foreach $path (@x_lhist_path)
+         {
+           $levelhist = "${path}/${comp}/${release}/LEVELHIST";
+                
+           #print "levelhist path: $levelhist\n\n";
+           #print "path: $path\n\n";
+
+               
+           $result = `/usr/bin/grep $track $levelhist`;
+           #print "result=$result\n";
+           if ($result =~ /$track/) 
+	     { print_foundInFile;}
+
+
+	  } # foreach $path
+	} # opt_x
+
+
+
+    # special tk search
+    if($opt_t)
+      {
+	 foreach $path (@tk_lhist_path)
+	   {
+	    $levelhist = "${path}/${comp}/${release}/LEVELHIST";
+	    # print "levelhist path: $levelhist\n\n";
+           
+            $result = `/usr/bin/grep $track $levelhist`;
+            if ($result =~ /$track/)
+              {print_foundInFile;}
+                  
+                              
+	   } # foreach $path
+       } # opt_t
+
+
+    # extended search through build/dev/prod/shipb/ship
+    if($opt_a)
+      {
+        foreach $path (@levelhist_path)
+          {
+ 	    $levelhist = "${path}/${comp}/${release}/LEVELHIST";
+            # print "levelhist path: $levelhist\n\n";
+            $result = `/usr/bin/grep $track $levelhist`;
+            
+            if ($result =~ /$track/)
+              {print_foundInFile;}        
+               
+             
+             
+ 	   } # foreach $path
+      } # if opt_a
+
+    print "\n";
+  }
+
+sub process_track
+  {
+    
+    # First search the tracklist files to see if the track has been released yet
+
+    chomp $track;
+    # We can limit the tracklist file search based on the component name and release
+    foreach $file (<$tracklist_path/$comp.$major*>)
+      {
+        if($file =~ /RECENT_UPDATE/){next}
+        # print "open tracklist file $file looking for $track\n";
+        open(FILE, "<$file");
+        foreach $line (<FILE>)
+          {
+            if($line =~ /$track/)
+              {
+	        $filelist{$file} = "true";
+                #print "found line for $track\n";
+              }
+          }
+      }
+
+    # @keys = keys(%filelist);
+    # print "x@{keys}x\n";
+
+    # traverse the file of interest
+    # cache the self store file and the toolkit (if any, associated with it)
+    # if the defect is found, print the cached self-store file (and toolkits) 
+
+    # Only want to print the abstract once
+    $NoAbstractYet = $TRUE;
+
+    if(%filelist)
+      {
+        # re-open the relevant files, cache toolkits & ss_files till we come
+        # to the track du jour
+        foreach $file (keys(%filelist))  # missing the %?  07/17/09
+          {
+            # print "\n$file\n";
+	    @last_tk = ();
+            $last_tk = "";
+	    %tk_ptf = ();
+
+    	    open(FILE,"<$file");
+            
+	    foreach $line (<FILE>)
+	      {
+
+	        # print $line;
+#*	        if($line =~ /CMVCentries\/$track\.html/)
+#*              For 14.1, the tracklist file just contains the MDCMS # followed by the description
+	        if($line =~ /$track/)
+	          {
+		    # strip off html
+		    #($abstract) = $line =~ /<td colspan=2>(.+)<\/td>/;  
+                    # In 14.1,. abstract can be longer, so /td may not be found at end of line
+                    ($abstract) = $line =~ /<td colspan=2>(.+)/;
+#		    print "line = $line\n";
+#                   print "abstract = $abstract\n";
+		    		
+		    $track_line = "$track $abstract";
+		    print "$track_line\n\n";
+                    $NoAbstractYet = $FALSE;
+
+		    if($ptf > 0)
+		      {
+			# print "$last_ss_file $tk_ptf{$maint_level}\n";
+			foreach $ptf_tk (@{$tk_ptf{$maint_level}})
+			  {
+			    print "$last_ss_file $ptf_tk\n";
+			  }
+	
+		      }
+		    else
+		      {
+		        if(@last_tk)
+		          {
+			    foreach $last_tk (@last_tk)
+			      {
+				print "$last_ss_file $last_tk\n";
+			      }
+			  }
+			else
+		          {
+			    print "$last_ss_file SelfStore only\n";
+		          }
+		      }
+	          }
+	        # selfstore file name
+	        elsif($line =~ /<strong>(((\S+)\.(\d{4})\.(\d{4}))\.(\d{4}))/)
+	          {
+		
+		    $last_ss_file = $1;
+		    $maint_level = $2;
+		    $ptf = $6;
+
+		    $last_ss_file =~ s/\.(aix5\d_64|com)//;
+		    # print "$last_ss_file\n";
+		    # print "$ptf\n";
+		    @last_tk = ();
+		    @{$tk_ptf{$maint_level}} = ();
+	          }
+		# toolkit installed
+	        elsif($line =~ /<strong>(\S+\s+ToolKit\s+[\d\.]+)<\/strong>/)
+	          {
+		    $last_tk = $1;
+		    push(@last_tk,$1);
+		    if($ptf)
+		      {
+		        # $tk_ptf{$maint_level} = $last_tk;
+			push(@{$tk_ptf{$maint_level}}, $last_tk);
+		      }
+	          }
+	        else
+	          {}
+	      }
+          } # foreach $file
+        #print "\n";
+      }
+
+    
+    if(!%filelist || $opt_a || $opt_x || $opt_t)
+      { 
+        # If the track was not yet released or if options specify additional search in the afs 
+        # areas, continue on with search in the LEVELHIST files
+        print_track_release;
+      } # non xmitted track
+
+  }
+ 
+######################################################################
+# BEGIN MAIN
+######################################################################
+
+getopts("ahtx");
+
+if($opt_h || !$ARGV[0])
+  {
+    help;
+    exit;
+  }
+
+$track = $ARGV[0];
+
+# Use cr.changes to pull some info about the CQ - like the comp name & release/version info
+my @results = `/afs/eda.fishkill.ibm.com/data/edainfra/tools/enablement/prod/bin/cr.changes -q -cr $track`;
+$rc = $? >> 8;
+
+if ($rc != 0) {
+  print "\n*** $track is not a valid tk_injectionrequest or CR number.  \n*** For inject requests, be sure you specify a tk_injectionrequest number NOT the associated tk_patch number. \n";
+  exit; 
+}
+
+# Found the CQ info, so extract the component name and the release
+# They are needed to build the path and file names for the tracklist and LEVELHIST file searches 
+
+
+my @tokens = split(/ +/, $results[0]);
+$comp = $tokens[1];
+
+# In testing, came across some old CRs for which cr.changes gave a good return code, BUT
+# didn't return component name or release info
+if ($comp == "") {
+  # IN that case, try cr.showAll, even though it is slower. 
+
+  my $result = `/afs/eda/tools/bin/cr.showAll | grep $track`;
+  if ($result == 0) {
+    print "\n*** cr.changes and cr.showAll could not determine the component name associated with $track.\n";
+    exit; 
+  }
+  @tokens = split(/ +/, $result);
+  $comp = $tokens[1];
+}
+
+# Got the component name, now get the release info
+# For the tracklist file search, we need just the major release version, e.g. 14
+# The LEVELHIST file searches use the release, like 14.1
+my $toolKit = $tokens[0];
+print "toolkit: $toolKit\n";
+@tokens = split(/\./, $toolKit);
+pop @tokens;
+$major = $tokens[0];
+$release = join(".", @tokens);
+
+#print "comp=$comp, release=$release, major=$major\n";
+
+process_track($track);
+

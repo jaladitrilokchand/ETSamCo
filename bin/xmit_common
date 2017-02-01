@@ -1,0 +1,264 @@
+#!/usr/bin/env perl
+use warnings;
+#use strict;
+#===============================================================================
+# Program Name: xmit_common
+#
+# Author(s): A. Magnan
+#
+# Purpose  : Common code for transmittal-related scripts
+#
+#-------------------------------------------------------------------------------
+# Change History
+# 08/12/11 AM Initial version
+# 01/11/12/GS Updated valid_file to exclude prior.ship.list. Reformatted file for
+#             readability.  Removed Art from mail list.
+# 05/03/12 EH Added filter in valid_file() for file names ending in -O.
+#===============================================================================
+
+%plat_map = ("64-rs_aix61"  => "aix61_64",
+	     "64-amd64_linux26_RH5" => "lnx26_64_rh5"
+	     );
+
+#===============================================================================
+#
+# Return the maximum return code
+#
+#===============================================================================
+sub max_rc {
+
+  my ($rc, $maxrc) = @_;
+	
+  if ($rc > $maxrc) {
+    $maxrc = $rc;
+  }
+
+  return ($maxrc);
+
+}
+
+
+#===============================================================================
+#
+# Handle return code processing from TK common
+#
+#===============================================================================
+sub process_rc {
+
+  my ($opName, $errMsg, $doExit, $rc) = @_;
+
+  if ($rc == 0) {
+    print "Operation successful for \"$opName\". rc=$rc\n";
+  }
+  else {
+    print "ERROR: Return code $rc from \"$opName\".\n";
+    if ($errMsg ne "") {
+      print "$errMsg\n";
+    }
+    exit ($rc) if ($doExit);
+  }
+
+}
+
+
+#===============================================================================
+#
+# Generate the date string
+#
+#===============================================================================
+sub make_date_string {
+
+  my $date = `date +%b" "%d" "%Y" "%H:%M:%S`;
+  chomp $date;
+
+  return$date;
+
+}
+
+
+#===============================================================================
+#
+# Generate the log file date
+#
+#===============================================================================
+sub make_log_date {
+	
+  my $date = `date +%m%d.%H:%M`;
+  chomp $date;
+
+  return$date;
+
+}
+
+
+#===============================================================================
+#
+# general purpose filter: return (nothing) if file is to be excluded, 
+# otherwise return 't'
+#
+#===============================================================================
+sub valid_file {
+
+  my ($file) = @_;
+	
+  # filter to remove files from deliverables
+  if ($file =~ /-O\.dll/) # optimized dlls
+    {
+      return;
+    }
+  elsif ($file =~ /-O\.exp/) # optimized exp files
+    {
+      return;
+    }
+  elsif ($file =~ /-O$/) # optimized files ending with '-O'
+    {
+      return;
+    }
+  elsif ($file =~ /dll(-64)*\/\./) # dotfiles in dll dir
+    {
+      return;
+    }
+  elsif ($file =~ /bin(-64)\/*\./) # dotfiles in bin dir
+    {
+      return;
+    }
+  elsif ($file =~ /prev.ship.list/) # previous filelist
+    {
+      return;
+    }
+  elsif ($file =~ /prior.ship.list/) # prior filelist
+    {
+      return;
+    }
+  elsif ($file =~ /~$/) # xemacs/emacs backup files
+    {
+      return;
+    }
+  elsif ($file =~ /imp$/) # files ending 'imp'
+    {
+      return;
+    }
+  elsif ($file =~ /loadmap$/)	# loadmap files
+    {
+      return;
+    }
+  elsif ($file =~ /-g$/) # debug dlls  (end of file??)
+    {
+      return;
+    }
+  elsif ($file =~ /-pg/) # profiling dlls
+    {
+      return;
+    }
+  elsif ($file =~ /[Mm]akefile/) # Makefiles
+    {
+      return;
+    }
+  elsif ($file =~ /[-_.]pure/) # purify files
+    {
+      return;
+    }
+  elsif ($file =~ /-quant/)	# quant? files
+    {
+      return;
+    }
+  elsif ($file =~ /_auto_loads.tcl/) # _auto_loads.tcl
+    {
+      return;
+    }
+  else {
+  }
+
+  return("t");
+
+}
+
+
+######################################################################
+# maillist
+######################################################################
+
+#=====================================================================
+# Set up the mail list - this will eventually be performed with app
+# communicating with the EDA CM DB
+#=====================================================================
+
+$cb_mail = "cellier\@us.ibm.com jody\@edamail.fishkill.ibm.com amrithraj\@in.ibm.com aniket.deshmukh\@in.ibm.com sripadasv\@in.ibm.com";
+
+if ($product =~ /(3dnoise|
+		   pdm|
+		   alsim|
+		   antlr|
+		   asicfep|
+		   asicshare|
+		   bdd|
+		   bonn|
+		   booledozer|
+		   bdz_tcl|
+		   buffopt|
+		   chipedit|
+		   chipplace|
+		   cplace|
+		   currents|
+		   dft|
+		   duplos|
+		   edags|
+		   edif|
+		   gna|
+		   hdp|
+		   ics|
+		   idme|
+		   iospec|
+		   license|
+		   model|
+		   netcalc|
+		   nutshell|
+		   opplus|
+		   pds|
+		   pss|
+		   portals|
+		   rapids|
+		   rbo|
+		   sourcerer|
+		   sss|
+		   theguide|
+		   tla|
+		   vcplace|
+		   vss|
+		   wirebender|
+		   wizard|
+		   writehdl|
+		   wss|
+		   xrouter)/x) {
+  # print "email set to cb_mail\n";
+  $mailList = $cb_mail;
+}
+elsif ($product =~ /brut|iospecify/) {
+  $mailList = "hammer\@us.ibm.com";
+}
+elsif ($product eq "cmoschks") {
+  $mailList = "raymondb\@us.ibm.com";
+}
+elsif ($product =~ /einstimer|edautils|ess|rice/) {
+  $mailList = "$cb_mail timing-cust\@spacedog.fishkill.ibm.com";
+}
+elsif ($product =~ /hawk|hiasynth|hdlutil|verity/) {
+  $mailList = "calvin\@edamail";
+}
+elsif ($product eq "steiner") {
+  $mailList = "calvin\@edamail jody\@edamail";
+}
+else {
+  print "Warning: the maillist for $product is undefined\n";
+  $mailList = "";
+}
+
+# Don't blast email if urgent xmittal
+if ($urgent) {
+  $mailList = "jwcolem\@us.ibm.com"; }
+
+# always append these recipients:
+$mailList .= "deday\@us.ibm.com hogana\@us.ibm.com jody\@edamail.fishkill.ibm.com ";
+
+# end of maillist
+#================

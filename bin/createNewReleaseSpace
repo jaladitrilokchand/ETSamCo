@@ -1,0 +1,490 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: createNewReleaseSpace
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 07/09/2015 GS  Initial coding.
+#
+# dont run setup_dirs in dev and prod
+# build/dev/prod touch LEVELHIST file
+#
+#
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TKutils;
+
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+
+
+# Program variables
+my $appName = "createNewReleaseSpace";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dbMode          = "";  # default is prod if empty
+my $dryRun          = 0;
+my $srcToolKit      = "";
+my $tgtToolKit      = "";
+my $component       = "";
+my $startDir;
+
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{INT}   = sub { handleInterupt("Caught a sigint $!"); };
+$SIG{QUIT}  = sub { handleInterupt("Cauth a quit $!"); };
+$SIG{TERM} = sub {  handleInterupt("Caught a sigterm $!"); };
+
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+
+# Get the list of components to process
+my @components = SetComponents($tgtToolKit, $component);
+
+
+# Process each component
+foreach $component (sort(@components)) {
+
+  foreach my $level ("build", "dev", "prod") {
+
+    print "\nProcessing $component ($level) ...\n";
+    if ($component eq "tools" || $component eq "nutshell") {
+      print " Skipping .. already processed\n";
+      next;
+    }
+
+    # Create the /afs/eda/<LEVEL>/<COMP> directory
+    CreateCompVolume($component, $level);
+
+    # Create the /afs/eda/<LEVEL>`/<COMP>/<REL> directory
+    CreateReleaseVolume($srcToolKit, $tgtToolKit, $component, $level);
+
+    # Setup directories for this release
+    my $release = TKutils::GetRelease($tgtToolKit, ".");
+    my $dir = "/afs/eda/$level/$component/$release";
+    SetupDirs($srcToolKit, $tgtToolKit, $dir);
+    
+    # Touch the LEVELHIST file
+    CreateLevelHist($dir);
+
+  }
+
+}
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterypt($msg)
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  my ($message) = @_;
+  CleanExit("\n[$appName] $message\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Creates AFS space in /afs/eda/build (dev and prod) for components in the tgtTk.All AFS quotas and ACLs will be copied from srcTk.
+
+For example to create space for new 15.1 tool kit based on 14.1 run ..
+createNewReleaseSpace -src 14.1.build -tgt 15.1.0 
+
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-src srcTk> <-tgt tgtTk> [-c component]
+              [-dryrun] [-y] [-db dbMode] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  srcTk     = Tool Kit version which must exist (ie, 14.1.1 ...)
+  tgtTk     = Tool Kit version which must exist (ie, 15.1.1 ...)
+  component = Process just this component
+  -dryrun   = Run script in dryrun mode
+  dbMode    = Database mode [default = PROD] (PROD, DEV, TEST)
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('src=s'     => \$srcToolKit,
+              'tgt=s'     => \$tgtToolKit,
+              'c=s'       => \$component,
+	      'db=s'      => \$dbMode,
+	      'dryrun'    => \$dryRun,
+	      'y'         => \$verbose,
+	      'help|h|?'  => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $srcToolKit) {
+    print "ERROR: Src tool kit (-src) is a required parameter\n";
+    return $ERROR;
+  }
+  if (! $tgtToolKit) {
+    print "ERROR: Tgt tool kit (-tgt) is a required parameter\n";
+    return $ERROR;
+  }
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents()
+# Purpose: Create a list of components ready for this Tool Kit
+# RCs    : List of component names or empty list
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  my ($tk, $comp) = @_;
+  print " Querying for components in $tk ...\n" if ($verbose);
+
+  # Query the DB for tk/components for the src tool kit
+  my @list = TKutils::GetComponents($tk, $comp, "");
+  print "Found " . scalar(@list) . " component(s)\n" if ($verbose);
+
+  return @list;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateCompVolume($comp, $level)
+# Purpose: Create the /afs/eda/LEVEL/COMP AFS volume if it doesn't exist
+# RCs    : 0 = ok otherwise error
+#------------------------------------------------------------------------------
+sub CreateCompVolume {
+
+  my ($comp, $level) = @_;
+
+  # If dir exists then exit
+  my $dir = "/afs/eda/$level/$comp";
+
+  # Dir doesn't exist so create it ..
+  my $volName = "$level.$comp";
+  my $volSize = 5;
+
+  my $rc = CreateVolume($volName, $volSize, $dir);
+
+  # Set ACLs
+  `fs sa -dir $dir -acl svnlib all`;
+  `fs sa -dir $dir -acl svnlib:write read`;
+  `fs sa -dir $dir -acl bradmin all`;
+  `fs sa -dir $dir -acl edadev read`;
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateReleaseVolume($srcTk, $tgtTk, $comp, $level)
+# Purpose: Create the /afs/eda/LEVEL/COMP AFS volume if it doesn't exist
+# RCs    : 0 = ok otherwise error
+#------------------------------------------------------------------------------
+sub CreateReleaseVolume {
+
+  my ($srcTk, $tgtTk, $comp, $level) = @_;
+
+  # Get the release names
+  my $release = TKutils::GetRelease($tgtTk, ".");
+  my $afsRelease = TKutils::GetRelease($tgtTk, "_");
+
+  # Set variables for volume creation
+  my $dir = "/afs/eda/$level/$comp/$release";
+  my $volName = "$level.$comp.$afsRelease";
+
+  my $srcRelease = TKutils::GetRelease($srcTk, ".");
+  my $srcDir = "/afs/eda/$level/$comp/$srcRelease";
+  my $volSize = GetVolumeSize($srcDir);
+
+  my $rc = CreateVolume($volName, $volSize, $dir);
+
+  # Copy ACLs
+  CopyAcls($srcDir, $dir) if ($rc == $OK);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateVolume($name, $size, $dir)
+# Purpose: Create AFS volume
+# RCs    : 0 = ok otherwise error
+#------------------------------------------------------------------------------
+sub CreateVolume {
+
+  my ($name, $size, $dir) = @_;
+
+  # Do nothing if dir already exists
+  if (-d $dir) {
+    print " MSG: dir exists - $dir\n";
+    return $OK;
+  }
+
+  print " CREATING - $dir\n" if ($verbose);
+
+  my $maxSize = $size;
+  if ($size > 8000) {
+    print "Initial volume size truncated to 8 GB ..\n";
+    $size = 8000;
+  }
+
+  # Construct the command
+  my $command = "/afs/eda/projects/luci/bin/luci_cmd";
+  $command .= " -o create";
+  $command .= " -u bradmin";
+  $command .= " -c eda";
+  $command .= " -v $name";
+  $command .= " -q $size";
+  $command .= " -m $dir";
+  $command .= " -w 30";
+
+  # Run the command and show results
+  my $status = "";
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  print join("\n ", @results) . "\n" if ($verbose);
+
+  # Deal with volumes larger than 8GB
+  if ($maxSize != $size) {
+    print "Resizing vol to $maxSize ..\n";
+    $command = "/usr/afsws/bin/fs sq $dir $maxSize";
+    $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+    print join("\n ", @results) . "\n" if ($verbose);
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CopyAcls($srcDir, $tgtDir)
+# Purpose: Copy ACLs from src dir to tgt dir
+# RCs    : 0 = ok otherwise error
+#------------------------------------------------------------------------------
+sub CopyAcls {
+
+  my ($srcDir, $tgtDir) = @_;
+
+  print " Copying ACLs $srcDir -> $tgtDir\n";
+
+  # Construct the command
+  my $command = "fs copyacl";
+  $command .= " -fromdir $srcDir";
+  $command .= " -todir $tgtDir";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  print join("\n ", @results) . "\n" if ($verbose);
+
+  if ($verbose) {
+    print " Adding ACLs for svnlib, svnlib:write, bradmin and edadev\n";
+  }
+  `fs sa -dir $tgtDir -acl svnlib all`;
+  `fs sa -dir $tgtDir -acl svnlib:write write`;
+  `fs sa -dir $tgtDir -acl bradmin all`;
+  `fs sa -dir $tgtDir -acl edadev read`;
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetupDirs($srcTk, $stgtTk, $dir)
+# Purpose: Run setup_dirs script 
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub SetupDirs {
+
+  my ($srcTk, $tgtTk, $dir) = @_;
+
+  print " Running setup_dirs - $dir\n";
+
+  # Determine path
+  my $tgtRelease = TKutils::GetRelease($tgtTk, ".");
+  my $path = "/afs/eda/prod/tools/$tgtRelease/scripts";
+  if (! -d $path) {
+    $path = "/afs/eda/u/dkeller/tools/$tgtRelease/scripts";
+    if (! -d $path) {
+      print "ERROR: unable to find path to setup dirs\n";
+      return;
+    }
+  }
+
+  # Construct the command
+  #my $command = "$path/setup_dirs";
+  my $command = "$path/setup_dirs";
+  $command .= " --all";
+  $command .= " --no_32bit";
+  $command .= " $dir";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetVolumeSize($dir)
+# Purpose: Determine the AFS quota for the given directory
+# RCs    : Vol size in MB
+#------------------------------------------------------------------------------
+sub GetVolumeSize {
+
+  my ($dir) = @_;
+
+  my $size = 5;
+  return $size if (! -d $dir);
+
+  # Construct the command
+  my $command = "fs lq";
+  $command .= " -path $dir";
+
+  # Run the command and show results
+  my $status = "";
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc == $OK) {
+    my @tokens = split(' +', $results[1]);
+    $size = sprintf("%.0f", ($tokens[1] / 1000)); # Round to ones place
+  }
+  else {
+    print join("\n ", @results) . "\n" if ($verbose);
+  }
+
+  return $size;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateLevelHist($dir)
+# Purpose: Create an empty LEVELHIST file
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub CreateLevelHist {
+
+  my ($dir) = @_;
+
+  print " Creating LEVELHIST file ... \n";
+
+  # Construct the command
+  my $command = "touch $dir/LEVELHIST";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+
+  return $rc;
+
+}
+
+

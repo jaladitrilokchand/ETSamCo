@@ -1,0 +1,371 @@
+#
+# Must be dotted in...
+#
+# 06/21/10  AM  Copied from original code in $CMLIB/bin/CM_common
+#               Modified to work in DEVMODE and use test environment through
+#               BUILDDIR variable.
+# 07/27/10  AM  Put BUILDLOG under DEVMODE control and appends "devmode" suffix when in DEVMODE.
+#
+
+###
+###	Variable Explanations:
+###
+
+##  
+# Incoming
+##  
+##  LEVEL	: which processing LEVEL (build|dev|prod)
+##  PLATFORM	: build PLATFORM (hp_ux102, 64-rs_aix43, etc.)
+##  RELEASE	: CMVC RELEASE name (e.g. hdp.0602, chipplace.0701, etc.)
+##
+##  CMDEBUG	: (Config. Mgt) print DEBUG messages??
+##  NOUSELOG	: should we (yes|NO) print anything to (USE) any LOG file
+##  NOSTARTMSG	: Should we (yes|NO) print the "STARTed MeSsaGe"???
+##  NOFLUSHTREE	: Should we (yes|NO) FLUSH the build TREE???
+##  
+# Outgoing
+##  
+##  BITS	: what # BITS (32/64/...) machine are we on (32="",64=64)
+##  BITSDIR	: directory flag used on "64Bit" machines
+##  BLOWAWAYFILE: if this file exists: do a clean build.
+##  BUILDDIR	: BUILDtree top DIRectory.
+##  BUILDLOG	: ~hdplib BUILD LOG file. (name='${DATE}.${PROJ_NAME}.${REL_VER}${EXT}.${PLATFORM}')
+##  COMP	: the cmvc COMPonent name (left part of '$RELEASE')
+##  COMPERROR	: list of COMPonents with ERRORs (HTML links to the log files).
+##  COMPLOCKDIR	: COMPonent LOCK files go in this DIRectory.
+##  EXT		: identify logfile level (development_build=""; others=.{LEVEL})
+##  GNUPLAT	: common build setup (GNUmake) uses a different PLATform style.
+##  LIBBIN	: links to certain build scripts are here.
+##  LIBETC	: build status files go here (&below).
+##  LOGDIR	: component LOG files go in this DIRectory.
+##  MAILLIST    : List of people to receive email (for $PROJ_NAME).
+##  PROJ_NAME	: actual /afs/eda/LEVEL/PROJect_directory_NAME; logfile prefix
+##  REL_VER	: RELease_VERsion number {rrvv} (right part of '$RELEASE')
+##  R_V		: the "common build" Release.Version number. (0602 => 6.2)
+##  STARTED	: set after commandline checks are complete.
+##  TIMEFILE    : when build started; used to determine if "ar vo" needed.
+##  X64		: the -X64 for 64bit mode processing (blank for non 64bit)
+##
+# Outgoing	Variables defined in CM_common_nbt
+##
+##  ASTERISKS   : a seperator line for logfiles.
+##  BARBSTER    : who 'BARB' mail goes to...
+##  BBLOG	: Build/Blessing LOG file. ($HDPLIB/log.mmm)
+##  CMSET_X	: "" or "set -x" used to cascade set -x into functions...
+##  COUNT       : a loop COUNTer.
+##  DATE	: date (mmmdd) of build from morning perspective
+##                  (6pm-midnite - tomorrow; >=midnite - today)
+##  EDAF        : EDA Fishkill (/afs/eda.fishkill.ibm.com)
+##  HDPLIB      : path to hdplib home/log-file directory
+##  HDPLIBBIN   : path to hdplib script directory (~hdplib/bin)
+##  MAILFILE    : temporary file to store output intend for emailing.
+##  MAILSUBCMD  : the MAIL SUBject CMD ("~s " or "Subject: ")
+##  PID         : the scripts Process ID#, used for naming temporary files
+##  TR          : a variable to hold "<path>/tr" for the version we want...
+##  SCRIPT      : program name
+##
+#	Functions
+##
+##  flushtree	: FLUSH afs cache for all volumes in buildTREE.
+##  to_cmperr	: print a message TO CoMPERRor.
+##  getmasters	: GET list of MASTER.make fileS from build tree
+##  goodbye	: a function used to put a "GOODBYE" message in the logfile and exit.
+##  
+# Release name table:
+##
+##	  $COMP		$PROJ_NAME
+##	(CMVC name)	(AFS name)
+##	-----------	----------
+##	ChipPlace	chipplace
+##	Chip_Wire	chipwire
+##	HDP		hdp
+##	model		model
+##
+
+# get CoMmon Non-BuildTree variables
+#
+. /afs/eda/u/hdplib/bin/CM_common_nbt
+
+# check to see if we were not dotted in...
+#
+if [[ $SCRIPT = CM_common.svn ]]
+ then
+  print "\nCM_common.svn must be dotted in to be of any use...\n"
+read
+  typeset -f clear_lock >/dev/null && clear_lock
+  exit 1
+fi
+
+
+
+
+###
+###	Set common Functions
+###
+
+flushtree()
+ {
+  FLUSHFILE=$BUILDDIR/bin/flush${REL_VER}${LEVEL}
+  [[ -r $FLUSHFILE ]] && $FLUSHFILE
+ }
+
+
+to_cmperr()
+ {
+  typeset TYPE="$1"
+  shift
+  typeset MSG="$@"
+
+  [[ -z $COMPERROR ]] && { print "\n>>> ERROR: COMPERROR not set\n" | tee -a $BUILDLOG; return; }
+  [[ ! -w $COMPERROR ]] && { print "\n>>> ERROR: can't write to $COMPERROR (COMPERROR)\n" | tee -a $BUILDLOG; return; }
+
+  print "\n--------------------\n$(date +"%a %D %T %z")\n" >> $COMPERROR
+  case $TYPE in
+       Started) print "$RELEASE ($LEVEL) on $PLATFORM starting on $(hostname | cut -d. -f1) ($SCRIPT)" >> $COMPERROR;;
+    CleanBuild) print "No Build Errors in $RELEASE ($LEVEL). Clean Build." >> $COMPERROR;;
+   BuildErrors) print "$MSG" >> $COMPERROR;;
+      Blessing) print "Build completed and blessed for $RELEASE ($LEVEL) ($PLATFORM)." >> $COMPERROR;;
+	     *) print "$TYPE $MSG" >> $COMPERROR;;
+  esac
+
+  print >> $COMPERROR
+
+  $HDPLIBBIN/CM_cr2br $COMPERROR
+ }
+ 
+
+getmasters()
+ {
+  GM_OWD=$(pwd)
+  typeset EXTRA_EXCLUDE_DIRS=
+
+  cd $BUILDDIR
+  print "\nObtaining the components list from the $(pwd) directory..." >> $BUILDLOG
+
+  [[ $PROJ_NAME = hdp && $REL_VER < 0701 ]] && EXTRA_EXCLUDE_DIRS='|^html'
+
+  DIRS=$(/bin/ls -l | grep "^[Dd]" | awk '{print $NF}' | egrep -v "IMPORT|^tc|^include|^private|^lib|^load$|^bin|^etc|^build|SHIP|CHDS|^tar$|^doc$|^shared|^testcases|^regression$EXTRA_EXCLUDE_DIRS")
+  GM_MASTERSLIST=$(find $DIRS -name Makefile -print | sort)
+
+  MASTERS="$(print $GM_MASTERSLIST)"
+
+  cd $GM_OWD
+  unset GM_MASTERS GM_MASTERFILE GM_OWD
+ }
+
+goodbye()
+ {
+  #	$1 = ReturnCode, $2 = Comment.
+  #
+  [[ -n $STARTED ]] && print "\n$SCRIPT: $RELEASE ($LEVEL) on $PLATFORM completed at $(date +"%a %D %T") on $(hostname | cut -d. -f1)\n" >> $BUILDLOG
+  RC="$1"
+  [[ -n $2 ]] && print "$2"
+  /bin/rm -f /tmp/*.$PID 2>/dev/null
+  typeset -f clear_lock >/dev/null && clear_lock
+  exit "${RC:-0}"
+ }
+
+
+###
+###	Set PLATFORM specific stuff
+###
+
+# X64: "object" file bit mode
+# BITS: tell common build gmake rules that we're 64b
+#
+if [[ $PLATFORM = *64* ]]
+ then
+  BITS=64
+  BITSDIR=-$BITS
+  [[ $PLATFORM = *aix* ]] && X64="-X64" || X64=
+ else
+  BITS=
+  BITSDIR=
+fi
+export BITS X64 BITSDIR
+
+
+###
+###	Set common "Variables"
+###
+
+if [[ $RELEASE = *-* ]]
+ then
+  COMP=$(print -- $RELEASE | cut -f1 -d-)
+  R_V=$(print -- $RELEASE | cut -f2 -d-)
+  REL_VER=$(print $R_V | awk -F. '{printf("%02d%02d",$1,$2)}')
+ else
+  COMP=$(print $RELEASE | cut -f1 -d.)
+  REL_VER=$(print $RELEASE | cut -f2 -d.)
+  [[ $REL_VER = +([0-9])-[0-9]* ]] && RV_EXT=-$(print $REL_VER | cut -d- -f2-) || RV_EXT=
+  R_V="$(print $REL_VER | cut -c1,2 | sed 's/^0//').$(print $REL_VER | cut -c3,4 | sed 's/^0//')$RV_EXT"
+fi
+
+# PROJ_NAME=$(print $COMP | $TR '[:upper:]' '[:lower:]' | sed 's/_//')
+typeset -l PROJ_NAME=$(print $COMP | sed 's/_//')
+
+# If we have not been supplied a LEVEL we must determine it.
+#
+if [[ -z $LEVEL ]]
+ then
+  DONE=
+  typeset -i SLEEPCOUNT=0
+  while [[ -z $DONE ]]
+   do
+    for CHECKLEVEL in build dev
+     do
+      if [[ -d $EDAF/$CHECKLEVEL/$PROJ_NAME/$R_V ]]
+       then
+        LEVEL=$CHECKLEVEL
+        break	# Bust out of the for loop!!!!!!!
+      fi
+     done
+
+    # all gmake builds happen in /afs/eda/(build|dev)/...
+    #  so if the user doesn't give us a level and we can't
+    #  find one then we have a problem!! (LAN???)
+    #
+    if [[ -z $LEVEL ]]
+     then
+      print "\n$(date +'%a %D %T')  Error:	Could not find ...(build|dev)/$PROJ_NAME/$R_V"
+      print "	Possible LAN problem?? . . . \c"
+      if [[ $SLEEPCOUNT -lt 12 ]]
+       then
+        print "Sleeping 5min . . . \n"
+        sleep 300
+        ((SLEEPCOUNT+=1))
+       else
+        (
+	 print "Waited one hour, Exitting!!"
+	 print "/usr/afsws/bin/fs checkservers"
+	 /usr/afsws/bin/fs checkservers
+        ) | /bin/tee /tmp/mail.error
+        mail -s "Possible LAN problem??" CMTeam < /tmp/mail.error
+        rm /tmp/mail.error
+	goodbye 60 
+      fi
+     else
+      DONE=TRUE
+    fi
+   done
+fi
+
+# LEVEL must be set to get this far...
+#
+if [[ $DEVMODE = TRUE ]]
+then
+  BUILDDIR=$EDAF/${LEVEL}/svn_test/${PROJ_NAME}/${R_V}
+else
+  BUILDDIR=$EDAF/${LEVEL}/${PROJ_NAME}/${R_V}
+fi
+
+BOSS_MAKEFILE="Make.config"
+PARENT_MARKER='^DIRECTORIES =|^[      ]*DIRECTORIES ='
+REQ_MAKEFILE="Makefile"
+LANG=C
+
+# read build tree Make.config in order to figure out nutshell version
+# build/tools directory is based on version of nutshell
+NUT_VER=$(grep "^NUTSH_VERSION" $BUILDDIR/Make.rules 2>/dev/null | awk '{print $3}')
+NUTSHELL=/afs/eda/prod/nutshell/$NUT_VER
+case $NUT_VER in
+ 2.0) BTOOLS=1.1; BTLEVEL=build;;
+ 3.0) BTOOLS=3.0; BTLEVEL=build;;
+   *) BTOOLS=$NUT_VER; BTLEVEL=prod;;
+esac
+PATH=$EDAF/$BTLEVEL/tools/$BTOOLS/bin:$PATH
+
+PATH=$(print $PATH | sed 's!SUNWspro!SUNWspro/SC4.2!')
+export LANG PATH
+case $PLATFORM in
+     rs_aix41|\
+     rs_aix43|\
+     rs_aix51|\
+     rs_aix53) GNUPLAT=aix;;
+  64-rs_aix43) GNUPLAT=aix64;;
+  64-rs_aix51) [[ $REL_VER < 1001 ]] && GNUPLAT=aix564 || GNUPLAT=aix64;;
+  64-rs_aix53) GNUPLAT=aix64;;
+  64-rs_aix61) GNUPLAT=aix64;;
+     sun4x_55|\
+     sun4x_57) GNUPLAT=sun;;
+  64-sun4x_57|\
+  64-sun4x_58) GNUPLAT=sun64;;
+     hp_ux102|\
+     hp_ux110) GNUPLAT=hp;;
+  64-hp_ux110) GNUPLAT=hp64;;
+      linux30|\
+      linux40|\
+      linux71|\
+      linux72|\
+ i386_linux22|\
+ i386_linux24) GNUPLAT=linux;;
+       64-linux30|\
+       64-linux40|\
+       64-linux50|\
+ 64-amd64_linux24) GNUPLAT=linux64;;
+            *) print "Need to set a GNUPLAT for \"$PLATFORM\""
+               GNUPLAT=;;
+esac
+
+[[ $LEVEL = build ]] && EXT= || EXT=".${LEVEL}"
+
+[[ -z $EINS ]] && LIBHOME=$HDPLIB || LIBHOME=$EINSLIB
+[[ $LOGNAME = @(synlib|psslib) ]] && LIBHOME=/afs/eda.fishkill.ibm.com/u/$LOGNAME
+[[ ! -d $LIBHOME/logs/$MONTH ]] && mkdir -p $LIBHOME/logs/$MONTH
+[[ ! -d $LIBHOME/veriflogs/$MONTH ]] && mkdir -p $LIBHOME/veriflogs/$MONTH
+if [[ $DEVMODE = TRUE ]]
+then
+  BUILDLOG=$LIBHOME/logs/$MONTH/$DATE.$PROJ_NAME.${REL_VER}${EXT}.devmode
+  VERIFBUILDLOG=$LIBHOME/veriflogs/$MONTH/$DATE.$PROJ_NAME.${REL_VER}${EXT}.devmode
+else
+  BUILDLOG=$LIBHOME/logs/$MONTH/$DATE.$PROJ_NAME.${REL_VER}${EXT}
+  VERIFBUILDLOG=$LIBHOME/veriflogs/$MONTH/$DATE.$PROJ_NAME.${REL_VER}${EXT}
+fi
+
+[[ -n $(eval_var ${PROJ_NAME}_LIBR) ]] && BUILDLOG=$EDAF/u/$(eval_var ${PROJ_NAME}_LIBR)/logs/$MONTH/$DATE.${PROJ_NAME}.${REL_VER}${EXT}
+
+[[ -z $NOLOGPLAT ]] && BUILDLOG=${BUILDLOG}.${PLATFORM}
+
+LIBBIN=$BUILDDIR/build/bin-$PLATFORM
+LIBETC=$BUILDDIR/build/etc
+TIMEFILE=$LIBETC/timeSequence
+BLOWAWAYFILE=$LIBETC/blowaway.$PLATFORM
+COMPLOCKDIR=$LIBETC/complock/$PLATFORM
+LOGDIR=$LIBETC/log/$PLATFORM
+COMPERROR=$LIBETC/cmperr.$PLATFORM.html
+MAILLIST=$($HDPLIBBIN/CM_parsealias $PROJ_NAME)
+[[ -n $CMDEBUG ]] && { MAILLIST="$LOGNAME@edamail"; print "\n[D] Setting MAILLIST to: $MAILLIST"; }
+
+
+###
+###	Print some messages (need to wait until BUILDLOG was set)
+###
+
+[[ -z $NOUSELOG && -n $NEEDED_TO_GET_TOKENS ]] && print "\n$(tokens)\n" >> $BUILDLOG
+
+
+###
+###	Check to be sure the BUILDIR is valid
+###
+
+# is $BUILDDIR valid??
+#
+[[ ! ( -r $BUILDDIR && -d $BUILDDIR ) ]] &&  goodbye 2 "\n*** the directory '$BUILDDIR' cannot be read"
+
+
+###
+###	General Setup & Checks complete:  Start 'er up!
+###
+
+[[ -z $NOSTARTFLAG ]] && STARTED=TRUE
+[[ -z $NOUSELOG && -z $NOSTARTMSG ]] && print "\n$SCRIPT: $RELEASE ($LEVEL) on $PLATFORM starting at $(date +'%a %D %T') on $(hostname | cut -d. -f1)\n" >> $BUILDLOG
+
+# because of cache problems
+#
+[[ -z $NOFLUSHTREE ]] && flushtree
+
+
+###
+###	We Now Return You to Your Regularly Scheduled Program . . . Already in Progress :)
+
+

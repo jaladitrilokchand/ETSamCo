@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CqCreate>
+	<login>
+		<username>asuren</username>
+		<password>fake</password>
+		<database>PROT0</database>
+		<schema>mdcms</schema>
+	</login>
+	<client>
+		<app-name>CQServiceTest</app-name></client>
+	<record>
+		<record_type>tk_patch</record_type>
+	</record>
+</CqCreate>

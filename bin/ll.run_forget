@@ -1,0 +1,284 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: ll.run_forget
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# PURPOSE ---------------------------------------------------------------------
+# Runs the given command on a LoadLeveler machine.  This script will launch
+# the job and return. (Does not wait for job to complete or return results)
+# -----------------------------------------------------------------------------
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 07/02/2012 GS  Initial coding.
+# 01/02/2013 GS  Removed submit verification
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use LL_ET;
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+
+# Program variables
+my $appName = "ll.run_forget";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help       = "";
+my $verbose    = 0;
+my $release    = "";
+my $component  = "";
+my $location   = "";
+my $platform   = "";
+my $llPlat     = "";
+my $uniquifier = $$;
+my $execString = "";
+my $keepLogs   = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc  = $ERROR;
+my $progRC = "";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleDIE(); };
+
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+# Prepare for the LL job
+my $dotRelease;
+LL_ET::setDotRelease($release, \$dotRelease);
+print "Dot release: $dotRelease\n" if ($verbose);
+
+my $zeroRelease;
+LL_ET::setZeroRelease($release, \$zeroRelease);
+print "Zero release: $zeroRelease\n" if ($verbose);
+
+my $initDir = "/afs/eda/$location/$component/$dotRelease";
+print "Initial dir: $initDir\n" if ($verbose);
+
+my $app = "";
+my $args = "";
+my $execName = "";
+LL_ET::parseCommand($execString, \$app, \$args, \$execName);
+print "App : $app\n" if ($verbose);
+print "Args: $args\n" if ($verbose);
+print "Exec: $execName\n" if ($verbose);
+
+
+# Reset output/error files
+my $outFile = LL_ET::getOutFile($execName, $zeroRelease, $component,
+				$location, $llPlat, $uniquifier);
+my $errFile = LL_ET::getErrFile($execName, $zeroRelease, $component,
+				$location, $llPlat, $uniquifier);
+unlink($outFile) if (-e $outFile);
+unlink($errFile) if (-e $errFile);
+
+print "Out: $outFile\n" if ($verbose);
+print "Err: $errFile\n" if ($verbose);
+
+
+# Create LL job file
+my $llFile = LL_ET::loadJobFile($zeroRelease, $component, $location,
+				$llPlat, $app, $args, $initDir,
+				$uniquifier);
+print "Job: $llFile\n" if ($verbose);
+
+
+# Submit LL job
+my $jobNumber = "";
+LL_ET::submit($llFile, \$jobNumber);
+print "Job #: $jobNumber\n" if ($verbose);
+
+
+# Verify LL job was submitted
+#my $status = "";
+#LL_ET::setStatus($jobNumber, \$status);
+#if ($status ne "I") {
+#  CleanExit("LL Job not started\nLL File: $llFile", $ERROR);
+#}
+
+
+my $results = "";
+CleanExit($results, $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  CleanExit("\n[$appName] Caught an unexpected die - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+
+  # Clean up files
+  unlink($llFile) if (-e $llFile);
+  unlink($outFile) if (-e $outFile && ! $keepLogs);
+  unlink($errFile) if (-e $errFile && ! $keepLogs);
+
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Runs the given command on a LoadLeveler machine.  This script will launch
+the job and return. (Does not wait for job to complete or return results)
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-r release> <-c component> <-l location> <-p platform>
+                <-e command> [-u unique] [-k] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  release   = Tool Kit release (ie, 14.1 ...)
+  component = Component name (ie, einstimer, edautils ...)
+  platform  = Compile platform name [ 64-rs_aix61 | 64-linux50 ]
+  location  = Build/test location [ build | tkb | shipb | xtinct ]
+  command   = Command and args to be executed
+  unique    = (optional) String to make the job files unique (defaults to PID)
+  -k          (optional) keep err/out log files
+  -h          (optional) application help
+  -y          (optional) Verbose (print the invocation of each command)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  my $rc = $OK;
+
+  # Parse command line arguments
+  GetOptions ('rel|r=s'    => \$release,
+              'comp|c=s'   => \$component,
+              'plat|p=s'   => \$platform,
+              'loc|l=s'    => \$location,
+              'cmd|e=s'    => \$execString,
+              'u=s'        => \$uniquifier,
+              'k'          => \$keepLogs,
+              'y'          => \$verbose,
+              'help|h|?'   => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $release) {
+    print "ERROR: Tool Kit release (-r) must be specified\n";
+    return $ERROR;
+  }
+
+  if (! $component) {
+    print "ERROR: component (-c) must be specified\n";
+    return $ERROR;
+  }
+
+  if (! $location) {
+    print "ERROR: location (-l) must be specified\n";
+    return $ERROR;
+  }
+  if (! LL_ET::validateLocation($location)) {
+    print "c1 ..\n";
+    print "ERROR: location($location) must be " . LL_ET::getLocations() . "\n";
+    return $ERROR;
+  }
+
+  if (! $platform) {
+    print "ERROR: platform (-p) must be specified\n";
+    return $ERROR;
+  }
+  LL_ET::setLlPlatform($platform, \$llPlat);
+
+  if (! $execString) {
+    print "ERROR: command to execute (-e) must be specified\n";
+    return $ERROR;
+  }
+  $execString =~ s/##/ /g; # Deal with calls from ksh
+
+  if (! $uniquifier) {
+    $uniquifier = $$;
+  }
+
+  return $OK;
+
+}

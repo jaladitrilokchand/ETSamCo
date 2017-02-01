@@ -1,0 +1,220 @@
+#!/usr/bin/env perl
+#use warnings;
+#use strict;
+#=============================================================================
+#    FILE: clean_tkversion_tree
+#
+# CREATOR: Art Magnan
+#    DEPT: AZYX
+#
+# OUTPUTS:
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# Initialize a 14.1 component treetop in the specified EDA TK version tree
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 09/09/2011 AM  Initial version
+#=============================================================================
+#=============================================================================
+#			       FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub help {
+        print "\nScript to delete and initialize a 14.1 component treetop in the specified EDA TK version tree.";
+        print "\nUsage: clean_tkversion_tree -t <tkVersion> -c <component> [-d] [-g] [-h]\n";
+        print "\nInput parameters:\n";
+				print "  -t <EDA Toolkit release version> e.g. 14.1.0\n";
+        print "  -c <component_name; e.g. model>\n";
+        print "  -d [Development Mode ON]\n";
+				print "  -g [Test mode ON - will see what would execute.]\n";
+				print "  -h This help\n";
+        print "\nNOTES:\n";
+				print "  1) The EDA release version and component name is required.\n";
+				print "  2) The TK version tree repository location is:\n";
+				print "     For Production: \"afs/eda/tk{tkVersion}/{component}/{release}\"\n";
+				print "     For Dev mode  : \"afs/eda/u/svnlib/tk{tkVersion}/{component}/{release}\"\n";
+        exit 1;
+}
+
+sub process_cmd_line {
+  # ---------------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+	# Parms defined:  -t <Toolkit version;  e.g. 14.1.0>
+  #                 -c <component_name; e.g. model>
+  #                 -d [Development Mode ON - using code from DEV area]
+  #                 -g [Test mode ON - will see what would execute.]
+  #                 -h [help]
+  # ---------------------------------------------------------------------
+  getopts('c:dght:');
+	
+  $compName    = "$opt_c";
+  $devMode     = "$opt_d";
+  $tkVersion   = "$opt_t";
+	
+	# Set DEBUG mode
+	if ( ${opt_g} ) {
+		$DEBUG = 1;
+	}
+	else {
+		$DEBUG = 0;
+	}
+
+	# Display help if requested
+	if ( ${opt_h} ) { help(); }
+}
+
+sub max_rc {
+	#
+	# return the rolling maximum return code
+	#
+	my ($rc, $maxrc) = @_;
+	
+	if ($rc > $maxrc) {
+		$maxrc = $rc;
+	}
+	return ($maxrc);
+}
+
+sub display_program_parms {
+	#
+	# Display program runtime parms
+	#
+	print "------------------------------------ \n";
+	print "    Runtime parms: $scrName  \n";
+	print "------------------------------------ \n";
+	print "EDA TK version      = \"$tkVersion\"\n";
+	print "EDA release         = \"$rlse\"\n";
+	print "Component name      = \"$compName\" \n";
+	print "Component path      = \"$compPath\" \n";
+	if ($opt_d) { print "DEV Mode            = \"ON\" \n"; }
+	else { print "DEV Mode            = \"OFF\" \n"; }
+	if ($opt_g) { print "DEBUG Mode          = \"ON\" \n"; }
+	else { print "DEBUG Mode          = \"OFF\" \n"; }
+	print "------------------------------------ \n";
+	
+} # end display_program_parms
+
+#============================================================================================
+#					MAIN ROUTINE
+#============================================================================================
+use Env;
+use Getopt::Std;
+use File::Path qw(rmtree);
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TkCommon;
+
+$scrName = "clean_tkversion_tree";
+$rc = 0;
+
+$codePath = "/afs/eda/data";
+#$codePath = "/afs/eda/u/amagnan";
+
+process_cmd_line;
+
+# Make sure the required parameters are provided
+if ($tkVersion eq "") {
+  print "\nERROR: You must specify the EDA Toolkit release version in format 14.1.{n} using the -t input switch.\n\n";
+  exit 8;
+}
+
+# Ensure tkVersion is in correct format
+$rc = TkCommon::check_tkVersion ($tkVersion);
+if ($rc != 0) {
+  print "\nERROR: Toolkit version specified in an invalid format!\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+} else {
+	# Define the EDA release
+	$rlse = TkCommon::convert_tkVersion ($tkVersion, "release");      # Release format, e.g. 14.1
+}
+
+# Make sure the required parameters are provided.
+if ($compName eq "") {
+  print "\nERROR: You must specify the component name using the -c parameter syntax.\n\n";
+  exit 8;
+}
+
+# Define variable values for development vs Production mode
+if ($devMode) {
+$pref = "u/svnlib/tk${tkVersion}";
+$compTop = "/afs/eda/u/svnlib";
+$scriptPath = "${codePath}/edainfra/tools/enablement/dev/bin";
+}
+else {
+$pref = "tk${tkVersion}";
+$compTop = "/afs/eda";
+$scriptPath = "${codePath}/edainfra/tools/enablement/prod/bin";
+}
+
+$compPath = "${compTop}/tk${tkVersion}/${compName}";
+
+# Display the program parameters
+display_program_parms;
+
+# Get into the component directory to clean
+chdir ($compPath) or die "[ERROR]: Can't change directory to $compPath.\n";
+
+# Clean the rlseDir
+if (-e $rlse) {
+	if ($DEBUG) {
+		print "INFO: In DEBUG mode, the $rlse directory has not been removed under directory $compPath.\n";
+	}
+	else {
+		print "INFO: Removing $rlse directory under directory $compPath.\n";
+		$verbose = 1;
+		$safe = 0;
+		rmtree ("$rlse", $verbose, $safe);
+	}
+}
+else {
+	print "INFO: The $rlse directory is already removed.\n";
+}
+
+# Create the rlseDir
+if ((-e $rlse) && (! $DEBUG)) {
+	print "ERROR: The $rlse directory should have been deleted at this point.\n";
+	exit 8;
+}
+else {
+	if (! $DEBUG) {
+		print "INFO: Creating the $rlse directory under directory $compPath\n";
+		mkdir ("$rlse");
+
+		if (-e $rlse) {
+			print "INFO: The $rlse directory was created under directory $compPath\n";
+
+			# Initialize the component tree
+			print "INFO: Initializing infrastructure in the $rlse directory.\n";
+			$cmdStr = "$scriptPath/setbldenv $rlse $compName $pref";
+			print "Command to be executed: \"$cmdStr\"\n";
+			TkCommon::runcmd ("$cmdStr", "$DEBUG");
+			$rc = $? >> 8;
+			if ($rc) {
+				print "ERROR: The $rlse directory infrastructure was NOT initialized.\n";
+			}
+			else {
+				print "INFO: The $rlse directory infrastructure was initialized.\n";
+			}
+		}
+		else {
+			print "ERROR: The $rlse directory did not get created.\n";
+		}
+	}
+	else {
+		print "INFO: In DEBUG mode, will not create a new $rlse directory and will not initialize its infrastructure.\n\n";
+	}
+}
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CqUpdate>
+	<login>
+		<username>asuren</username>
+		<password>fake</password>
+		<database>PROT0</database>
+		<schema>mdcms</schema>
+	</login>
+	<client>
+		<app-name>CQServiceTest</app-name>
+	</client>
+	<update>
+		<record_type>Problem</record_type>
+		<record_id>PROT000004092</record_id>
+		<action>Resolve</action>
+		<fields>
+			<field
+				name="Priority"
+				value="4-Normal Priority" />
+			<field
+				name="customer_communication"
+				value="Resolving the issue. The fix is released to production today." />
+			<field
+				name="Resolution"
+				value="Fixed" />
+			<field
+				name="root_cause_selection"
+				value="Testing - Insufficient" />
+		</fields>
+	</update>
+</CqUpdate>

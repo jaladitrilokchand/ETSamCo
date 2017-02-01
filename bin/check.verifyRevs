@@ -1,0 +1,371 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: check.verifyRevs
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 10/12/2011
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 03/19/2012 GS  Initial coding.
+# 03/27/2012 GS  Updated to allow tk14* locations.  Updated to use tk14*
+#                instead of shipb/tkb/xtinct as the location.
+# 09/12/2012 GS  Updated to ignore etreetest* components.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+
+#
+# Global variables
+#
+my $AFS_EDA   = "/afs/eda";
+my @VALID_LOCS = ( "build", "shipb", "tkb" );
+
+# Program name
+my $appName = "check.verifyRevs";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $toolKit    = "";
+my $component  = "";
+my $location   = "";
+my $help       = "";
+my $verbose    = 0;
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+# Set the location and name of createFuncUpdate application
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $GET_REV = "$BIN/getRevisionsTk ";
+my $GET_COMP = "$BIN/getComponents -q ";
+my $LOG_DIR = "/afs/eda/data/edainfra/checks/";
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# Define the current directory
+#
+my $startDir = $ENV{"PWD"};
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    #printSyntax();
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Set the log directory
+$LOG_DIR .= $toolKit . "/" . $location . "Revs";
+mkpath($LOG_DIR) if (! -d $LOG_DIR);
+print "LOG_DIR: $LOG_DIR\n" if ($verbose);
+
+#
+# Define custom perl libs path and modules depending on the
+# application mode.
+#
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use IcofFile;
+
+
+#
+# Query the database for components in this Tool Kit
+#
+my $command;
+my @results;
+my @components = ();
+if ($component) {
+  push(@components, $component);
+}
+else {
+  $command = $GET_COMP . " -t $toolKit -q -ct DELIVERED,BUILD_SUPPORT,TEST_SUPPORT ";
+  @results = `$command`;
+  @components = split(/,/, $results[0]);
+}
+
+
+# Set the "real" location so SVN working copies can be found
+my $realLocation = $location;
+if (($location =~ /^ship/) || ($location =~ /^tk/)) {
+  $realLocation = "tk" . $toolKit;
+}
+
+
+#
+# For each component determine the location working copy revision and the
+# latest revision in this location from the ETREE database
+#
+@tokens = split(/\./, $toolKit);
+pop @tokens;
+my $TK_VER  = join(".", @tokens);
+
+my $wcRev;
+my $dbRev;
+my $compCount = scalar(@components);
+foreach $entry (@components) {
+
+  chomp($entry);
+  next if ($entry =~ /etreetest/);
+  next if ($entry =~ /svntest/);
+  print "Checking $entry ...\n";
+
+  $wcRev = GetWcRevision($entry, $realLocation);
+
+  # Get revision from ETREE DB
+  $command = $GET_REV . "-t $toolKit -c $entry -latest -l $location";
+  @results = `$command`;
+  my $rc = $? >> 8;
+  if ($rc == 0) {
+    $dbRev = $results[0];
+    chomp $dbRev;
+  }
+  else {
+    $dbRev = "Not found in DB";
+  }
+
+  # Generate log file data
+  my $problems = "";
+  my $date = `date +%Y-%m-%d`;
+  chomp $date;
+  my $time = `date +%H:%M:%S`;
+  chomp $time;
+  $problems .= "Component: $entry<br>\n";
+  $problems .= "Date: $date<br>\n";
+  $problems .= "Time: $time<br>\n";
+  $problems .= "WC($location): /afs/eda/$location/$entry/$TK_VER<br>\n";
+  $problems .= "<br>\n";
+  $problems .= "$location WC revision: $wcRev<br>\n";
+  $problems .= "ETREE DB revision: $dbRev<br>\n";
+  $problems .= "<br>\n";
+
+  my $log = "";
+  # Clean up the old files
+  my $FAIL = $entry . "_FAIL.html";
+  my $PASS = $entry . "_PASS.html";
+  if ($wcRev lt $dbRev) {
+    $problems .= "Status: Revisions DO NOT match<br>\n";
+    $log = $FAIL
+  }
+  else {
+    $problems .= "Status: Revisions match<br>\n";
+    $log = $PASS;
+  }
+
+  # Clean up the old files
+  unlink("$LOG_DIR/$PASS");
+  unlink("$LOG_DIR/$FAIL");
+
+  # Write the log file
+  if (! $verbose) {
+    my $file = "$LOG_DIR/$log";
+    open LOG, ">$file" || die("Unable to open file for writing $!");
+    print LOG $problems;
+    close LOG;
+  }
+  else {
+    print $problems;
+  }
+
+}
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}  # End of handleInterruption
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}  # End of handleDIE
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Compares a component's LOCATION working copy against the revision in ETREE DB.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> <-l location> [-c component] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit  = Tool Kit [14.1.0, 14.1.1 ...].
+  location  = location to check (build, shipb, tkb)
+  component = (run check for a single component [no mail sent])
+  -h        = Application help (optional)
+  -y        = Verbose mode (optional)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'       => \$toolKit,
+              'comp|c=s'     => \$component,
+              'loc|l=s'      => \$location,
+              'verbose|y'    => \$verbose,
+              'help|h|?'     => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the obsolete file.
+  my $msg = "";
+  if (! $toolKit) {
+    $msg .= "ERROR: tool_kit (-t) is a required parameter\n";
+  }
+  if (! $location) {
+    $msg .= "ERROR: location (-l) is a required parameter\n";
+  }
+  $location = lc($location);
+  if (! grep(/^$location$/, @VALID_LOCS)) {
+    $msg .= "ERROR: location must be build, shipb or tkb\n";
+    $msg .= "       Location: $location\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetWcRevision($component)
+# Purpose: Determine the WCs current revision
+# RCs    : none
+#------------------------------------------------------------------------------
+sub GetWcRevision {
+
+  my ($component, $realLocation) = @_;
+  my $rev = 0;
+  my $command = "/afs/eda/tools/bin/svn info";
+
+  # Determine the WCs last changed revision
+  my $dir = "/afs/eda/$realLocation/$component/$TK_VER";
+  my $cmd = "$command $dir | grep \"Last Changed Rev\" | awk -F \": \" '{print \$2}'";
+  #print "Command_b: $cmd\n";
+  @results = `$cmd`;
+  if (scalar(@results) > 0) {
+    $rev = $results[0];
+    chomp $rev if ($rev);
+  }
+
+  # Determine the WCs revision if unable to read last changed revision
+  if ($rev == 0) {
+    $cmd = "$command $dir | grep \"Revision\" | awk -F \": \" '{print \$2}'";
+    #print "Command_b: $cmd\n";
+    @results = `$cmd`;
+    $rev = $results[0];
+    chomp $rev;
+  }
+
+  return $rev
+
+}

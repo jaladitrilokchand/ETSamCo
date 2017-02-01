@@ -1,0 +1,662 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: customtk.master
+# CREATOR: Gregg Stadtlander
+#    DATE: 03/19/2013
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 03/19/2013 GS  Initial coding.
+# 02/11/2014 GS  Added support for -nolock
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TKutils;
+
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $DATA_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/data";
+my $CHECKS_DIR = "/afs/eda/data/edainfra/checks";
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+my $MGR_INCLUDED = 1;
+my $MGR_IGNORE = 0;
+
+# Program variables
+my $appName = "customtk.master";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $tgtToolKit      = "";
+my $srcToolKit      = "";
+my $dbMode          = ""; # default is prod if empty
+my @components      = ();
+my $component       = "";
+my @healthChecks    = ();
+my $appErrorMessage = "";
+my $startDir = $ENV{"PWD"};
+my $healthCheckUrl  = "";
+my $dryRun          = 0;
+my $reverse         = 0;
+my $nolock          = 0;
+my $ignoreBom       = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+my $tgtLocation = GetTargetLocation($tgtToolKit);
+
+
+# Create list of components to process
+@components = SetComponents($srcToolKit, $component);
+if (scalar(@components) < 1) {
+  CleanExit("No components to process ... exiting\n", $ERROR);
+}
+
+
+# Log application start event
+#LogAppEvent("start");
+
+
+# Create list of required health checks
+@healthChecks = SetHealthChecks($srcToolKit);
+print "Health checks .. " . join("|", @healthChecks) . "\n";
+
+
+# Process each component
+foreach $component (@components) {
+
+  print "\nProcessing ... $component\n";
+
+  # Get this component's status
+  my $status = GetStatus($tgtToolKit, $component);
+  if ($status eq "Pass") {
+    print "  Skipping ... this component already passed!\n";
+    next;
+  }
+  if ($status eq "WIP") {
+    print "  Skipping ... this component's processing is underway!\n";
+    next;
+  }
+
+  # Verify Health Checks for this component have passed
+  my $checksPassed = VerifyHealthChecks($component);
+
+  # Either process this component or notify owner/manager that Health Checks
+  # haven't passed
+  if ($checksPassed) {
+
+    # Run the engine script for this TK and component
+    my $myRc = RunEngine($component);
+
+    # Notify component owner if CTK failed
+    #AlertOwner($component, $MGR_IGNORE, 1) if ($myRc != 0);
+
+  }
+  else {
+
+    # Log component fail Health Check event
+    TKutils::LogComponentEvent($tgtToolKit, $component, $tgtLocation, 
+                               "CUSTOMTK_FAIL",
+			       "Failed Health Check(s)", $verbose, $dryRun);
+
+    # Notify Component Owner/manager
+    #AlertOwner($component, $MGR_INCLUDED, 0);
+
+  }
+
+}
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  #LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script creates a new Tool Kit (target tk) from the specified source
+Tool Kit. Under the covers this script call customtk.engine for each component
+in the source tool kit.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-tgt tgt_tk> <-src src_tk> [-reverse] [-c component]
+                  [-nolock] [-ignoreBom] [-dryrun] [-y] [-db dbMode] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  src_tk     = Source Tool Kit version which must exist (ie, 14.1.1 ...)
+  tgt_tk     = Target Tool Kit version which must exist (ie, 14.1.2 ...)
+  -reverse   = (optional) Reverse sort the component list (z .. a)
+  -component = (optional) Process a single component (ess, edif, svntest1 ... )
+  -nolock    = Do not lock the source repository (for testing)
+  -ignoreBom = Don't fail on BOM differences/errors
+  -dryrun    = (optional) Run script in dryrun mode
+  dbMode     = (optional) Database mode [default = PROD] (PROD, DEV, TEST)
+  -h           (optional) application help
+  -y           (optional) verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('src=s'     => \$srcToolKit,
+	      'tgt=s'     => \$tgtToolKit,
+	      'c=s'        => \$component,
+	      'db=s'       => \$dbMode,
+	      'ignoreBom'  => \$ignoreBom,
+	      'dryrun'     => \$dryRun,
+	      'reverse'    => \$reverse,
+	      'nolock'     => \$nolock,
+	      'y'          => \$verbose,
+	      'help|h|?'   => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $tgtToolKit) {
+    print "ERROR: Target Tool Kit (-tgt) is a required parameter\n";
+    return $ERROR;
+  }
+  if (! $srcToolKit) {
+    print "ERROR: Source Tool Kit (-src) is a required parameter\n";
+    return $ERROR;
+  }
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents()
+# Purpose: Create a list of components ready for this Tool Kit
+# RCs    : List of component names or empty list
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  my ($tk, $comp) = @_;
+  print " Querying for components in $tk ...\n" if ($verbose);
+
+  # Query the DB for tk/components for the src tool kit
+  my @list = TKutils::GetComponents($tk, $comp, "");
+  print "Found " . scalar(@list) . " components\n" if ($verbose);
+
+  return reverse(@list) if ($reverse);
+
+  return @list;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LogAppEvent($event)
+# Purpose: Log an application specific event
+# RCs    : 0 = ok
+#          1 = error or if start instance already running
+#------------------------------------------------------------------------------
+sub LogAppEvent {
+
+  my ($event) = @_;
+
+  print " Logging application event ($event) ...\n" if ($verbose);
+
+  # Log in the DB that this application is running or has completed
+  # Construct the command
+  my $command = "$BIN_DIR/appLog";
+  $command .= " -a $appName";
+  if ($event eq "start") {
+    $command .= " -start";
+  }
+  else {
+    $command .= " -end";
+  }
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print join("\n", @results);
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : VerifyHealthChecks()
+# Purpose: Verifies the health checks have passed for the given TK/component
+# RCs    : $OK    = Health Checks passed
+#          $ERROR = 1 = ok
+#                   0 = 1 or more Health Check failed
+#------------------------------------------------------------------------------
+sub VerifyHealthChecks {
+
+  my ($myComponent) = @_;
+
+  print " Verifying Health Checks ...\n" if ($verbose);
+  
+  # If the source tool kit does not contain 'build'(not a developent toolkit) then
+  # skip the health checks.
+  if($srcToolKit !~ /build/){
+     print " Skipping Health Checks ...\n";
+     return 1;
+  }
+  
+  # Verify each required health check has passed for this component
+  my $messages = "";
+  my $check;
+  my $rc = 1;
+  foreach $check (@healthChecks) {
+    #my $checkDir = "$CHECKS_DIR/$check/$srcToolKit"; #path is wrong changing (navechan)
+    my $checkDir = "$CHECKS_DIR/$srcToolKit/$check";
+    print "CHECKS_DIR: $CHECKS_DIR\n";
+    print "check: $check\n";
+    print "srcToolKit: $srcToolKit\n";
+    print "Checks dir: $checkDir\n";
+    $rc = 0 if (! -d $checkDir);
+    my $failFile = "$checkDir/$myComponent" . "_FAIL.html";
+    if (-f $failFile) {
+      $messages .= "Failed Health Check: $check (see $failFile)\n";
+      $rc = 0;
+    }
+
+  }
+
+  if ($verbose) {
+    if ($rc) {
+      print " Passed\n";
+    }
+    else {
+      print " Failed\n";
+    }
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RunEngine()
+# Purpose: Run the engine script for the specified tool kit and component
+# RCs    : rc from engine script
+#------------------------------------------------------------------------------
+sub RunEngine {
+
+  my ($myComponent) = @_;
+
+  print " Running engine script ...\n" if ($verbose);
+
+  # Construct the command
+  my $command = "$BIN_DIR/customtk.engine_plnxtest"; # navechan change to point to updated engine
+  $command .= " -src $srcToolKit";
+  $command .= " -tgt $tgtToolKit";
+  $command .= " -c $myComponent";
+  $command .= " -y " if ($verbose);
+  $command .= " -dryrun " if ($dryRun);
+  $command .= " -nolock" if ($nolock);
+  $command .= " -ignoreBom" if ($ignoreBom);
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my $rc = TKutils::RunSystem($command, $dryRun, $verbose);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : AlertOwner($component, $notifyManager, $failed)
+# Purpose: Notifies the component owner and/or their manager that this process
+#          failed or could not be executed for this component.
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub AlertOwner {
+
+  print " Alerting Component owner/mgr ...\n" if ($verbose);
+
+  my ($myComp, $notifyMgr, $failed) = @_;
+
+  # Create the sender list
+  my @list = ();
+  my $owner = GetOwner($myComp);
+  push(@list, $owner);
+
+  my $manager = GetManager($owner);
+  if ($notifyMgr) {
+    push(@list, $owner);
+  }
+
+  #
+  # WARNING!!!
+  #
+  # All emails will be sent to Gregg for the time being.  He will
+  # review emails and forward to owner/mgr if necessary
+  #
+  @list = ('naveen_mc\@in.ibm.com');
+
+
+  # Create the email body
+  my $body = "Hello,\n\n";
+  if ($failed) {
+    $body .= GetFailBody($myComp);
+  }
+  else {
+    $body .= GetHealthCheckFailBody($myComp);
+  }
+  $body .= "\n";
+  $body .= "Please contact Naveen Chandrappa if you have any \n";
+  $body .= "quesitons.\n";
+  $body .= "\n";
+  $body .= "Thank you,\n";
+  $body .= "EDA Software Release Team\n";
+  $body .= "\n";
+  $body .= "Owner/mgr: $owner, $manager\n";
+
+  # Send the email
+  my $address;
+  foreach $address (@list) {
+    $address =~ s/\@/\\\@/;
+
+    my $subject = "\"Action Required: CTK $tgtToolKit Health Check error - $myComp\"";
+    $subject = "\"Action Required: CTK $tgtToolKit failure - $myComp\"" if ($failed);
+
+    `/bin/mailx -s $subject $address << EOF
+$body
+`;
+  }
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetStatus($tgtToolKit, $component)
+# Purpose: Query the DB for this component's CTK status
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetStatus {
+
+  my ($tk, $comp) = @_;
+
+  print " Reading xtinxt/customtk status ...\n" if ($verbose);
+
+  # Construct the command
+  my $command = "$BIN_DIR/statusXtinct";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command and show results
+  my $status = "";
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  if ($rc == 0) {
+    foreach my $line(@results) {
+      next if ($line !~ /$comp/);
+      my @tokens = split(/ +/, $line);
+      $status = $tokens[2];
+    }
+  }
+
+  print " Status: $status\n" if ($verbose);
+
+  return $status;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetHealthChecks($toolKit)
+# Purpose: Create a list of required health checks for the given tool kit
+# RCs    : list of check names
+#------------------------------------------------------------------------------
+sub SetHealthChecks {
+
+  my ($tk) = @_;
+  print " Querying for required Health Checks ...\n" if ($verbose);
+
+  return ("prod2svn");
+
+  # Set the Health Check data file
+  my $locStage = "";
+  TKutils::GetTkStage($tk, \$locStage);
+
+  my $loc = "build";
+  if ($locStage eq "PREVIEW") {
+    $loc = "shipb";
+  }
+  elsif ($locStage eq "PRODUCTION") {
+    $loc = "tkb";
+  }
+  elsif (($locStage =! /XTINCT/) || ($locStage =! /CUSTOM/)) {
+    $loc = "tk$tk";
+  }
+  my $dataFile = "$DATA_DIR/HealthCheck_$loc.data";
+  print "  Health Check = $dataFile\n" if ($verbose);
+
+  # Read the file.
+  return () if (! -f $dataFile);  # Return if no Health Check file
+  if (! open(DATA, "<$dataFile")) {
+    print "ERROR: unable to open Health Check file($dataFile)\n";
+    return ();
+  }
+  my @contents = <DATA>;
+  close DATA;
+
+  # Read the Health Checks
+  my @checkList = ();
+  foreach $entry (@contents) {
+
+    if ($entry =~ /^OUTPUT/) {
+      @tokens = split(/;/, $entry);
+      $healthCheckUrl = $tokens[1];
+    }
+    next if ($entry !~ /^CHECK/);
+
+    @tokens = split(/;/, $entry);
+    my $checkName = $tokens[1];
+
+    # Skip the buildRevs health check for now since for 14.1.1 there may
+    # be some false errors
+    next if ($checkName eq "buildRevs");
+
+    push(@checkList, $checkName);
+
+  }
+
+  return @checkList;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetHealthCheckBody()
+# Purpose: Get the email text for the Health Check fail email
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetHealthCheckFailBody {
+  my $body = "";
+
+  $body .= "Our records indicate you are the owner/manager of an EDA Tool \n";
+  $body .= "Kit component that does not not pass required Tool Kit Health\n";
+  $body .= "Checks. The EDA Software Release team is unable to include this\n";
+  $body .= "component in the pending preview Tool Kit until these release \n";
+  $body .= "Health Check failures are fixed.\n";
+  $body .= "\n";
+  $body .= "To view specific errors visit the EDA TK health report page at\n";
+  $body .= "$healthCheckUrl\n";
+  $body .= "and click on the \"fail\" link for this component. Information\n";
+  $body .= "on the specific check is available by clicking the check's \n";
+  $body .= "column heading. That web page also contains suggestions on how\n";
+  $body .= "to resolve and prevent these errors.\n";
+
+  return $body;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetFailBody()
+# Purpose: Get the email text for the fail email
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetFailBody {
+
+  my ($myComp) = @_;
+  my $body = "";
+
+  $body .= "Our records indicate you are the owner/manager of an EDA Tool \n";
+  $body .= "Kit component that failed the Tool Kit creation process.\n";
+
+
+  return $body;
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : GetLog($component)
+# Purpose: Locate the engine's log file
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetLog {
+
+  my ($myComp) = @_;
+
+  my $glob = "$LOGS_DIR/$tgtToolKit/ctk/customtk.engine_" . $myComp . "_*.log";
+  my (@files) = glob $glob;
+
+  my $file = "";
+  my $newestFile = "";
+  my $newestAge = 365;
+  foreach $file (@files) {
+    my $age = -M $file;
+    $newestFile = $file if ($age < $newestAge);
+  }
+
+  return $newestFile;
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : GetTargetLocation($tk)
+# Purpose: Determine the target location for the specified TK
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetTargetLocation {
+
+  my ($tk) = @_;
+
+  my $locStage = "";
+  TKutils::GetTkStage($tk, \$locStage);
+
+  return "customtk/tk$tk" if ($locStage =~ /CUSTOM/);
+  return "xtinct/tk$tk" if ($locStage =~ /XTINCT/);
+
+  return "shipb";
+
+}
+

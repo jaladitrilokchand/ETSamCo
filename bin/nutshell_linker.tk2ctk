@@ -1,0 +1,6 @@
+tk=$1
+comp=$2
+exec=$3
+cp -pP /afs/eda/tk/$comp/14.1/.bin-aix64/$exec /afs/eda/customtk/tk$tk/$comp/14.1/.bin-aix64/.
+cp -pP /afs/eda/tk/$comp/14.1/.bin-linux64/$exec /afs/eda/customtk/tk$tk/$comp/14.1/.bin-linux64/.
+echo "done"

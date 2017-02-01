@@ -1,0 +1,91 @@
+#!/usr/bin/env perl
+
+### Change Log ###################################
+#
+# 2011-05-18 GFS Updated paths from btv to eda.  Updated REPOS to greenjiffy.
+# 2011-03-21 TSG initial coding
+#
+#   svnNext2Extract -c <component>
+#
+##################################################
+
+  use strict ;
+  use warnings ;
+  use File::Path qw(mkpath) ;
+  use Getopt::Std;
+
+  our $opt_t;
+  our $opt_c;
+  getopt("c");
+
+  ###############################################
+  # get parameters
+  ###############################################
+
+  my $tk   = "14.1.0" ;
+  my $comp = $opt_c ;
+
+  ###############################################
+  # variables/constants definition
+  ###############################################
+
+  my $SVN = "/afs/btv/data/subversion/bin/svn" ;
+
+  my $bin2 = "/afs/eda/data/edainfra/tools/enablement/prod/bin" ;
+  my $bin = "/afs/btv/u/tsg/projects/edainfra/tools/enablement/trunk/bin" ;
+
+  my $REPOS = "https://greenjiffy.fishkill.ibm.com/eda/tk" ;
+
+  my $rc = "" ;
+  my $item = "" ;
+  my $out  = "" ;
+  my $start = "" ;
+  my $start2 = "" ;
+  my $start3 = "" ;
+  my $revision  = "" ;
+  my @revlist  ;
+  my @tokens = "" ;
+  my @lines = "" ;
+  my $line = "" ;
+
+  ###############################################
+  # main functional code starts here
+  ###############################################
+
+  $revision = `$bin2/getRevisions -t $tk -c $comp -l build -latest` ;
+  $rc = $? ;
+  chomp $revision ;
+
+  $out = `$SVN  log --limit 100 $REPOS/$comp/trunk` ;
+  $rc = $? ;
+  chomp $out ;
+  @lines = split(/\n/ , $out ) ;
+  foreach $line ( @lines ) {
+    @tokens = split( / / , $line ) ;
+    if ( $#tokens != -1 && $#tokens != 0 ) {
+      $start  = substr( $tokens[0] , 0 , 1 ) ;
+      $start2 = substr( $tokens[1] , 0 , 1 ) ;
+      if ( $start eq "r" && $start2 eq "|" ) {
+        $start3 = substr( $tokens[0] , 1  ) ;
+        if ( $start3 =~ /^(\d+)/ ) {
+          splice ( @revlist, 0 , 0, $start3 ) ;
+        }
+      }
+    }
+  }
+
+
+  @revlist = reverse ( sort { $a <=> $b } ( @revlist ));
+  if ( $revision < $revlist[0] ) {
+    foreach $item ( @revlist ) {
+      if ( $item > $revision ) {
+        print "**************************************\n" ;
+        print "Revision $item in SVN is newer than revision $revision in BUILD area \nDetailed differences are listed below\n\n" ;
+        $out = `$SVN diff --summarize "$REPOS/$comp/trunk\@$item" "$REPOS/$comp/trunk\@$revision" ` ;
+        print $out ;
+      }
+    }
+  } else {
+    print "Revision $revision in SVN is current with revision in BUILD area\n" ;
+  }
+

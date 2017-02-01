@@ -1,0 +1,153 @@
+#!/usr/bin/env perl
+
+### Change Log ###################################
+#
+# 2011-05-18 GFS Updated references to bleujiffy to be greenjiffy.
+# 2011-03-02 TSG initial coding
+#
+#   svnMkRelBranch  -tk < tk e.g. 14.1.0 > -rel < release e.g., 14.1 > -comp < component e.g., einstimer >
+#
+#    assumptions
+#
+#      1.  assume specific revisions (not head) needed to
+#           create branch
+#      2.  assume TKREPOS/TK has been created and initialized
+#      3.  assume ship treetop with component and release directories exists
+#      4. assume tkrepos directory is freshly created and empty
+#
+#    functionality
+#
+#
+#      1. retrieve latest component revision number in prod
+#      2. create release branch
+#      3. advance prod
+#      4. checkout from branch (with force)
+#      5. log event
+#      6. change stage name
+#      7. link SHIPB to TKREPOS
+#
+##################################################
+
+  use strict ;
+  use warnings ;
+  use File::Path qw(mkpath) ;
+  use Getopt::Long;
+
+
+  ###############################################
+  # warn about prototype status
+  ###############################################
+
+  print "*********************************************\n" ;
+  print "*                                           *\n" ;
+  print "* running only in test environment          *\n" ;
+  print "*                                           *\n" ;
+  print "*********************************************\n" ;
+
+  ###############################################
+  # get parameters
+  ###############################################
+
+  my $tk  = "" ;
+  my $rel = "" ;
+  my $comp = "" ;
+
+  Getopt::Long::Configure('bundling_override');
+  GetOptions('tk=s' => \$tk , 'rel=s' => \$rel , 'comp=s' => \$comp);
+
+  ###############################################
+  # variables/constants definition
+  ###############################################
+
+  my $SVN = "/afs/btv/data/subversion/bin/svn" ;
+  my $tkprefix = "__" ;
+
+### SWITCH 2
+# my $bin = "/afs/eda/data/edainfra/tools/enablement/prod/bin" ;
+  my $bin = "/afs/btv/u/tsg/projects/edainfra/tools/enablement/trunk/bin" ;
+
+# my $REPOS = "https://greenjiffy.fishkill.ibm.com/eda/tk" ;
+  my $REPOS = "https://greenjiffy.fishkill.ibm.com/eda/tk" ;
+
+  my $temp = "/tmp"  ;
+
+  my $tkroot  = "/afs/btv/u/tsg/eda" ;
+# my $tkroot  = "/afs/eda" ;
+  my $prod    = "/afs/eda/prod" ;
+# my $prod    = "$tkroot/prod" ;
+  my $tkrepos = "$tkroot/tkrepos"  ;
+
+  my $rc = "" ;
+  my $out  = "" ;
+  my $revision  = "" ;
+
+  ###############################################
+  ###############################################
+
+  print  "****************************************\n " ;
+  print  "processing $comp \n" ;
+  print  "****************************************\n " ;
+
+  ###############################################
+  # retrieve latest revision for prod
+  ###############################################
+  print "  retrieving component revision started \n" ;
+  $revision = `$bin/getRevisions -t $tk -c $comp -l prod -latest` ;
+  $rc = $? ;
+  chomp $revision ;
+  print "  retrieval of component revision completed : rev = $revision , rc = $rc \n" ;
+  print "  *******\n" ;
+
+  ###############################################
+  # create toolkit branch
+  ###############################################
+  print "  branch creation started \n" ;
+  $rc = system("$SVN copy \"$REPOS/$comp/trunk\@$revision\" \"$REPOS/$comp/branches/$tkprefix$tk\" -m \"creating release branch $tkprefix$tk\" ") ;
+  print "  branch creation completed : rc = $rc \n" ;
+  print "  *******\n" ;
+
+  ###############################################
+  # copy prod to shipb
+  ###############################################
+  print "  prod to shipb copy started \n" ;
+  $out = `rsync -avz --exclude=.svn --exclude=Makefile --exclude=.*-dll --exclude=.*-lib --exclude=.*-bin --exclude=.__* $prod/$comp/$rel/  $tkrepos/$tk/$comp/$rel` ;
+  $rc = $? ;
+  print "  prod to shipb copy completed : rc = $rc \n" ;
+  print "  *******\n" ;
+
+  ######################################
+  #
+  #  retrieve source code from repository
+  #
+  ######################################
+
+  print "  checkout of working copy started \n" ;
+  $rc = system("$SVN checkout --force $REPOS/$comp/branches/$tkprefix$tk  $tkrepos/$tk/$comp/$rel > $temp/$comp.checkout ") ;
+  print "  checkout of working copy completed : rc = $rc \n" ;
+  print "  *******\n" ;
+
+  ######################################
+  #
+  #  log event
+  #
+  ######################################
+
+  print "  NEED TO ADD LOG EVENT \n" ;
+
+  ######################################
+  #
+  #  change stage name
+  #
+  ######################################
+
+  print "  NEED TO ADD CHANGES TO STAGENAME ASSOCIATIONS \n" ;
+
+  ##################################################
+  # create shipb link
+  ##################################################
+
+  print "  link of shipb started \n" ;
+  $rc = system("ln -sf $tkrepos/$tk/$comp/$rel  $tkroot/shipb/$comp/$rel") ;
+  print "  link of shipb completed : rc = $rc \n" ;
+# print "  *******\n" ;
+

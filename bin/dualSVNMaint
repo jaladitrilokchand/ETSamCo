@@ -1,0 +1,379 @@
+#!/usr/bin/env perl
+
+####################################################################################
+# usage:
+#
+#       dualSVNMaint -wcm master_component_working_copy
+#                    -cm master_component
+#                    -cs slave_component
+#                    -mcr master_change_request
+#                    -scr slave_change_request
+#                    -msg "commit message"
+#
+# example:
+#
+#       dualSVNMaint -wcm ~/MyWC/mar/14.1
+#                    -cm mar
+#                    -cs mar2
+#                    -mcr  MDCMS87654321
+#                    -scr MDCMS12345678
+#                    -msg "commit message"
+#
+# change log:
+#
+#         2012-03-15 TSG intial coding
+#
+#-----------------------------------------------------------------------------------
+  use strict ;
+  use warnings ;
+  use File::Path qw(mkpath) ;
+  use Getopt::Long;
+  use File::Basename ;
+
+  ###############################################
+  # determine path to svn binary                #
+  ###############################################
+
+  my $host = `/bin/hostname` ;
+  my @hostlist = split(/\./ , $host );
+  my $SVN = "/afs/btv/data/subversion/bin/svn" ;
+  if ( $hostlist[1] eq "fishkill" ) {
+    $SVN = "/afs/eda/tools/bin/svn" ;
+  }
+  if ( $hostlist[1] eq "btv" ) {
+    $SVN = "/afs/btv/data/subversion/bin/svn" ;
+  }
+
+  ###############################################
+  # constants and generic variable definition
+  ###############################################
+
+  my $PID = $$ ;
+  my $REPOS = "https://greenjiffy.fishkill.ibm.com/eda/tk" ;
+  my $EDAINFRA = "/afs/eda/data/edainfra/tools/enablement/trunk/bin" ;
+  my $CRcloneComp = "$EDAINFRA/cr.cloneComp" ;
+  my $CRcommit = "$EDAINFRA/cr.commit" ;
+  my $userid = `whoami` ;
+  chomp $userid ;
+
+  my $tds = `date +%F-%H-%M-%S` ;
+  chomp $tds ;
+
+  my $out = "" ;
+  my $rc = 0 ;
+  my $line ;
+  my @lines ;
+  my @tokens ;
+  my @filelist ;
+  my $numfiles ;
+  my $filename ;
+  my $modifier ;
+  my $temp ;
+  my $dir ;
+  my $action ;
+  my $prefix = "SVN/SVN DUAL MAINT:" ;
+  my $dupChanges ;
+  my $answer ;
+
+  my $twcm = "";
+  my $wcm = "";
+  my $twcs = "";
+  my $mcr = "";
+  my $scr = "";
+  my $dcr = "";
+  my $cm = "";
+  my $cs = "";
+  my $msg = "" ;
+  my $i ;
+  my $j ;
+  my $crfound ;
+  my $badinput ;
+
+  ###############################################
+  # print header messages                       #
+  ###############################################
+
+  print  "$prefix ******************************************************\n" ;
+  print  "$prefix *  start - component pair dual maintenance in svn    *\n" ;
+  print  "$prefix ******************************************************\n" ;
+
+  ##################################################
+  # read and check input parms                     #
+  ##################################################
+
+  Getopt::Long::Configure('bundling_override');
+# GetOptions('scr:s' => \$scr , 'wcm=s' => \$wcm ,'wcs=s' => \$wcs , 'cm=s' => \$cm , 'cs=s' => \$cs , 'mcr=s' => \$mcr , 'msg=s' => \$msg );
+  GetOptions('scr:s' => \$scr , 'wcm=s' => \$wcm ,                   'cm=s' => \$cm , 'cs=s' => \$cs , 'mcr=s' => \$mcr , 'msg=s' => \$msg );
+
+  $badinput = 0 ;
+  if ( $wcm eq "" ) { print "$prefix ERROR -- master working copy (wcm) switch must have a value.\n" ; ++$badinput }
+# if ( $wcs eq "" ) { print "$prefix ERROR -- slave working copy (wcs) switch must have a value.\n" ; ++$badinput }
+  if ( $cm  eq "" )  { print "$prefix ERROR -- master component (cm) switch must have a value.\n" ; ++$badinput }
+  if ( $cs  eq "" )  { print "$prefix ERROR -- slave component (cs) switch must have a value.\n" ; ++$badinput }
+  if ( $mcr  eq "" )  { print "$prefix ERROR -- change request (cr) switch must have a value.\n" ; ++$badinput }
+  if ( $msg eq "" )  { print "$prefix ERROR -- commit msg (msg) switch must have a value.\n" ; ++$badinput }
+  if ( $badinput != 0 ) {
+    print "$prefix CORRECT USAGE \n" ;
+    print "$prefix    dualSVNMaint -wcm master_component_working_copy \n" ;
+#   print "$prefix                 -wcs slave_component_working_copy \n ";
+    print "$prefix                 -cm master_component \n " ;
+    print "$prefix                 -cs slave_component \n " ;
+    print "$prefix                 -mcr change_request \n " ;
+    print "$prefix                 -scr slave_component_change_request (optional) \n " ;
+    print "$prefix                 -msg \"commit message\" \n " ;
+    exit ;
+  }
+
+  ##################################################
+  # create temporary export  copy for master       #
+  ##################################################
+
+
+  $twcm = "/tmp/$userid/$tds/master" ;
+  if ( [[ -d  $twcm ]] ) {
+    `rm -rf $twcm`
+  }
+  if ( mkpath("$twcm") eq 0 ) {
+    print "$prefix ERROR -- cannot create temporary master space for $cm files $twcm \n" ;
+    exit ;
+  } else {
+    print "$prefix Creating temporary master space $twcm for exporting originals of modified files \n" ;
+  }
+
+  ##################################################
+  # create temporary working copy for slave        #
+  ##################################################
+
+  $twcs = "/tmp/$userid/$tds/slave" ;
+  if ( [[ -d  $twcs ]] ) {
+    `rm -rf $twcs`
+  }
+  if ( mkpath("$twcs") eq 0 ) {
+    print "$prefix ERROR -- cannot create slave temporary space $twcs for $cs files \n" ;
+    exit ;
+  } else {
+    print "$prefix Creating temporary slave working copy $twcs for checking out files \n" ;
+  }
+
+  $out = `$SVN checkout $REPOS/$cs/trunk $twcs > $twcs/checkout.console`;
+  $rc  = $? ;
+
+  ###############################################
+  # get list of modified, added, deleted files  #
+  ###############################################
+
+  $rc = chdir("$wcm")  ;
+  if ( $rc != 1 ) {
+    print "$prefix ERROR -- cannot cd to $wcm.\n" ;
+    exit ;
+  }
+  @lines = `$SVN status` ;
+  $rc = $? ;
+
+  $dupChanges = 0 ;
+  $numfiles = 0 ;
+
+  print  "$prefix ***************************************************************\n" ;
+  print  "$prefix * Start of results from status cmd run on master component wc  \n" ;
+  print  "$prefix ***************************************************************\n" ;
+  foreach $line (@lines ) {
+    print "$prefix $line" ;
+  }
+  print  "$prefix ***************************************************************\n" ;
+  print  "$prefix * End of results from status cmd run on master component wc    \n" ;
+  print  "$prefix ***************************************************************\n" ;
+  foreach $line (@lines ) {
+    $action = "" ;
+    $line =~ s/\s+/ /g ;
+    @tokens = split(/ / , $line );
+    $modifier = $tokens[0] ;
+    $filename = $tokens[1] ;
+    $temp = dirname($filename) ;
+
+    print "$prefix ***************************************** \n" ;
+    print "$prefix PROCESSING $filename \n" ;
+    print "$prefix ***************************************** \n" ;
+
+    ###################################################
+    # account for modified files
+    ###################################################
+    if ( $modifier eq "M" ) {
+      print "$prefix Running dual maintenance for modified file \n" ;
+
+      $dir = `dirname $filename` ;
+      chomp $dir ;
+      $temp = "$twcm/$dir" ;
+      if (! -d $temp ) {
+         if ( mkpath("$temp") eq 0 ) {
+           die "ERROR: could not create $temp directory \n ";
+        }
+      }
+
+      $out = `$SVN export $REPOS/$cm/trunk/$filename $twcm/$filename`;
+      $rc  = $? ;
+      $out = `diff $twcm/$filename $twcs/$filename` ;
+      $rc  = $? ;
+
+      if ( $rc != 0 ) {
+        print "$prefix Master component and slave component were different to start with before changes.\n " ;
+        print "$prefix Do you want to sync them up?\n " ;
+        $answer = "";
+        until ( $answer eq "y" || $answer eq "n" ) {
+          print "$prefix Please answer \"y\" or \"n\" ==>  ";
+          $answer = <STDIN>;
+          chomp($answer) ;
+        }
+        if ( $answer eq "y" ) {
+          print "$prefix Syncing up slave with master component and discarding slave changes. \n" ;
+          $out = `$SVN update $twcs/$filename` ;
+          $rc  = $? ;
+          $out = `cp -f $wcm/$filename $twcs/$filename`;
+          $rc  = $? ;
+          $action = "SYNCED (M-)" ;
+          ++$dupChanges ;
+        } else {
+          print "$prefix Keeping master and slave files different, no syncing will be attempted. \n" ;
+        }
+      } else {
+        print "$prefix Syncing up slave with master component. \n" ;
+        $out = `$SVN update $twcs/$filename` ;
+        $rc  = $? ;
+        $out = `cp -f $wcm/$filename $twcs/$filename`;
+        $rc  = $? ;
+        $action = "SYNCED (M)" ;
+        ++$dupChanges ;
+      }
+    }
+
+    ###################################################
+    # account for added files
+    ###################################################
+    if ( $modifier eq "A" ) {
+      print "$prefix Running dual maintenance for added file\n" ;
+      $out = `$SVN update $twcs/$filename` ;
+      $rc  = $? ;
+      $out = `cp -f $wcm/$filename $twcs/$filename`;
+      $rc  = $? ;
+      $out = `$SVN add $twcs/$filename --force `;
+      $rc  = $? ;
+      $action = "SYNCED (A)" ;
+      ++$dupChanges ;
+    }
+
+    ###################################################
+    # account for deleted files
+    ###################################################
+    if ( $modifier eq "D" ) {
+      print "$prefix Running dual maintenance for deleted file \n" ;
+      $out = `$SVN update $twcs/$filename` ;
+      $rc  = $? ;
+      $out = `$SVN delete $twcs/$filename --force `;
+      $rc  = $? ;
+      $action = "SYNCED (D)" ;
+      ++$dupChanges ;
+    }
+
+    if ( $modifier ne "M"  &&  $modifier ne "A"  &&  $modifier ne "D" ) {
+      print "$prefix ERROR -- found unsupported \"$modifier\" attribute -- no processing attempted \n" ;
+      $action = "UNSUPPORTED" ;
+    }
+
+    $filelist[$numfiles][0] = $modifier ;
+    $filelist[$numfiles][1] = $filename ;
+    $filelist[$numfiles][2] = $action ;
+    ++$numfiles ;
+  }
+  --$numfiles ;
+
+  ##################################################
+  # commit changes to both components
+  ##################################################
+
+# for ( $i = 0 ; $i <= $numfiles ; ++$i ) {
+#   print "$prefix STATUS=$filelist[$i][0] -- FILE=$filelist[$i][1] -- DM ACTION=$filelist[$i][2] \n" ;
+# }
+
+  if ( $dupChanges > 0 ) {
+    print  "$prefix ******************************************************\n" ;
+    print  "$prefix * Processing change requests  \n" ;
+    print  "$prefix ******************************************************\n" ;
+
+    ########################################################
+    # create duplicate change request or use existing one  #
+    ########################################################
+
+    if ( $scr eq "" ) {
+      $crfound = 0;
+      @lines = `$CRcloneComp -cr $mcr -c $cs` ;
+      $rc = $? ;
+      print "RC = $rc \n" ;
+      foreach $line ( @lines ) {
+        $line =~ s/\s+/ /g ;
+        @tokens = split(/ / , $line );
+        if ( $tokens[0] eq "Change" && $tokens[1] eq "Request:" ) {
+          $dcr = $tokens[2] ;
+          $crfound = 1;
+        }
+      }
+      if ( $crfound != 1 ) {
+        print "$prefix ERROR -- was not able to clone change request for $mcr -- nothing committed \n" ;
+        exit ;
+      } else {
+        print "$prefix Cloned change request $mcr to $dcr \n" ;
+      }
+    } else {
+      $dcr = $scr ;
+      print "$prefix Using slave change request $scr instead of cloning from $mcr \n" ;
+    }
+
+    ####################################
+    # commit master component changes
+    ####################################
+    print  "$prefix ******************************************************\n" ;
+    print  "$prefix * Committng changes to repositories  \n" ;
+    print  "$prefix ******************************************************\n" ;
+    print "$prefix Commiting changes to $cm \n";
+    $rc = chdir("$wcm") ;
+    $out = `$CRcommit -cr $mcr -m "$mcr: $msg" ` ;
+    $rc = $? ;
+
+    ####################################
+    # commit slave component changes
+    ####################################
+    $rc = chdir("$twcs") ;
+    print "$prefix Commiting changes to $cs \n";
+    $out = `$CRcommit -cr $dcr -m "$dcr: $msg" $twcs` ;
+    $rc = $? ;
+  }
+
+  print  "$prefix ******************************************************\n" ;
+  print  "$prefix * Cleaning up temporary work spaces  \n" ;
+  print  "$prefix ******************************************************\n" ;
+
+  ##################################################
+  # remove temporary working copy for slave
+  ##################################################
+
+
+  if ( [[ -d  $twcs ]] ) {
+    print "$prefix Deleting temporary working copy space $twcs \n" ;
+    `rm -rf $twcs`
+  }
+
+  ##################################################
+  # remove temporary export copy for master        #
+  ##################################################
+
+  if ( [[ -d  $twcm ]] ) {
+    print "$prefix Deleting temporary space $twcm \n" ;
+    `rm -rf $twcm`
+  }
+
+  ###############################################
+  # print trailer messages
+  ###############################################
+
+  print  "$prefix ******************************************************\n" ;
+  print  "$prefix *  end - component pair dual maintenance in svn       \n" ;
+  print  "$prefix ******************************************************\n" ;
+

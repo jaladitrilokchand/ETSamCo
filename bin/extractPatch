@@ -1,0 +1,688 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: extractPatch
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#    DATE: 05/28/2013
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 05/28/2013 EH  Initial coding.
+# 07/12/2013 EH  This script is still a work in progress for the customTK
+#                project. It was incomplete when the Resource Action of
+#                June/July 2013 happened. There has not been enough time
+#                to complete this before I leave IBM.
+# =============================================================================
+#
+# Created a area for debugging and unit testing this script:
+# $ ls -l /afs/eda/u/ehull/my_test/customTK/
+# drwxr-xr-x 2 ehull users 2048 May 28 19:09 install_path
+# drwxr-xr-x 3 ehull users 2048 May 28 19:11 patch_src
+# drwxr-xr-x 3 ehull users 2048 May 28 19:47 products
+#
+# FYI: install_path is expected to be a patch unique directory like:
+#   /afs/btv/data/vlsi/eclipz/common/tools/edatools/tk14.1.4/tk14.1.4.0/
+#
+# Create a tarball for testing (normally it will be created by the packaging process):
+# cd /afs/eda/u/ehull/my_test/customTK/patch_src
+# tar -cf /afs/eda/u/ehull/my_test/customTK/products/etreetest4/140104/etreetest4.140104custom_X.0005.0008.aix61_64.tar   etreetest4
+#
+# Invocation for unit testing:
+# extractPatch -d /afs/eda/u/ehull/my_test/customTK/install_path -p etreetest4.140104custom_X.0005.0003.aix61_64.tar
+# extractPatch -d /afs/eda/u/ehull/my_test/customTK/tk_install_root/tk14.1.4/tk14.1.4.2 -p etreetest4.140104.0005.0008.aix61_64.tar
+#
+# Nan also wants me to add logic for:
+#   -o: Complete the installation even if the installed patch level is >= patch file level. (The install is normally aborted if installed patch level is >= patch file level).
+#
+# Question on path:
+#
+# tk14.1.4/tk14.1.4.2/ess/14.1
+# tk14.1.4/tk14.1.4.2custom_X/ess/14.1
+
+# etreetest4/140104/etreetest4.140104custom_X.0005.0008.aix61_64.tar
+
+
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use File::Basename; # EH
+
+# Global variables
+my $BIN                   = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $TAR_CMD               = "/bin/tar";
+my $MV_CMD                = "/bin/mv";
+my $CKSUM_CMD             = "/usr/bin/cksum";
+my $RM_CMD                = "/bin/rm";
+#my $patchReposHLD        = "/afs/eda/edadist/products"; # PROD
+my $patchReposHLD         = "/afs/eda/u/ehull/my_test/customTK/products"; # FOR DEBUG ONLY
+my $afsId                 = "svnlib";
+my $toolKitRel            = 14.1;  # TODO: NEED TO DERIVE THIS FROM INPUT PARMS
+my $installPath = "";
+my $patchFile = "";
+my $tkPatchDir = "";
+my $patchLevel = "";
+my $patchLevelMax = -1;
+
+# List of valid control files 
+my (@ctrlFiles) = 
+  ("_checksum.ctrl",
+   "_CQ.ctrl",
+   "_custom_deliver.ctrl",
+   "_delete.ctrl",
+   "_postinstall.ctrl",
+   "_special_path.ctrl"
+  );
+
+# Program name
+my $appName = "extractPatch";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help             = "";
+my $verbose          = 1;
+my $noCmdExec        = 0;
+my $rc               = 8; 
+my $cmdLineArgs      = "";
+my $logDate          = "";
+my @tokens           = ();
+my @results          = ();
+my $command          = "";
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+my $TRUE  = 1;
+my $FALSE = 0;
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+my $startDir = $ENV{"PWD"};
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal gracefully with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+#$SIG{__DIE__} = sub { handleDIE(); };
+#$SIG{__DIE__} = 'handleDIE'; # EH - could fail in modules
+$SIG{__DIE__} = \&handleDIE; # EH2 - best strategy
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+#-------------------------------------------------------------------------------
+# Verify that install path exists
+#-------------------------------------------------------------------------------
+unless (-e $installPath) {
+  chomp($logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  CleanExit("$logDate ERROR: Install path specified with -d does not exist", $ERROR);
+} 
+
+# Get patch level directory provided on command line
+my $installPatchLevelDir = $installPath;
+$installPatchLevelDir =~ s{.*/}{}; # Remove path
+my $installPatchLevel = $installPatchLevelDir;
+$installPatchLevel =~ s/^tk//;
+@tokens = split(/\./, $installPatchLevel);
+my $requestedTkVerFld1  = $tokens[0]; # 14
+my $requestedTkVerFld2  = $tokens[1]; # 1
+my $requestedTkVerFld3  = $tokens[2]; # 4
+my $requestedPatchLevel = $tokens[3]; # 0
+my $requestedTkVer = sprintf "%d.%d.%d", $requestedTkVerFld1, $requestedTkVerFld2, $requestedTkVerFld3;
+
+# IS THE INSTALL PATH WRITABLE???
+
+#-------------------------------------------------------------------------------
+# Parse $patchFile file name provided on command line
+#-------------------------------------------------------------------------------
+# Example: etreetest4.140104custom_X.0005.0003.aix61_64
+@tokens = split(/\./, $patchFile);
+my $component      = $tokens[0];
+my $toolKitVerPf   = $tokens[1]; # format: 140104
+my $maint          = $tokens[2];
+my $patch          = $tokens[3];
+my $platform       = $tokens[4];
+
+my $compRelDir = "$installPath/$component/$toolKitRel";
+#my $logDir = "$installPath/EDA_HIST/$component.$toolKitVerPf.$platform";
+my $compVerPlatDirPath  = "$installPath/EDA_HIST/$component.$toolKitVerPf.$platform";
+my $logFile = "$compVerPlatDirPath/status";
+
+my $toolKitVerPfFld1 = substr($toolKitVerPf, 0, 2); # example: 14
+my $toolKitVerPfFld2 = substr($toolKitVerPf, 2, 2); # example: 1
+my $toolKitVerPfFld3 = substr($toolKitVerPf, 4, 2); # example: 4
+my $toolKitVerPfFld4 = substr($toolKitVerPf, 6);    # example: custom_Z  <-- How to apply this...??? 
+my $toolKitVerPfNoLeadZeros = sprintf "%d.%d.%d", $toolKitVerPfFld1, $toolKitVerPfFld2, $toolKitVerPfFld3;
+
+
+#print "toolKitVerPf: $toolKitVerPf\n";
+#print "toolKitVerPfFld3: $toolKitVerPfFld3\n";
+#print "toolKitVerPfFld4: $toolKitVerPfFld4\n";
+##print "toolKitVerPfNoLeadZeros: $toolKitVerPfNoLeadZeros\n";
+##print "requestedTkVer:          $requestedTkVer\n";
+
+#-------------------------------------------------------------------------------
+# Verify that patch file exists
+#-------------------------------------------------------------------------------
+# /afs/eda/u/ehull/my_test/customTK/products/etreetest4/140104/
+my $patchFilePath = "$patchReposHLD/$component/$toolKitVerPf/$patchFile";
+unless (-e $patchFilePath) {
+  chomp($logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  CleanExit("$logDate ERROR: Patch file $patchFilePath does not exist", $ERROR);
+} 
+
+
+#-------------------------------------------------------------------------------
+# Compare TK version from patch file with TK version in requested install path.
+# Abort processing if they do not match.
+#-------------------------------------------------------------------------------
+if ($toolKitVerPfNoLeadZeros ne $requestedTkVer) {
+  chomp($logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  #CleanExit("$logDate ERROR: TK version in install path ($requestedTkVer) does not match TK version in patch file ($toolKitVerPfNoLeadZeros)", $ERROR);
+  CleanExit("$logDate ERROR: TK version in patch file name ($toolKitVerPfNoLeadZeros) does not match TK version in install path ($requestedTkVer) ", $ERROR);
+}
+
+#print "component: $component\n";
+#print "toolKitVerPf: $toolKitVerPf\n";
+#print "maint: $maint\n";
+#print "patch: $patch\n";
+#print "platform: $platform\n";
+
+my $patchWarehouse = "/afs/eda/edadist/products/$component/$toolKitVerPf";
+if (-e "$patchWarehouse/$patchFile") {
+  print "ERROR: Patch file specified with -p not found in $patchWarehouse\n";
+  return $ERROR;
+}
+
+#-------------------------------------------------------------------------------
+# Enable logging
+#-------------------------------------------------------------------------------
+$rc = setupLogging();
+if ($rc > 0) {
+  chomp($logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  CleanExit("$logDate ERROR: Unable to complete $appName initalization", $ERROR);
+}
+
+#-------------------------------------------------------------------------------
+# Determine highest existing installed patch level
+#-------------------------------------------------------------------------------
+
+# Assume $installPath = $toolKitVersionDir/$tkPatchDir
+#        $installPath = .../tk14.1.4/tk14.1.4.2
+my $toolKitVersionDir = dirname($installPath);
+
+chdir "$toolKitVersionDir" || die "ERROR: Unable to chdir to $toolKitVersionDir. $!";
+my @existingToolKitPatchDirs = `ls -1d tk$toolKitVerPfNoLeadZeros.*`;
+
+#print "Existing patch install dirs:\n";
+#print @existingToolKitPatchDirs;
+
+chomp(@existingToolKitPatchDirs);
+foreach $tkPatchDir (@existingToolKitPatchDirs) {
+  if (-d $tkPatchDir) {
+    $patchLevel = $tkPatchDir;
+    $patchLevel =~ s/^tk14.1.4.//;  # WILL THE custom_Z ever be part of this???
+    $patchLevelMax = $patchLevel if ($patchLevel > $patchLevelMax);
+  }
+}
+##print "patchLevelMax:       $patchLevelMax\n";
+##print "requestedPatchLevel: $requestedPatchLevel\n";
+
+#-------------------------------------------------------------------------------
+# Abort install process if highest installed patch level is >= requested patch level
+#-------------------------------------------------------------------------------
+if ($patchLevelMax > $requestedPatchLevel) {
+  chomp($logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  CleanExit("$logDate ERROR: Existing installed patch level 14.1.4.$patchLevel is greater than requested patch level $installPatchLevel derived from install path provided on command line", $ERROR);
+}
+
+#-------------------------------------------------------------------------------
+# Untar patch file to installation directory
+#-------------------------------------------------------------------------------
+$rc = ExtractPatchFile($installPath, "$patchFilePath");
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to untar patch file $installPath/$patchFilePath", $ERROR);
+}
+
+#-------------------------------------------------------------------------------
+# Move ctrl files
+#-------------------------------------------------------------------------------
+$rc = MoveCtrlFiles($compRelDir, $compVerPlatDirPath, @ctrlFiles);
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to move control files\n  from $compRelDir\n  to $compVerPlatDirPath", $ERROR);
+}
+
+#-------------------------------------------------------------------------------
+# Verify checksums
+#-------------------------------------------------------------------------------
+$rc = VerifyChecksums();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to confirm checksums of extracted files", $ERROR);
+}
+
+#-------------------------------------------------------------------------------
+# Delete files as necessary
+#-------------------------------------------------------------------------------
+$rc = DeleteFiles();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to delete files", $ERROR);
+}
+
+#------------------------------------------------------------------------------
+# Name   : DeleteFiles()
+# Purpose: Verify checksums of extracted files
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub DeleteFiles {
+
+  #my ($installPath, $patchFilePath) = @_;
+  my $deleteFile = "$compVerPlatDirPath/_delete.ctrl";
+  my $fileToBeDeleted = "";
+  my $ctrlEntry = "";
+  #my $originalCksum = "";
+  #my $currentCksum = "";
+  
+  # Process any deletions if the _delete.ctrl exists
+  if (-e $deleteFile) {
+  
+    open(CNTRL_DATA, "<$deleteFile") or die "ERROR: Unable to open $deleteFile $!\n";
+    chomp(my (@ctrlData) = <CNTRL_DATA>);
+    close(CNTRL_DATA);
+    
+    chdir ("$compRelDir")|| die "ERROR: Unable to chdir to $compRelDir $!\n";
+    
+    my $curDir = `pwd`;        # DEBUG
+    print "curDir: $curDir\n"; # DEBUG
+    
+    foreach $ctrlEntry (@ctrlData) {
+    
+      # real_dir;delete;dll-64/realdir.dll;checksum  <-- WILL ALL OF THESE BE FILES? OR WILL THERE BE SOME DIRS TOO??? [should rm -fr be used???]
+                                                      #  IS THERE ANY POINT TO CHECKING THE CHECKSUM IF THE FILE WILL BE DELETED?  
+      #($extractedFile, $originalCksum) = (split(/;/, $ctrlEntry)) [2, 3];
+      ($fileToBeDeleted) = (split(/;/, $ctrlEntry)) [2];
+
+      # Check for existence of file before running the rm command
+      if (!-e $fileToBeDeleted) {
+        print "INFO: _delete.ctrl file indicates $fileToBeDeleted should be removed, but it does not exist.\n";
+        next;
+      }
+
+      $command = "$RM_CMD";
+      $command .= " $fileToBeDeleted";
+
+      print "$command\n" if ($verbose);
+      
+      # Skip command execution if the -k option was specified
+      unless ($noCmdExec) {
+        @results = `$command`;
+        $rc = $? >> 8;
+
+        if ($rc > 0) {
+          print "ERROR: Unable to remove $fileToBeDeleted\n";
+          print @results;
+          return $ERROR;
+        }
+        print "Removed $fileToBeDeleted\n";     
+      }
+    }
+  }
+  
+  return $OK;
+  
+}
+
+
+
+#-------------------------------------------------------------------------------
+# Check for dead symlinks (look at ICC install script)
+#-------------------------------------------------------------------------------
+#$rc = CheckSymlinks();
+#if ($rc > 0) {
+#  CleanExit("ERROR: Unable to check symlinks", $ERROR);
+#}
+
+print "\nMessages have been appended to $logFile \n";
+
+chomp($logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+CleanExit("\n$logDate $appName complete", $OK);
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  chomp(my ($errMsg) = @_); # EH
+  #print "signal:  $errMsg\n"; # EH
+  #CleanExit("\n[$appName] Caught an unexpected die - exiting\n", $ERROR);
+  CleanExit("$errMsg\n", $ERROR); # EH
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+  print "$message\n";
+  print "Return code: $rc\n";
+  close (STDOUT);
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Extracts a specified patch file to specified install_path location.
+  for example: .../tk14.1.4/tk14.1.4.0/
+  
+Patch file names must be in the format <component>.<toolKitVersion>.<maint>.<patch>.<platform>
+  for example: ess.140104custom_Z.0001.0002.aix61_64
+
+Patch files are assumed to be in /afs/eda/edadist/products/<component>/<toolKitVersion>
+
+Messages are appended to <install_path>/EDA_HIST/<component>.<toolKitVersion>.<platform>/status.
+
+This script must be run as svnlib.
+
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName [-h]
+  $appName -d <install_path> -p <patch_file> [-h] [-k] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  install_path      = path where patch will be extrated to
+  patch_file        = name of patch file (assumed to be in /afs/eda/edadist/products/<component>/<toolKitVersion>)
+
+  -h             (optional) application help
+  -k             (optional) Suppress execution of significant commands for debugging.
+                            This option also disables verification of created directories.
+  -y             (optional) Verbose (print the invocation of each command)
+   
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+}
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Capture command line arguments for logging (before GetOptions deletes them)
+  $cmdLineArgs = join(' ', @ARGV);
+
+  # Parse command line arguments   
+  GetOptions ('d=s'            => \$installPath,
+              'p=s'            => \$patchFile,
+              'k'              => \$noCmdExec,
+              'y'              => \$verbose,
+              'help|h|?'       => \$help
+              ) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate installPath
+  if (! $installPath) {
+    print "ERROR: Install path must be specified (-d <install_path>)\n";
+    return $ERROR;
+  }
+  
+  # Validate patch file
+  if (! $patchFile) {
+    print "ERROR: PatchFile (-p) must be specified\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : setupLogging()
+# Purpose: Enable logging
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub setupLogging {
+
+  # Create $logDir if it does not already exist
+  # .../tk14.1.4/tk14.1.4.0/EDA_HIST/etreetest4.140104.aix61_aix/status
+  ##my $logDir = "$installPath/EDA_HIST/$component" . "." . "$toolKitVersion" . "." . "$platform";
+  ###my $logDir = "$installPath/EDA_HIST/$component.$toolKitVerPf.$platform";
+  ##print "logDir: $logDir\n";
+  mkpath($compVerPlatDirPath) if (! -d $compVerPlatDirPath);
+
+  # Open log file for script messages
+  #chomp(my $logDate = `date +%C%y%m%d\_%H%M%S`);
+  #$logFile = "$logDir/status";
+
+  # Write a delimiter to log file to avoid confusion with msgs from earlier runs
+  open (LOGFILE, ">>$logFile");
+  print LOGFILE "\n--------------------------------------------------------------------------------";
+  close (LOGFILE);
+  
+  # Open a filehandle for both stdout and a log file
+  open (STDOUT, "| tee -a $logFile") || die "ERROR: Unable to open log file $logFile $!\n";
+
+  my $currentAfsId = (getpwuid($<)) [0];
+  #if ($currentAfsId ne "$afsId") {
+  #  print "\nERROR: Only the $afsId AFS ID is permitted to run this script\n";
+  #  return $ERROR;
+  #}
+
+  chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  chomp(my $machine = `hostname`);
+  print "\n$dateTime $currentAfsId on $machine invoked $appName $cmdLineArgs\n\n";
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ExtractPatchFile($installPath, $patchFilePath)
+# Purpose: Extract patch file
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub ExtractPatchFile {
+
+  my ($installPath, $patchFilePath) = @_;
+
+  #Schdir ("$installPath.xxx") || die "ERROR: Unable to chdir to $installPath.xxx. $!";
+  chdir ("$installPath") || die "ERROR: Unable to chdir to $installPath $!\n";
+  ##my $curDir = `pwd`;
+  ##print "curDir: $curDir\n";
+  
+  $command = "$TAR_CMD";
+  $command .= " -xvf";
+  $command .= " $patchFilePath";
+
+  print "$command\n" if ($verbose);
+  
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    @results = `$command`;
+    $rc = $? >> 8;
+    
+    if ($rc > 0) {
+      print "ERROR: Unable to extract patch file $patchFilePath\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+  
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : MoveCtrlFiles($compRelDir, $compVerPlatDirPath, @ctrlFiles)
+# Purpose: Move control files from patch file path to EDA_HIST/comp patch plat path
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub MoveCtrlFiles {
+
+  my ($compRelDir, $compVerPlatDirPath, @ctrlFiles) = @_;
+  my $ctrlFile = "";
+  
+  foreach $ctrlFile (@ctrlFiles) {
+    next if (!-e "$compRelDir/$ctrlFile");
+    $command = "$MV_CMD";
+    $command .= " $compRelDir/$ctrlFile";
+    $command .= " $compVerPlatDirPath";
+
+    print "$command\n" if ($verbose);
+    
+    # Skip command execution if the -k option was specified
+    unless ($noCmdExec) {
+      @results = `$command`;
+      $rc = $? >> 8;
+      
+      if ($rc > 0) {
+        print "ERROR: Unable to move control file $ctrlFile from $compRelDir to $compRelDir (EDA_HIST/<comp>.<tkver>.<plat> path)\n";
+        print @results;
+        return $ERROR;
+      }
+    }   
+  }
+
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : VerifyChecksums()
+# Purpose: Verify checksums of extracted files
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub VerifyChecksums {
+
+  #my ($installPath, $patchFilePath) = @_;
+  my $cksumFile = "$compVerPlatDirPath/_checksum.ctrl";
+  my $extractedFile = "";
+  my $ctrlEntry = "";
+  my $originalCksum = "";
+  my $currentCksum = "";
+  
+  if (-e $cksumFile) {
+  
+    open(CNTRL_DATA, "<$cksumFile") or die "ERROR: Unable to open $cksumFile $!\n";
+    chomp(my (@ctrlData) = <CNTRL_DATA>);
+    close(CNTRL_DATA);
+    
+    chdir ("$compRelDir")|| die "ERROR: Unable to chdir to $compRelDir $!\n";
+    my $curDir = `pwd`;
+    print "curDir: $curDir\n";
+    
+    foreach $ctrlEntry (@ctrlData) {
+    
+      ($extractedFile, $originalCksum) = (split(/;/, $ctrlEntry)) [2, 3];
+
+      $command = "$CKSUM_CMD";
+      $command .= " $extractedFile";
+
+      print "$command\n" if ($verbose);
+      
+      # Skip command execution if the -k option was specified
+      unless ($noCmdExec) {
+        @results = `$command`;
+        $rc = $? >> 8;
+
+        if ($rc > 0) {
+          print "ERROR: Unable to determine checksum for $extractedFile\n";
+          print @results;
+          return $ERROR;
+        }
+       
+        ($currentCksum) =(split(/ +/, $results[0])) [0];
+
+        # Does current checksum match checksum at source?
+        if ($currentCksum != $originalCksum) {
+          print "ERROR: Checksum is not valid for $extractedFile\n";
+          print "  Checksum at source:          $originalCksum\n";
+          print "  Checksum of extracted file:  $currentCksum\n";
+          return $ERROR;          
+        }
+        elsif ($verbose) {
+          print "  Checksum at source:          $originalCksum\n";
+          print "  Checksum of extracted file:  $currentCksum\n\n";
+        }        
+      }
+    }
+  }
+  
+  return $OK;
+  
+}

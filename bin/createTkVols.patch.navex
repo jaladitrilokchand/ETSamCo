@@ -1,0 +1,522 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+# FILE : createTkVols.patch
+# OWNER: Naveen Chandrappa
+#
+# PURPOSE ---------------------------------------------------------------------
+# Application to create component afs volume required to create patch level
+# toolkit and afs branch.
+#
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/24/2016 GS  Initial coding.
+# 06/14/2016 NMC Updated to chnage target location from /afs/eda to /afs/eda/patchTk
+#                Updates to use this script with 'bradmin' id instead of svnlib id
+# 11/09/2016 NMC Updated to create the root volume /afs/eda/patchTk/<patchTkName> using 
+#                 command line script luci_cmd instead of luci web page.
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use FindBin qw($RealBin);
+
+use lib "$RealBin/../libperl";
+use TKutils;
+
+
+# Global variables
+my $BIN_DIR = $RealBin;
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+
+# Program variables
+my $appName = "createTkVols.patch";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dryRun          = 0;
+my $tkPatchLevel    = "";
+my $toolKit         = "";
+my $release         = "";
+my $component       = "";
+my $startDir;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+my $MAX_QUOTA = 15000;
+my @comps_needed_setquota = ();
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+# Get the components to process
+my @components = TKutils::GetComponents($toolKit, $component, "");
+
+# Is user authorized to run this script?
+if (! TKutils::IsAuthorized("bradmin", $dryRun)) {
+  print "ERROR: user not authorized to run this application\n";
+  exit $ERROR;
+}
+
+# navechan: 
+# Create the main patch toolkit volume at /afs/eda/PatchTk
+  my @erMsg = ();
+  my @warn= (); 
+  @erMsg = CreatePatchTkVolume();
+  my $x = join("", @erMsg);
+  if($x eq ''){
+    print "   * Volume created...\n";
+  }else{
+    my $msg = "ERROR : Error when creating Volume\n";
+       $msg .= " Volume not created..\n";
+       $msg .= $x;
+       print $msg;
+       push(@warn, "$msg\n-------------------------\n");
+  }
+
+# Verify /afs/eda/tk<patch> HLQ exists
+# navechan update
+if (! -e "/afs/eda/patchTk/tk$tkPatchLevel") {
+  CleanExit("\nMissing /afs/eda/patchTk/tk$tkPatchLevel AFS HLQ", $ERROR);
+}
+
+
+# Create afs volume/space for each component
+my @warnings = ();
+foreach $component (@components) {
+
+  # Skip test components
+  next if ($component =~ /^etree/);
+  next if ($component =~ /svntest/);
+  print "\n\n=======================================\n";
+  print "-> Processing component : '$component'\n";
+
+  # Skip if target directory already exists
+  my $compDir = "/afs/eda/patchTk/tk$tkPatchLevel/$component";
+  my $tgtDir = "$compDir/$release";
+  if (-d $tgtDir) {
+    print " WARNING: target directory already exists = $tgtDir\n";
+    print "          Nothing to do here ...\n";
+    next;
+  }
+
+  # Create /afs/eda/tk<patch>/<component> directory
+  if (! -d $compDir) {  
+    print "   * Creating directory $compDir\n";
+    mkdir($compDir);
+  }
+  
+  # Determine size of parent TK's quota
+  my $srcDir = "/afs/eda/tk$toolKit/$component/$release";
+  my $srcSize = GetQuota($srcDir);
+
+  # Create new AFS volume
+  # my $volumeName = "tk" . $tkPatchLevel . $component;
+  # Above volume name exceeds 22 char afs limit for few comps and fails, changed to use just tk and comp name 
+  # ex: tk14.1.11zr.2verity_core (24 chars, not alloed)
+
+  # parse patchlevel to not have dots. ex 14.1.11zr.2 to 14111zr2 to reduce char size
+  my $tkpl = $tkPatchLevel;
+  $tkpl =~ tr/.//d;
+  my $volumeName = $component.$tkpl;
+  # my $volumeName = "tk" . $component; # not working as this will not be unique name
+  print "   * Volume Name: $volumeName\n"; 
+ 
+  #my $tgtSize = CreateAfsVolume($tgtDir, $volumeName, $srcSize);
+  # Verify quota
+  #if ($srcSize != $tgtSize) {
+  #  my $msg = "WARNING: new quota size does NOT match parent size\n";
+  #  $msg .= "         New dir(quota): $tgtDir ($tgtSize)\n";
+  #  $msg .= "         Parent (quota): $srcDir ($srcSize)\n";
+  #  $msg .= " >> as bradmin run fs sa $tgtDir " . $srcSize x 1000 . "\n\n";
+  #  print $msg;
+  #  push(@warnings, "$msg\n-------------\n");
+  #}
+
+  my @eMsg = ();
+  @eMsg = CreateAfsVolume_X($tgtDir, $volumeName, $srcSize);
+  
+  my $x = join("", @eMsg);
+  if($x eq ''){
+    print "   * Volume created...\n";
+  }else{
+    my $msg = "ERROR : Error when creating Volume\n";
+       $msg .= " $tgtDir not created..\n";
+       $msg .= $x;
+       print $msg;
+       push(@warnings, "$msg\n-------------------------\n");
+  }
+    
+  # Copy ACLs
+  CopyACLs($srcDir, $tgtDir);
+
+  # Config the directories
+  ConfigDirs($toolKit, $release, $tgtDir);
+
+}
+
+# Print the array that holds the components that need more volume than 15GB
+print "\n\nFollowing Components have quota greater than 15GB, Please increase the quota using 'bradmin' id with source comp quota size\n=============================================================================================================\n";
+if (@comps_needed_setquota) {
+  print join("", @comps_needed_setquota) . "\n";
+}
+else {
+  print "   * NONE - No quota resize required...\n\n";
+}
+
+# Print Error messages during volume creation
+if (scalar(@warnings) > 0) {
+  print "ERRORS (Following errors encountered when running luci_cmd command)\n=============\n";
+  print join("", @warnings) . "\n";   
+}
+else {
+  print "\n\nNo warnings to report\n";
+}
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  #LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Allocates/creates AFS volumes for a new patch level specific tool kit.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tk_patch> [-c component]
+                     [-dryrun] [-y] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tk        = Tool Kit patch (ie, 14.1.11.6, 14.1.11.7 ...)
+  component = Process just this component
+  -dryrun   = Run script in dryrun mode
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('t=s'       => \$tkPatchLevel,
+              'c=s'       => \$component,
+	      'dryrun'    => \$dryRun,
+	      'y'         => \$verbose,
+	      'help|h|?'  => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $tkPatchLevel) {
+    print "ERROR: Tool Kit patch (-t) is a required parameter\n";
+    return $ERROR;
+  }
+  @tokens = split(/\./, $tkPatchLevel);
+  if (scalar(@tokens) != 4) {
+    print "ERROR: Tool Kit patch format is x.y.z.a (ie, 14.1.2.3)\n";
+    return $ERROR;
+  }
+  pop(@tokens);
+  $toolKit = join(".", @tokens);
+  pop(@tokens);
+  $release = join(".", @tokens);
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetQuota($dir)
+# Purpose: Returns the AFS quota in MB for the given directory
+# RCs    : size or -1 if error
+#------------------------------------------------------------------------------
+sub GetQuota {
+
+  my ($dir) = @_;
+
+  print "   *  Reading AFS quota : $dir\n" if ($verbose);
+
+  # Construct the command
+  my $command = "/usr/afsws/bin/fs lq";
+  $command .= " -path $dir";
+
+  # Run the command and show results
+  my $size = -1;
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  if ($rc == 0) {
+    my @tokens = split(/ +/, $results[1]);
+    $size = $tokens[1] / 1000;
+  }
+
+  print "   * Size: $size \n";
+
+  return $size;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateAfsVolume($dir, $volName, $volSize)
+# Purpose: Returns the AFS quota in MB for the given directory
+# RCs    : size or -1 if error
+#------------------------------------------------------------------------------
+sub CreateAfsVolume {
+
+  my ($dir, $volName, $volSize) = @_;
+
+  print "   * Creating new AFS volume at $dir\n" if ($verbose);
+
+  # If volSize is greater than $MAX_QUOTA then reset size to $MAX_QUOTA
+  $volSize = $MAX_QUOTA if ($volSize > $MAX_QUOTA);
+  # navechan: do not resize, testing with bradmin id this will fail..unable to create volume 
+
+  # Construct the command
+  my $command = "/afs/eda/projects/luci/bin/luci_cmd";
+  $command .= " -o create ";
+  $command .= " -u bradmin";
+  $command .= " -c eda";
+  $command .= " -v $volName";
+  $command .= " -q $volSize";
+  $command .= " -m $dir";
+  $command .= " -w 30";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  print join("\n", @results) . "\n";
+  return(-1) if ($rc != 0);
+
+  # Verify the new quota size
+  my $size = GetQuota($dir);
+
+  return $size;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateAfsVolume_X($dir, $volName, $volSize)
+# Purpose: Returns error message if volume creaton fails for comp else returns 0 
+# RCs    : 0 or error message
+#------------------------------------------------------------------------------
+sub CreateAfsVolume_X {
+
+  my ($dir, $volName, $volSize) = @_;
+
+  print "   * Creating new AFS volume at $dir\n" if ($verbose);
+
+  # If volSize is greater than $MAX_QUOTA then reset size to $MAX_QUOTA
+  $volSize = $MAX_QUOTA if ($volSize > $MAX_QUOTA);
+  if ($volSize > $MAX_QUOTA){
+    $volSize = $MAX_QUOTA;
+    push(@comps_needed_setquota, "fs sq required for: $dir\n");
+   }
+  # navechan: do not resize volume as we are using bradmin id.
+
+  # Construct the command
+  my $command = "/afs/eda/projects/luci/bin/luci_cmd";
+  $command .= " -o create ";
+  $command .= " -u bradmin";
+  $command .= " -c eda";
+  $command .= " -v $volName";
+  $command .= " -q $volSize";
+  $command .= " -m $dir";
+  $command .= " -w 30";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  print join("\n", @results);
+  return(@results) if ($rc != 0);
+
+}
+
+
+
+#------------------------------------------------------------------------------
+# Name   : CreatePatchTkVolume($dir, $volName, $volSize)
+# Purpose: Creates volume at /afs/eda/pathTk/<patchTkName>
+#          Returns error message if volume creaton fails for comp else returns 0
+# RCs    : 0 or error message
+#------------------------------------------------------------------------------
+sub CreatePatchTkVolume {
+
+  # my ($dir, $volName, $volSize) = @_;
+
+  # Patch Tk Dir
+  my $patchTkDir = "/afs/eda/patchTk/tk$tkPatchLevel";
+
+  # Construct volume name
+  # parse patchlevel to not have dots. ex 14.1.11zr.2 to 14111zr2  
+  my $volName = $tkPatchLevel;
+  $volName =~ tr/.//d;
+  $volName = "tk".$volName;  
+ 
+  print "-> Creating new AFS volume at $patchTkDir\n";
+  print "   * Volume Name: $volName\n";
+
+  # Construct the command
+  my $command = "/afs/eda/projects/luci/bin/luci_cmd";
+  $command .= " -o create ";
+  $command .= " -u bradmin";
+  $command .= " -c eda";
+  $command .= " -v $volName";
+  $command .= " -q 5";
+  $command .= " -m $patchTkDir";
+  $command .= " -w 30";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  print join("\n", @results);
+  return(@results) if ($rc != 0);
+
+}
+
+
+
+#------------------------------------------------------------------------------
+# Name   : CopyACLs($srcDir, $tgtDir)
+# Purpose: Copies the ACLs from srcDir to tgtDir
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub CopyACLs {
+
+  my ($srcDir, $tgtDir) = @_;
+
+  print "   * Copying ACLs from '$srcDir' to '$tgtDir'\n" if ($verbose);
+
+  # Construct the command
+  my $command = "/usr/afsws/bin/fs ca";
+  $command .= " -fromdir $srcDir";
+  $command .= " -todir $tgtDir";
+  $command .= " -clear";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ConfigDirs($toolKit, $release, $dir)
+# Purpose: Run setup dirs for this dir
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub ConfigDirs {
+
+  my ($tk, $rel, $dir) = @_;
+
+  print "   * Running setup_dirs on $dir\n" if ($verbose);
+
+  # Construct the command
+  my $command = "/afs/eda/tk$tk/tools/$rel/scripts/setup_dirs";
+  $command .= " --all";
+  $command .= " --no_32bit";
+  $command .= " --makefiles";
+  $command .= " $dir";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+  return $rc;
+
+}

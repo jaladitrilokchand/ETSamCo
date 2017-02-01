@@ -1,0 +1,431 @@
+#!/usr/bin/perl
+#
+#=============================================================================
+#
+#    FILE: whatsnew
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#
+#- PURPOSE --------------------------------------------------------------------
+# See "printHelp" method.
+#-----------------------------------------------------------------------------
+#
+#
+#- CHANGE LOG -----------------------------------------------------------------
+# 01/31/2013 GS  Initial coding.
+# 02/05/2013 GS  Updated to generate an empty file of no CRs.
+#=============================================================================
+
+use warnings;
+use strict;
+use Cwd;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+# Define custom perl libs path and modules
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use IcofFile;
+
+# Program name
+my $appName = "whatsnew";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $toolKit    = "";
+my $revision   = "";
+my $help       = "";
+my $verbose    = 0;
+my $component  = "";
+my $empty      = 0;
+my $relNotes   = 0;
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+# Program's global return code - initialize to ERROR
+my $progRC = $ERROR;
+
+# Set the location and name of createFuncUpdate application
+my $EDAINFRA = "/afs/eda/data/edainfra";
+my $BIN = "$EDAINFRA/tools/enablement/prod/bin";
+my $GET_COMPS = "$BIN/getComponents";
+my $CR_SHOW = "$BIN/changeReqShowByStatus";
+my $GET_REVS = "$BIN/getRevisionsTk";
+my $GET_RNS = "$BIN/changeReqRelNotes";
+my $OVERRIDE_DIR = "$EDAINFRA/xmit_overrides";
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Define the current directory
+my $startDir = $ENV{"PWD"};
+
+# To exit cleanly from a Ctrl+C or an unexpected die()
+$SIG{'INT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{'QUIT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{__DIE__}  = sub { handleInterruption(); };
+
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+print "No Release Notes generated ...\n" if (! $relNotes);
+
+
+# Read the excludes file if one exists
+my @xmitExcludes = ();
+if (ReadExcludes($toolKit, \@xmitExcludes) != $OK) {
+  exit $ERROR;
+}
+print join(".", @xmitExcludes) . "\n";
+
+
+# Create a list of components.
+my @components = SetComponents($toolKit, $component);
+
+
+# For each component in the TK find the approved/complete change requests
+print "\n";
+printf("%-20s%-10s%-12s%-12s%-12s\n",
+       "Component", "Prod Rev", "Total", "Approved", "Complete");
+printf("%-20s%-10s%-12s%-12s%-12s\n",
+       "---------", "--------", "-----", "--------", "--------");
+my %allCrs;
+foreach $component (@components) {
+
+  # Skip etree test components
+  next if ($component =~ /^etree/);
+  next if ($component =~ /^svntest/);
+
+  # Determine revisions in prod
+  $revision = SetRevision($component, "prod");
+
+  # Find all the Complete and Approved Change Requests in prod
+  my @appCrs = GetChangeReqs($component, $revision, "COMPLETE");
+  my @compCrs = GetChangeReqs($component, $revision, "APPROVED");
+  $allCrs{$component} = @compCrs;
+
+  WriteReleaseNotes($toolKit, $component, \@compCrs, \@appCrs);
+
+  my $totalCrs = scalar(@appCrs) + scalar(@compCrs);
+  if (! $empty || ($totalCrs == 0)) {
+    $component .= " *" if (grep(/^$component$/, @xmitExcludes));
+    printf("%-20s%-10s%-12s%-12s%-12s\n",
+	   $component, $revision, $totalCrs,
+	   scalar(@appCrs), scalar(@compCrs));
+  }
+
+}
+
+print "\n* Excluded from Preview tranmittal unless there are existing CRs\n";
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Generate a report of Change Requests in prod that are new since the
+last tool kit (ie, AGTS milestone)
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-empty] [-relnotes] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit  The next tool kit [14.1.0, 14.1.1 ...].
+  component (optional) Component to process
+  -empty    (optional) Display on the comps with no change requests
+  -relnotes (optional) Generate release notes from CR descriptions
+  -h        (optional) Application help
+  -y        (optional) Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tool_kit|t=s'    => \$toolKit,
+              'comp|c=s'        => \$component,
+              'verbose|y'       => \$verbose,
+              'relnotes'        => \$relNotes,
+              'empty'           => \$empty,
+              'help|h|?'        => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the required parameters.
+  my $msg = "";
+  if (! $toolKit) {
+    $msg = "ERROR: tool_kit (-t) is a required parameter\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetChangeReqs($component, $revision, $state)
+# Purpose: Create a list of Change Requests for this TK in the specified state
+#          and component
+# RCs    : List of CRs
+#------------------------------------------------------------------------------
+sub GetChangeReqs {
+
+  my ($comp, $rev, $state) = @_;
+
+  print " [GetChangeReqs] ... 14.1.build - $comp\n" if ($verbose);
+
+  # Find each approved/complete CR
+  my @crs = ();
+
+  # Find the Change Requests for this state
+  my $command = "$CR_SHOW";
+  $command .= " -t 14.1.build";
+  $command .= " -c $comp";
+  $command .= " -s $state";
+  $command .= " -max $rev";
+  print "  Running ... $command\n" if ($verbose);
+
+  my @results = `$command`;
+  my $rc = $? >> 8;
+  print "  Return code: $rc\n" if ($verbose);
+  return @crs if ($rc == 2);
+
+  my $list = $results[0];
+  chomp $list;
+  @crs = split(/;/, $list);
+  print "  Found " . scalar(@crs) . " $state change requests ...\n" if ($verbose);
+
+  return @crs;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents($toolKit, $component)
+# Purpose: Determine the components to process
+# RCs    : none
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  my ($tk, $comp) = @_;
+  print " [SetComponents] for $tk\n" if ($verbose);
+
+  my @comps = ();
+  if (! $comp) {
+    my $command = "$GET_COMPS";
+    $command .= " -t $tk";
+    $command .= " -q";
+
+    print "  Command: $command\n" if ($verbose);
+    my @results = `$command`;
+    my $rc = $? >> 8;
+    print "  Return code: $rc\n" if ($verbose);
+    if ($rc < 1) {
+      my $list = $results[0];
+      chomp $list;
+      @comps = split(/,/, $list);
+    }
+  }
+  else {
+    push(@comps, $component);
+  }
+
+  return @comps;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RunCommand($command)
+# Purpose: Executes the command and returns the command's return code
+# RCs    : return code
+#------------------------------------------------------------------------------
+sub RunCommand {
+
+  my ($command) = @_;
+
+  my $rc = $OK;
+  print "  Running ... $command\n" if ($verbose);
+  `$command`;
+  $rc = $? >> 8;
+  print "  Return code: $rc\n" if ($verbose);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetRevision($component, $location)
+# Purpose: Determines if there are any completed CRs
+# RCs    : Number of CRs completed
+#------------------------------------------------------------------------------
+sub SetRevision {
+
+  my ($comp, $location) = @_;
+
+  print " [SetRevision] for $comp in $location\n" if ($verbose);
+
+  # Determine the latest revision in location
+  my $rev = 0;
+  my $command = "$GET_REVS";
+  $command .= " -c $comp";
+  $command .= " -l $location";
+  $command .= " -latest";
+  print "  Running ... $command\n" if ($verbose);
+
+  $rev = `$command`;
+  my $rc = $? >> 8;
+  chomp($rev);
+  print "  $location revision: $rev\n" if ($verbose);
+
+  return $rev;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : WriteReleaseNotes($toolKit, $component, $ref_list1, $ref_list2)
+# Purpose: Generates a release note file for the tool kit and component
+#          based on the CRs in list1 and list2.
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub WriteReleaseNotes {
+
+  my ($tk, $comp, $ref_list1, $ref_list2) = @_;
+  print " [WriteReleaseNotes] for $toolKit - $comp\n" if ($verbose);
+  return if (! $relNotes);
+
+  # Determine the latest revision in location
+  my $cr;
+  my @allNotes;
+  foreach $cr (@$ref_list1) {
+    my $command = "$GET_RNS";
+    $command .= " -cr $cr";
+    print "  Running ... $command\n" if ($verbose);
+
+    my @notes = `$command`;
+    my $rc = $? >> 8;
+    push(@allNotes, @notes)
+  }
+
+  # Determine the latest revision in location
+  my @allNotes2;
+  foreach $cr (@$ref_list2) {
+    my $command = "$GET_RNS";
+    $command .= " -cr $cr";
+    print "  Running ... $command\n" if ($verbose);
+
+    my @notes = `$command`;
+    my $rc = $? >> 8;
+    push(@allNotes2, @notes)
+  }
+
+
+  # Write the release note
+  my $file = "/afs/eda/data/edainfra/release_notes/$tk";
+  mkdir($file) if (! -d $file);
+
+  open FILE, ">$file/$comp.txt" or die $!;
+  foreach $entry (@allNotes) {
+    print FILE $entry;
+  }
+  foreach $entry (@allNotes2) {
+    print FILE $entry;
+  }
+  close FILE;
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : ReadExcludes($toolKit, $ref_list)
+# Purpose: Read the excluded components from the excludes file if it exists
+# RCs    : List of components
+#------------------------------------------------------------------------------
+sub ReadExcludes {
+
+  my ($tk, $ref_list) = @_;
+  print " [ReadExcludes] for $tk\n" if ($verbose);
+
+  $OVERRIDE_DIR .= "/$toolKit";
+  my $xmitExcludesFile = "$OVERRIDE_DIR/xmit.excludes";
+
+  if (-f $xmitExcludesFile) {
+    if (! IcofFile::ReadFileToList("$xmitExcludesFile", $ref_list, 0)) {
+      print("ERROR: could not open file! $xmitExcludesFile");
+      return $ERROR;
+    }
+  }
+
+  return $OK;
+
+}
+
+

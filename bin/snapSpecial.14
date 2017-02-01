@@ -1,0 +1,122 @@
+#!/usr/bin/env ksh
+#=================================================================================
+# Program Name: snapSpecial.14
+#
+# Author(s)   : A. Magnan
+#
+# Purpose     : Given a definition of component/releases, snap a copy of the component
+#               release trees in EDA PROD and copy to an EDA SPECIAL code repository.
+#
+# Notes       : (1) This script must be run by userID "cmlib"
+#               (2) The definition list is owned by EDA Development and consists of both
+#                   14.1 components and their dependent 13.1 components. 
+#               (2) This script reads a list containing the component/release definition
+#                   against which component/release trees are copied from EDA PROD to EDA
+#                   SPECIAL.
+#               (3) This functionality is a temporary solution until ETREE development has
+#                   a real release area.
+#               (4) The script requires that component/releases directories are defined in both 
+#                   the target location (special) and the source location (prod).  
+#
+# Revisions   : 0.0 12/08/10 AM Initial version
+#               0.1 08/10/11 AM Added -D switch to help.
+#=================================================================================
+help()
+{
+cat << \EOF
+#
+# Usage   : snapSpecial.14 [-h] -f <component definition file>
+#           -f     File containing component/releases to copy
+#           -h     shows this help
+#           -N     show what would be done (but don't do it) "NO-OP"
+#           -D     turn DEBUG on
+#
+# Details : Advance /afs/eda/prod/$comp/14.1 -> special/$comp/14.1
+#           Advance /afs/eda/prod/$comp/13.1 -> special/$comp/13.1
+# 
+EOF
+}
+
+goodbye()
+{
+  rc="$1"
+  [[ -n $2 ]] && print "$2\n"
+  exit "${rc:-0}"
+}
+
+#=================================================================================
+#  MAIN PROGRAM
+#=================================================================================
+userID=`whoami`
+masterID="cmlib"
+
+SRC_REPOS="/afs/eda/prod"
+TGT_REPOS="/afs/eda/special"
+
+if [[ $userID = $masterID ]]
+then
+  rc=0
+
+  MNTH=$(date +%h | tr '[:upper:]' '[:lower:]')
+  DAY=$(date +%d)
+
+  #---------------------------------
+  # Get the command line arguments
+  #---------------------------------
+  while getopts :f:hDN args
+  do
+    case $args in
+      f) compFile=$OPTARG;;
+      h) help; goodbye;;
+      D) DEBUG=TRUE
+         print "\nIn DEBUG mode...";;
+      N) NOOP=TRUE
+         print "In NO-OP mode...";;
+      :) help; goodbye 1 "\n*** Option -$OPTARG requires a paramter.";;
+      ?) help; goodbye 1 "\n*** Option -$OPTARG is not recognized.";;
+    esac
+  done
+  shift $(($OPTIND - 1))
+
+  if [[ -f $compFile ]]
+  then
+    print "\n$(date): Starting the $0 script."
+    lines=0
+    IFS="/"            # parsing delimiter
+
+    print "\nINFO: Processing the component/release info from file $compFile.\n"
+
+    while read component release junk
+    do
+      LOGFILE="/afs/eda/u/hdplib/logs/$MNTH/$MNTH$DAY.$component.$release.snapSpecial"
+
+      if [[ -n $NOOP ]]
+      then
+        noopTerm="-N"
+      else
+        noopTerm=""
+      fi
+
+      if [[ -n $DEBUG ]]
+      then
+        dbgTerm="-D"
+      else
+        dbgTerm=""
+      fi
+
+      (( lines = lines + 1 ))
+      print "\n*******************************************"           
+      print "$lines) Processing $component/$release."
+      print "*******************************************\n"
+
+      /afs/eda/u/cmlib/bin/copyCompRel -c $component -r $release -s "$SRC_REPOS" -t "$TGT_REPOS" -l "$LOGFILE" -m rsync $noopTerm $dbgTerm
+    done < $compFile
+
+    print "\nINFO: Read $lines lines from the input file."
+    print "\n$(date): Ending the $0 script.\n"
+  else
+    print "\nERROR: Could not find input file, $compFile\n"
+  fi
+else
+  print "\nERROR: You must be AFS ID \"$masterID\" to run this script.\n"
+fi

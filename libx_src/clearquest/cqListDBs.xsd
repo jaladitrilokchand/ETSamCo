@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+
+	<xsd:element name="username" type="nonBlankString" />
+	<xsd:element name="password" type="nonBlankString" />
+	<xsd:element name="app-name" type="nonBlankString" />
+
+	<xsd:element name="CqListDBs">
+		<xsd:complexType>
+			<xsd:sequence>
+				<xsd:element ref="login" />
+				<xsd:element ref="client" />
+			</xsd:sequence>
+		</xsd:complexType>
+	</xsd:element>
+
+		<xsd:element name="login">
+		<xsd:complexType>
+			<xsd:sequence>
+				<xsd:element ref="username" />
+				<xsd:element ref="password" />
+			</xsd:sequence>
+		</xsd:complexType>
+	</xsd:element>
+
+	<xsd:element name="client">
+		<xsd:complexType>
+			<xsd:sequence>
+				<xsd:element ref="app-name" />
+			</xsd:sequence>
+		</xsd:complexType>
+	</xsd:element>
+	
+	<xsd:simpleType name="nonBlankString">
+		<xsd:restriction base="xsd:string">
+		  <xsd:minLength value='1'/>
+		</xsd:restriction>
+	</xsd:simpleType>
+
+
+</xsd:schema>

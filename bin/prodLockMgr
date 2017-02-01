@@ -1,0 +1,740 @@
+#!/usr/bin/env perl
+#use warnings;
+#use strict;
+#=============================================================================
+#    FILE: prodLockMgr
+#
+# CREATOR: Art Magnan
+#
+# OUTPUTS: Lock / unlock an EDA component tree directory.
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# Lock/unlock an EDA PROD 14.1 component/release tree directory.
+#   (/afs/eda/prod/{component}/14.1)
+#
+#-NOTES---------------------------------------------------------------------
+# (1) This script will lock/unlock component/release trees in EDA PROD repository
+#     by allowing access for only the AFS ID svnlib.
+#     (a) The component/release tree is locked using the -l switch.
+#     (b) The component/release tree is unlocked using the -u switch.
+#     (c) The -c switch used with a single component name will run the component
+#         tree lock/unlock operation on that tree only. 
+#     (d) [DISABLED] To run against all components defined in the component definition for the 
+#         specified TK version (-t switch) used the -c switch with the "full_TK" keyword.
+# (2) The Toolkit version must be defined in the CM DB.
+# (3) The component name must ve defined in the CM DB.
+# (4) This script must be run by AFS ID svnlib.
+# (5) The component(s) must be defined, and associated with this Toolkit version in the
+#     CM DB.
+#     (a) This script needs to support the "delivered" component definition.
+#     (b) This script needs to support the "build_support" component definition.
+# (6) The initialized TK version tree must already exist.
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 09/20/2011 AM  Initial version
+# 09/22/2011 AM  Disabled the ability to lock the component trees in EDA PROD for an 
+#                entire TK version - recommend using the single component feature.
+# 11/16/2011 AM  Removed the full_TK capability from this script. Use script
+#                doTK_lockmgr to run against all components defined for a TK version.
+# 12/14/2011 AM  Updated to remove all access to non-SVNLIB users at component/release
+#                treetop in lock operation.
+#=============================================================================
+#                              FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub help {
+	print "\nScript used to lock / unlock a component/release tree in EDA PROD.\n";
+	print " (/afs/eda/prod/{component}/14.1)\n";
+	print "\nUsage: prodLockMgr -t <Toolkit version> -c <component> <-l|-u> [-d] [-g] [-h]\n";
+	print "\nInput parameters:\n";
+	print "  -t <EDA Toolkit release version> e.g. 14.1.{n}\n";
+	print "  -c <component_name>\n";
+	print "  -l lock the component/tree(s)\n";
+	print "  -u unlock the component/tree(s)\n";
+	print "  -d [Development Mode ON]\n";
+	print "  -g [Debug mode ON - no execution of data updates - will see what would execute]\n";
+	print "  -h This help\n";
+	print "\nNOTES:\n";
+	print "  1) The EDA Toolkit version is required.\n";
+	print "  2) Either the -l or -u switch are required, but not both.\n";
+	print "\n";
+	exit 1;
+} # end help
+
+sub process_cmd_line {	
+  # --------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+  # Parms defined:  -c <component_name; e.g. einstimer>
+  #                 -d [Development mode ON - using code from DEV area]
+  #                 -g [Debug mode ON - no execution of data updates - will see what would execute.]
+  #                 -h [help]
+	#                 -l Lock the component/tree(s)
+  #                 -t <Toolkit version;  e.g. 14.1.0>
+	#                 -u Unlock the component/tree(s)
+  # -------------------------------------------------------------- 
+	getopts('c:dghlt:u');
+
+  $compName  = "$opt_c";
+  $devMode   = "$opt_d";
+  $tkVersion = "$opt_t";
+
+	# Set DEBUG mode
+	if ($opt_g) {
+		$DEBUG = 1;
+	}
+	else {
+		$DEBUG = 0;
+	}
+
+	# Set LOCKING mode
+	if ($opt_l) {
+		$lockMode = "lock";
+	}
+	if ($opt_u) {
+		$lockMode = "unlock";
+	}
+	
+	if ( ${opt_h} ) { help(); }
+} # end process_cmd_line
+
+sub display_script_parms {
+	#
+	# Display the input parameters entered on the command line
+	#
+	my ($compName, $tkVersion) = @_;
+	
+	print "------------------------------------------------------ \n";
+	print " Parms Read By Program:        \n";
+	print " $fullScrName \n";
+	print "------------------------------------------------------ \n";
+	print "TK Version     = \"$tkVersion\"\n";
+	print "Component name = \"$compName\" \n";
+	if ($opt_l) { print "Locking Mode   = \"LOCK\" \n"; }
+	elsif ($opt_u) { print "Locking Mode   = \"UNLOCK\" \n"; }
+	if ($opt_d) { print "DEV Mode       = \"ON\" \n"; }
+	else { print "DEV Mode       = \"OFF\" \n"; }
+	if ($opt_g) { print "DEBUG Mode     = \"ON\" \n"; }
+	else { print "DEBUG Mode     = \"OFF\" \n"; }
+	print "------------------------------------------------------ \n\n";
+} # end display_script_parms
+
+sub check_userID {
+	#
+	# AFS ID svnlib must be used to execute this script
+	#
+	my ($userID, $debug, @authID) = @_;
+  my ($found) = 1;
+	
+	foreach $id (@authID) {
+		if ($debug) {
+			print "userID: \"$userID\"  authID: \"$id\"\n";
+		}
+		if ( $userID eq $id ) {
+			$found = 0;
+			last;
+		}
+	}
+  return ($found);
+} # end check_userID
+
+sub create_timestamp {
+	#
+	# Get date and time info from system
+	#
+	
+	@months = qw(jan feb mar apr may jun jul aug sep oct nov dec);
+	
+  ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+	
+  $year = $year + 1900;
+	
+	$month = $mon + 1;
+  $monthName = $months[$mon];
+	$monthDay = $monthName . $mday;
+	
+  $date_now = $month . "/" . $mday . "/" . $year;
+	
+  if ($min < 10) {
+    $newmin = "0" . $min;
+  }
+  else {
+    $newmin = $min;
+  }
+  $time_now = $hour . ":" . $newmin;	
+} # end create_timestamp
+
+sub trimStr {
+	my ($string) = @_;
+	$string =~ s/^\s+//;
+	$string =~ s/\s+$//;
+	return ($string);
+} # end trimStr
+
+sub read_ACL_from_AFS {
+#
+# Get the list of access permissions for a particular AFS directory
+#
+	my ($aclPath, $debug) = @_;
+	my $rc = 0;
+	my %aclData = ();
+	my $subName = "read_ACL_from_AFS";
+	my $aclCnt = 0;
+	my $totalCnt = 0;
+
+  my $aclFile = "$aclPath/.aclFile";
+
+	# Read AFS ACL at aclPath
+	chdir ($aclPath) or die "[$subName ERROR]: Can't change directory to $aclPath.\n";
+	@aclList = `fs la`;
+	
+	# Open hidden file to save the ACL info
+	unless (open(ACLFILE, ">$aclFile")) {
+			die ("Output file $aclFile cannot be opened.\n");
+		}
+
+	# Process each AFS ACL - eliminating non-ACLs
+	foreach $item (@aclList) {
+		chomp ($item);
+		$aclEntry = trimStr ($item);
+		if ($debug) {
+			print "\n[$subName] Original ACL entry: $aclEntry\n";
+		}
+
+		# Apply filtering to eliminate unwanted entries
+		if ($aclEntry =~ /^Access/) {
+			if ($debug) {
+				print "[$subName] ACL entry, $aclEntry, will NOT be processed.\n\n";
+			}
+			next;
+		}
+		elsif ($aclEntry =~ /^Normal/) {
+			if ($debug) {
+				print "[$subName] ACL entry, $aclEntry, will NOT be processed.\n\n";
+			}
+			next;
+		}
+		elsif ($aclEntry =~ /^system:administrators/) {
+			if ($debug) {
+				$totalCnt++;
+				print "[$subName] ACL entry, $aclEntry, will NOT be processed.\n\n";
+			}
+			next;
+		}
+		else {
+			# These appear to be the AFS ACL entries we want
+			$aclCnt++;
+			$totalCnt++;
+			if ($debug) {
+				print "[$subName] ACL entry, $aclEntry, will be processed.\n";
+			}
+
+			# Build a hash containing the ACL name and the access value
+      ($aclName, $aclAccess) = split (" ", $aclEntry);
+			if ($debug) {
+				print "[$subName] aclName: \"$aclName\"   aclAccess: \"$aclAccess\"\n\n";
+			}
+			$aclData{$aclName} = $aclAccess;
+
+			if (! $debug) {
+				# Save information in hidden .aclFile
+				print ACLFILE "$aclEntry\n";
+			}
+		}
+	}
+
+	if ($debug) {
+		print "[$subName] *** There were $aclCnt out of $totalCnt ACL entries to be further processed.\n\n";
+	}
+
+  close (ACLFILE);
+
+	# Send back the ACLs to be processed.
+	return (%aclData);
+
+} # end read_ACL_from_AFS
+
+sub read_ACL_from_file {
+#
+# Get the list of AFS access permissions from the hidden file in EDA PROD
+#
+	my ($aclPath, $debug) = @_;
+	my $rc = 0;
+	my %aclFileData = ();
+	my $subName = "read_ACL_from_file";
+	my $aclCnt = 0;
+	my $totalCnt = 0;
+
+  my $aclFile = "$aclPath/.aclFile";
+
+	# Read AFS ACLs at aclPath
+	chdir ($aclPath) or die "[$subName ERROR]: Can't change directory to $aclPath.\n";
+	
+	# Open hidden file to read the ACL info
+	unless (open(ACLFILE, "$aclFile")) {
+		die ("Input file $aclFile cannot be opened.\n");
+	}
+	
+	@aclList = <ACLFILE>;
+	close (ACLFILE);
+	
+	# Process each AFS ACL entry
+	foreach $item (@aclList) {
+		chomp ($item);
+		$aclEntry = trimStr ($item);
+		if ($debug) {
+			print "\n[$subName] Original ACL entry: $aclEntry\n";
+		}
+		# These are the AFS ACL entries we want
+		$aclCnt++;
+		$totalCnt++;
+		if ($debug) {
+			print "[$subName] ACL entry, $aclEntry, will be processed.\n";
+		}
+		
+		# Build a hash containing the ACL name and the access value
+		($aclName, $aclAccess) = split (" ", $aclEntry);
+		if ($debug) {
+			print "[$subName] aclName: \"$aclName\"   aclAccess: \"$aclAccess\"\n\n";
+		}
+		$aclFileData{$aclName} = $aclAccess;
+	}
+	
+	if ($debug) {
+		print "[$subName] *** There were $aclCnt out of $totalCnt ACL entries to be processed.\n\n";
+	}
+
+	# Send back the ACL entries to be processed.
+	return (%aclFileData);
+	
+} # end read_ACL_from_file
+
+sub write_ACL {
+	#
+	# Apply the filtered list of ACLs and their access permissions to a particular directory
+	#
+	my ($aclPath, $debug, %aclData) = @_;
+	my $rc = 0;
+	my $subName = "write_ACL";
+	my ($aclName, $aclAccess);
+	my $aclCnt = 0;
+	my $saCmd = "";
+
+	# Assign AFS ACLs at aclPath
+	chdir ($aclPath) or die "[$subName ERROR]: Can't change directory to $aclPath.\n";
+	
+	# Assign the ACLs to $aclPath
+	if ($debug) {
+		print "\n[$subName] These ACLs will be assigned to $aclPath:\n";
+	}
+	while (($aclName, $aclAccess) = each (%aclData)) {
+		$aclCnt++;
+		if ($debug) {
+			print "aclName: \"$aclName\"   aclAccess: \"$aclAccess\"\n";
+		}
+		else {
+			$saCmd = "fs sa . $aclName $aclAccess 2>&1";
+			if ($debug) {
+				print "[$subName] saCmd: \"$saCmd\"\n";
+			}
+			else {
+				TkCommon::runcmd ("$saCmd", "$debug");
+				$rc = $? >> 8;
+				if ($rc) {
+					print "[ERROR]: $aclName was NOT changed to access permissions of \"$aclAccess\".\n\n";
+				}
+				else {
+					print "[INFO]: $aclName changed to access permissions of \"$aclAccess\".\n\n";
+				}
+			}
+		}
+	}
+	if ($debug) {
+		print "Total ACLs processed: $aclCnt  maxRC=$maxRC\n";
+	}
+	return ($rc);
+
+} # end write_ACL
+
+sub change_ACL {
+	#
+	# Change the ACL access for the aclNames to newAccess
+	# Filter out the svnlib ACLs and the system:administrators
+	#
+	my ($aclPath, $newAccess, $debug, %aclData) = @_;
+	my $rc = 0;
+	my $subName = "change_ACL";
+	my ($aclName, $aclAccess);
+	my $aclCnt = 0;
+	my $totalCnt = 0;
+	my $saCmd = "";
+	
+	chdir ($aclPath) or die "[$subName ERROR]: Can't change directory to $aclPath.\n";
+	
+	# Assign the newAcess to ACL entries in aclPath
+	if ($debug) {
+		print "\n[$subName] These ACLs will be assigned new access of \"$newAccess\" in $aclPath:\n\n";
+	}
+	while (($aclName, $aclAccess) = each (%aclData)) {
+		$totalCnt++;
+		if ($debug) {
+			print "[$subName] aclName: \"$aclName\"   oldAccess: \"$aclAccess\"   newAccess: \"$newAccess\"\n";
+		}
+
+		# Filter the svnlib and system AFS ACLs by name so they retain their original AFS access permissions.
+		if ($aclName =~ /^svnlib$/) {
+			print "[$subName] Filtered out \"$aclName\"\n\n";
+			next;
+		}
+		if ($aclName =~ /^svnlib:read$/) {
+			print "[$subName] Filtered out \"$aclName\"\n\n";
+			next;
+		} elsif ($aclName =~ /^amagnan$/) {
+			print "[$subName] Filtered out \"$aclName\"\n\n";
+			next;
+		} elsif ($aclName =~ /^system:administrators$/) {
+			print "[$subName] Filtered out \"$aclName\"\n\n";
+			next;
+		} elsif ($aclName =~ /^system:authuser$/) {
+			print "[$subName] Filtered out \"$aclName\"\n\n";
+			next;
+		}
+		else {
+			$saCmd = "fs sa . $aclName $newAccess 2>&1";
+			$aclCnt++;
+			if ($debug) {
+				print "[$subName] saCmd: \"$saCmd\"\n\n";
+			}
+			else {
+				TkCommon::runcmd ("$saCmd", "$debug");
+				$rc = $? >> 8;
+				if ($rc) {
+					print "[ERROR]: $aclName was NOT changed to access permissions of \"$newAccess\".\n\n";
+				}
+				else {
+					print "[INFO]: $aclName changed to access permissions of \"$newAccess\".\n\n";
+				}
+			}
+		}
+	}
+	if ($debug) {
+		print "[$subName] *** There were $aclCnt out of $totalCnt ACL entries processed. maxRC=$maxRC\n\n";
+	}
+	return ($rc);
+
+} # end change_ACL
+
+sub lock_comprel_dir {
+	#
+	# LOCK the component/release trees in EDA PROD by copying the AFS ACLs 
+	# to a hidden file, then changing the access permissions to READ for all 
+	# AFS IDs, except the admin ones. 
+	#
+	my ($prodPath, $lockFile, $debug) = @_;
+	my $rc = 0;
+	my $maxRC = 0;
+	my %aclSrcData = ();
+	my $subName = "lock_comprel_dir";
+	my $aclCnt = 0;
+	my $aclAccess = "none";
+	my $datetime;
+	
+	if ($debug) {
+		print "\n[$subName] prodPath: $prodPath\n";
+		print "\n[$subName] lockFile: $lockFile\n";
+		print "[$subName] debug: $debug\n\n";
+	}
+
+	$prodFile = "$prodPath/$lockFile";
+
+	if (-f $prodFile) {
+		print "[WARN]: Lock file, $prodFile, already exists...unable to lock...exiting.\n";
+    $rc = 4;
+	}
+	else {
+		# Create the lock file
+		unless (open(LOCKFILE, ">$prodFile")) {
+			die ("Output file $prodFile cannot be opened.\n");
+		}
+
+		# Create an entry in the lock file
+		create_timestamp;
+		$datetime = "$date_now at $time_now";
+		print LOCKFILE ("Locked $datetime by $userID\n");
+		close (LOCKFILE);
+		
+		# Read and save the ACLs found in the prodPath
+		%aclSrcData = read_ACL_from_AFS ($prodPath, $debug);
+		
+		# Print the ACLS that were read
+		if ($debug) {
+			print "[$subName] ACLs read from $prodPath are:\n";
+			foreach $item (sort keys %aclSrcData) {
+				$aclCnt++;
+				print "$item\n";
+			}
+			print "[$subName] Total ACLs processed: $aclCnt\n";
+		}
+		
+		# Change the ACL accesses for all non-SVNLIB ACLs in prodPath to NONE
+		if (! $debug) {
+			$rc = change_ACL ($prodPath, $aclAccess, $debug, %aclSrcData);
+		}
+		else {
+			print "\n*** In DEBUG mode: Will not make any changes to ACL at $prodPath.\n";
+		}
+	}
+	
+	return ($rc);
+	
+} # end lock_comprel_dir
+
+sub unlock_comprel_dir {
+	#
+	# UNLOCK the component/release trees in EDA PROD by restoring the access
+	# permissions to the AFS IDs in EDA PROD using the hidden file data.
+	#
+	my ($prodPath, $lockFile, $debug) = @_;
+	my $rc = 0;
+	my $maxRC = 0;
+	my %aclSrcData = ();
+	my $subName = "unlock_comprel_dir";
+	my $aclCnt = 0;
+	
+	if ($debug) {
+		print "\n[$subName] prodPath: $prodPath\n";
+		print "[$subName] debug: $debug\n\n";
+	}
+
+	$prodFile = "$prodPath/$lockFile";
+	
+	if (-f $prodFile) {
+		# Remove the lock file
+		unlink ($prodFile);
+	}
+	else {
+		print "\n[WARN]: No lock file found...nothing to unlock...exiting.\n";
+    $rc = 4;
+	}
+	
+	# Read the ACLs found in the prodPath
+	%aclSrcData = read_ACL_from_file ($prodPath, $debug);
+	
+	# Print the ACLS that were read
+	if ($debug) {
+		print "[$subName] ACLs read from $prodPath are:\n";
+		foreach $item (sort keys %aclSrcData) {
+			$aclCnt++;
+			print "$item\n";
+		}
+		print "[$subName] Total ACLs processed: $aclCnt\n";
+	}
+	
+	# Assign the ACLs to prodPath
+	if (! $debug) {
+		$rc = write_ACL ($prodPath, $debug, %aclSrcData);
+	}
+	else {
+		print "\n*** In DEBUG mode: Will not make any changes to ACL at $prodPath.\n";
+	}
+	
+	return ($rc);
+	
+} # end unlock_comprel_dir
+
+sub log_execution {
+	#
+	# Define the logging, execution timestamps
+	#
+	my ($when, $compType, $logPath, $logSuffix) = @_;
+	my $tkVer = "";
+	
+	if ($when eq "start") {
+
+    # Convert tkVersion for use in log file name
+    $tkVer = TkCommon::convert_tkVersion ($tkVersion, "selfstore");
+
+		# Set up the log file
+		create_timestamp;
+		$datetime = "$date_now at $time_now";
+
+		$logFile = "${logPath}/logs/${monthName}/${monthDay}.${compType}.${tkVer}.${scriptName}.${logSuffix}";
+		unless (open(STDOUT, "| tee -ai $logFile")) {
+			die ("Output file $logFile cannot be opened.\n");
+		}
+		
+		# Log the start time
+		print ("\n#\n");
+		print ("# $fullScrName started at $datetime by $userID\n");
+		print ("#\n");
+		
+		# Display the command line input parms
+		display_script_parms ($compName, $tkVersion);
+		
+	} elsif ($when eq "end") {
+
+		create_timestamp;
+		$datetime = "$date_now at $time_now";
+		
+		# Log the end time
+		print ("\n#\n");
+		print ("# $fullScrName ended at $datetime by $userID\n");
+		print ("#\n");
+		
+	} else {
+		print "ERROR: log_execution: Can't figure out when I need to log!\n";
+	}
+} # end log_execution
+
+sub process_rc {
+	#
+  # Handle return code processing from TK common
+  #
+	my ($opName, $errMsg, $doExit, $rc) = @_;
+	
+	if ($rc == 0) {
+		print "Operation successful for \"$opName\". rc=$rc\n";
+	}
+	else {
+		print "ERROR: Return code $rc from \"$opName\".\n";
+		if ($errMsg ne "") {
+			print "$errMsg\n";
+		}
+    if ($doExit) {
+			exit $rc;
+		}		
+	}
+} # end process_rc
+
+#============================================================================================
+#					MAIN ROUTINE
+#============================================================================================
+use Env;
+use Getopt::Std;
+use File::Path qw(mkpath) ;
+use Storable;
+use Data::Dumper;
+use Cwd;
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TkCommon;
+
+our $rc = 0;
+our $maxRC = 0;
+our %compList = ();
+
+our $opt_c = "";
+our $opt_d = 0;
+our $opt_t = "";
+
+# Command line variables set via subroutine
+our $devFlg = "";
+our $tkVersion = "";
+our $compName = "";
+our $DEBUG = 0;
+our $devMode = 0;
+our $lockMode = "";
+
+our $scriptName = "prodLockMgr";
+our $fullScrName = $0;
+our $lockFile = ".lock_prodLockMgr";
+
+# Only AFS ID svnlib should run this script to update the TK version tree!!!
+our $rlseID = "svnlib";
+our $userID = $LOGNAME;
+my (@authID) = ($rlseID);
+$rc = check_userID ($userID, 0, @authID);
+if ($rc) {
+  print "\nERROR: You MUST run this script as AFS ID \"@authID\" to manage the locks!!!\n\n";
+  exit 8;
+} else {
+	print "\nINFO: Running script using authorized AFS ID.\n\n";
+}
+
+# Get inputs from command line
+process_cmd_line;
+
+# Make sure the required parameters are provided
+if ($tkVersion eq "") {
+  print "\nERROR: Missing Toolkit version.\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+if ($compName eq "") {
+  print "\nERROR: Missing component name.\n";
+  print "       You must specify the EDA TK component name, using the -c switch.\n\n";
+  exit 8;
+}
+
+# Ensure tkVersion is in correct format
+$rc = TkCommon::check_tkVersion ($tkVersion);
+if ($rc != 0) {
+  print "\nERROR: Toolkit version specified in an invalid format!\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+} else {
+	# Define the EDA release
+	$release = TkCommon::convert_tkVersion ($tkVersion, "release");    # Release, e.g. 14.1
+}
+
+# Ensure that the -l and -u switches are mutually exclusinve
+if (!$opt_l && !$opt_u) {
+	print "\nERROR: You must specify either the lock (-l) or the unlock (-u) switch...quitting!\n\n";
+  exit 4;
+}
+if ($opt_l && $opt_u) {
+	print "\nERROR: The -l and -u switches are mutually exclusive, you must use one or the other... quitting!\n\n"; 
+	exit 4;
+}
+
+# Set location of enablement code based on DEV or PRODUCTION (default) mode
+if ($devMode) {
+	$edaTop = "/afs/eda/u/amagnan";                # Top path of EDA
+	$prodTop = "${edaTop}/prod";                   # Top path of EDA PROD location
+	$logPath = "/afs/eda/u/amagnan";
+  $logSuffix = "devlog";
+	$dbType = "-db GDEV";
+  $devFlg = "-d";
+} 
+else {
+	$edaTop = "/afs/eda";                          # Top path of EDA
+	$prodTop = "${edaTop}/prod";                   # Top path of EDA PROD location
+	$logPath = "/afs/eda/u/svnlib";
+  $logSuffix = "log";
+	$dbType = "-db GPROD";   # defaults to production CM DB
+  $devFlg = "";   # defaults to production mode for execution
+}
+
+#
+# Perform the lock / unlock operation for a single component
+#
+	
+# Define the EDA PROD component tree location
+$prodDir = "${prodTop}/${compName}/${release}";
+
+if (-d $prodDir) {
+	# Start the log process
+	log_execution ("start", $compName, $logPath, $logSuffix);
+	
+	if ($lockMode eq "lock") {
+		# Perform the lock operation
+		print "\n*** Locking single component, \"$compName\", in TK $tkVersion.\n";
+		$rc = lock_comprel_dir ($prodDir, $lockFile, $DEBUG);
+	}
+	elsif ($lockMode eq "unlock") {
+		# Perform the unlock operation
+		print "\n*** Unlocking single component, \"$compName\", in TK $tkVersion.\n";
+		$rc = unlock_comprel_dir ($prodDir, $lockFile, $DEBUG);
+	}
+}
+else {
+	print "\n[ERROR]: Unable to locate EDA PROD component tree for $compName.\n";
+}
+
+# Tell user where the LOG file is located
+print "\nLOG file located at $logFile.\n\n";
+
+log_execution ("end", "", $logPath, $logSuffix);
+close (STDOUT);
+exit ($rc);
+

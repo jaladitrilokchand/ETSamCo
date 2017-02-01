@@ -1,0 +1,685 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: compLockMgr
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#    DATE: 08/04/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 08/04/2012 EH  Initial coding.
+# 08/10/2012 EH  Fixed a bug that prevented the permissions on the 
+#                component/release root directory from being locked down.
+# 02/04/2013 JVI Exit when errors are encountered trying to retrieve ACLs
+# 03/22/2013 GFS Updated to use TKutils perl module.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TKutils;
+
+# Global variables
+my $release;
+my $edaDir = "/afs/eda";
+my $dir = "";
+my @dirList = ();
+my $line = "";
+my $dateTime = "";
+my $command = "";
+my $compRlsDir = "";
+my %aclsHash = ();
+my $aclFile = "";
+my $lockFile = "";
+my $fullDir = "";
+my $readOnly = 1;
+my $authorizedId = "svnlib";
+my $afsId = "";
+
+# Program variables
+my $appName = "compLockMgr";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help         = "";
+my $debug        = 0;
+my $verbose      = 0;
+my $tgtLevel     = "";
+my $refLevel     = "";
+my $level        = "";
+my $component    = "";
+my $lock         = 0;
+my $unlock       = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my $rc  = $ERROR;
+my $startDir = $ENV{"PWD"};
+my $progRC = "";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+#$SIG{__DIE__} = sub { handleDIE(); };
+
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# TODO: 
+# 1. Do a grep of all scripts to see if any were checking for old lock 
+#    file name.
+# 2. Need to update svnAdvance to recognize .lock_compLockMgr instead 
+#    of .lock_prodLockMgr.
+# 3. Need to decide if set_tkver_acls should be sunset or rewritten.
+#     - it will not understand the new format of .aclFile
+#     - it recursively sets component/release subdirectories to the same ACL 
+#       instread of recognizing that each subdir could have a unique ACL.
+$lockFile = "/afs/eda/$level/$component/$release/.lock_compLockMgr";
+
+print "Target path:    $compRlsDir\n";
+
+#------------------------------------------------------------------------------
+# Locking: only svnlib and svnlib:write will have write access. 
+#   Other groups will be restricted to read and list (rl) access.
+#------------------------------------------------------------------------------
+if ($lock) {
+
+  # Does lock file already exist?
+  if (-e $lockFile) {
+    print "Component $level/$component/$release is already locked. ";
+    print "Nothing to do.\n";
+    exit $OK;
+  }
+
+  # Open .aclFile 
+  $aclFile = "/afs/eda/$level/$component/$release/.aclFile";
+  open(ACLFILE, ">$aclFile") || die "Cannot open $aclFile $!\n";
+
+  # Get existing ACLs and write them to the .aclFile 
+  my $anyAclErrors = CreateAclFile();
+  if ( $anyAclErrors ) { exit $ERROR; }
+
+  # Set restricted access
+  $rc = SetRestrictedAcls();
+  if ($rc > 0) {
+    CleanExit("Setting restricted access failed. $compRlsDir is NOT locked.",
+	      $ERROR);
+  }
+
+  # Create lockfile
+  unless ($debug) {
+    open(LOCKFILE, ">$lockFile") || die "Cannot open $lockFile $!\n";
+      chomp($dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+      print LOCKFILE ("Locked $dateTime by $afsId\n");
+    close (LOCKFILE);
+    print "Created lock file $lockFile\n";
+    print "$dateTime $compRlsDir is locked.\n";
+  }
+}
+
+#------------------------------------------------------------------------------
+# Unlocking: restore all previous access
+#------------------------------------------------------------------------------
+if ($unlock) {
+
+  # Does lock file already exist?
+  unless (-e $lockFile) {
+    print "Component $level/$component/$release isn't locked. ";
+    print "Nothing to do.\n";
+    exit $OK;
+  }
+
+  print "Restoring original ACLs for $level/$component/$release\n";
+
+  # Read original ACLs stored in .aclFile and write to a hash
+  %aclsHash = CreateAclsHash();
+
+  # Apply original ACLs to component directories.
+  $rc = RestoreOriginalAcls();
+  if ($rc > 0) {
+    CleanExit("Setting of original access failed. $compRlsDir remains locked.",
+	      $ERROR);
+  }
+
+  # Remove lock file
+  $command = "rm $lockFile";
+
+  # Skip if -k option was specified [EH: consider removing this]
+  unless ($debug) {
+    `$command`;
+  }
+  chomp($dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  print "$dateTime $compRlsDir is unlocked.\n";
+}
+
+CleanExit("Application complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  CleanExit("\n[$appName] Caught an unexpected die - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints description and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script locks or unlocks a component. 
+
+Locking removes write access recursively for all directories beneath 
+component/release for all IDs except svnlib.
+
+Unlocking restores the access that existed prior to locking.
+
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-r release> <-level level> <-c component> <-l|-lock|-u|-unlock>
+  [-h] [-k] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where = "
+WHERE:
+  release       = Tool kit release (14.1, 15.1 ...)
+  level         = level where component is to be locked or unlocked
+  component     = component to be locked or unlocked
+  -l | -lock    = lock component
+  -u | -unlock  = unlock component
+  -h            (optional) application help
+  -k            (optional) Show commands but don't execute (for debugging)
+  -y            (optional) Verbose
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('level=s'  => \$level,
+              'c=s'      => \$component,
+              'r=s'      => \$release,
+              'lock|l'   => \$lock,
+              'unlock|u' => \$unlock,
+              'k'        => \$debug,
+              'y'        => \$verbose,
+              'help|h|?' => \$help) || return $ERROR;
+
+  # If help requested, show usage
+   if ($help) {
+     printHelp();
+     return $ERROR;
+   }
+
+  # Validate required input
+  if (! $component) {
+    print "ERROR: component (-c <component>) is a required parameter\n";
+    return $ERROR;
+  }
+
+  if (! $level) {
+    print "ERROR: level (-level <level>) is a required parameter\n";
+    return $ERROR;
+  }
+
+  if (! $release) {
+    print "ERROR: Release (-r <release>) is a required parameter\n";
+    return $ERROR;
+  }
+
+  $compRlsDir = "$edaDir/$level/$component/$release";
+
+  # Validate auth id is running this script
+  return $ERROR if (! TKutils::IsAuthorized($authorizedId, $debug));
+ 
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetAccessFromStoredAcls()
+# Purpose: Set access from stored ACLs
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SetAccessFromStoredAcls {
+
+  my ($dir, $readOnly) = @_;
+  
+  my $grp = "";
+
+  # Clear the existing ACL and add svnlib admin access first to insure that
+  # we will have authority to add the remaining group/permission pairs.
+  # svnlib:write and svnlib:read are also being added here because in some
+  # cases they are not present in the reference directories.
+  $command = "fs sa -clear $dir svnlib rlidwka";
+  $command .= " svnlib:write rlidwk";
+  $command .= " svnlib:read rl";
+  $command .= " system:administrators rlidwka";
+
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $debug, $verbose);    
+
+  # Iterate through each reference group/access pair for current directory
+  foreach $grp (sort(keys %{$aclsHash{$dir}})) {  
+
+    # Don't need bradmin id at this time. Since it is a member of 
+    # system:administrators group, it already has admin rights.
+    next if ($grp eq "bradmin");
+    
+    # Don't bother with the IDs added above.
+    next if ($grp eq "svnlib");
+    next if ($grp eq "svnlib:write");
+    next if ($grp eq "svnlib:read");
+    next if ($grp eq "system:administrators");
+
+    # Get the permissions associated with this group
+    my $permissions = $aclsHash{$dir}{$grp};
+    
+    # Remove write permissions when locking ($readOnly = 1)
+    if ($readOnly) {
+      $permissions =~ tr/idwka/ /;
+      $permissions =~ s/(^\s+|\s+$)//g;
+    }
+
+    # Restore the group/access saved in .aclFile to the current directory.
+    $command = "fs sa $dir $grp $permissions";
+
+    my @results;
+    my $rc = TKutils::RunCommand($command, \@results, $debug, $verbose);    
+    if ($rc > 0) {
+      print "ERROR: Unable to set access on $dir.\n";
+      print @results;
+      return $ERROR;
+    }
+
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CopyAclFromCompRlsDir()
+# Purpose: Copy ACL from target component release directory
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CopyAclFromCompRlsDir {
+
+  my ($dir) = @_;
+  
+  # When the current target directory does not exist in the reference location,
+  # copy the ACL from the target component/release directory to current 
+  # directory.
+  #
+  # Use the fs sa -clear option to remove existing permissions before setting
+  # the new permissions.
+  $command = "fs copyacl -clear -f $compRlsDir -t $dir";
+
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $debug, $verbose);    
+  if ($rc > 0) {
+    print "ERROR: Unable to copy ACL from compRlsDir to $compRlsDir\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateAclFile()
+# Purpose: Read ACL for each subdirectory under component/release and write
+#          the results to the .aclFile in the component/release directory.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateAclFile {
+
+  my @acl = ();
+  my $grp = "";
+  my $permissions = "";
+  my $grpAccessPairs = "";
+  
+  chdir("$edaDir/$level/$component/$release");
+
+  print "Writing existing ACLs to $aclFile\n";
+  
+  # Recursively identify all of the subdirectories below the current directory
+  chomp(my @dirList = `find . -type d `);
+
+  # Iterate through each subdirectory below <component>/<release>
+  foreach $dir (@dirList) {
+
+    my @tokens = ();
+
+    # Remove the leading ./ from directory entry returned by find command.
+    # Without this, $dir looks like "./essinc".
+    $dir =~ s,^.\/,,;
+
+    if (-d $dir) {
+
+      # Clean up obselete users or groups from ACL. If they are not cleaned up, 
+      # the fs sa command will fail later.
+      `fs cleanacl $dir 2>&1 >/dev/null`;
+      
+      # Get ACL for current directory
+      my @unfiltered_acl = `fs la $dir`;
+      my $rc = $? >> 8;
+      if ( $rc == 0 ) {
+	chomp( @unfiltered_acl );
+	@acl = grep( !/Access list for/ && !/Normal rights/, @unfiltered_acl ); 
+      }
+      else {
+	print "ERROR: Unable to determine the access control list for ";
+	print "'$edaDir/$level/$component/$release/$dir'. 'fs la' returned ";
+	print "$rc.\n";
+	return 4;
+      }
+    }
+    else {
+      print "WARNING: $edaDir/$level/$component/$release/$dir directory does ";
+      print "not exist\n";
+      @acl = ();
+    }
+
+    # @acl contains fs la output
+    foreach $line (@acl) {
+
+        # Remove leading and trailing spaces
+        $line =~ s/(^\s+|\s+$)//g;
+
+        @tokens = split(/ +/, $line);
+        $grp = $tokens[0];
+        $permissions = $tokens[1];
+        $grpAccessPairs = $grpAccessPairs . "$grp $permissions,";
+    }
+    $dir = "" if ($dir eq ".");  # ???
+    
+    #-------------------------------------------------------------------------
+    # Write results for current directory to .aclFile
+    #-------------------------------------------------------------------------
+    
+    print ACLFILE "$edaDir/$level/$component/$release/$dir;$grpAccessPairs\n";
+    $grpAccessPairs = "";    
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateAclsHash()
+# Purpose: Read ACL file and create hash of ACLs.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateAclsHash {
+
+  my $dirAcl = "";
+  my $acl = "";
+  my @aclData = ();
+  my $line = "";
+  my $grp = "";
+  my $permissions = "";
+  my @grpAccessPairs = "";
+  my $grpAccessPair = "";
+  my %aclsHash = ();
+ 
+  $aclFile = "/afs/eda/$level/$component/$release/.aclFile";
+  open(ACLFILE, "$aclFile") || die "Cannot open $aclFile $!\n";
+    chomp(@aclData = <ACLFILE>);
+  close(ACLFILE);
+
+  # Iterate through each subdirectory below <component>/<release>
+  foreach $dirAcl (@aclData) {
+
+    my @tokens = ();
+
+    @tokens = split(/;/, $dirAcl);
+    $dir = $tokens[0];
+    $acl = $tokens[1];
+
+    # @acl contains fs la output
+    @tokens = ();
+    @grpAccessPairs = split(/,/, $acl);
+    foreach $grpAccessPair (@grpAccessPairs) {
+
+      @tokens = split(/ +/, $grpAccessPair);
+      $grp = $tokens[0];
+      $permissions = $tokens[1];
+      $aclsHash{$dir}{$grp} = $permissions;
+    }
+  }
+
+  return %aclsHash;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetRestrictedAcls()
+# Purpose: Set restricted ACLs for $level/$component/$release.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SetRestrictedAcls {
+  
+  print "Setting restricted ACLs for $level/$component/$release\n";
+  
+  # Read original ACLs from .aclFile and write to a hash
+  %aclsHash = CreateAclsHash();
+  
+  # Make the target component release directory the current directory
+  chdir("$compRlsDir");
+
+  # Recursively identify all of the subdirectories below the target 
+  # component release directory (current directory).
+  chomp(@dirList = `find . -type d `);
+  $rc = $? >> 8;
+  if ($rc > 0) {
+    print "ERROR: Unable to recursively identify all of the subdirectories ";
+    print "below $compRlsDir\n";
+    return $ERROR;
+  }
+
+  # Iterate through each subdirectory below <component>/<release>
+  foreach $dir (sort(@dirList)) { 
+
+    # Remove the leading ./ from directory entry returned by find command.
+    # Without this, $dir looks like "./essinc".
+    $dir =~ s,^.\/,,;
+
+    # Construct full path to each directory to match what is stored in hash.
+    # The find command returns simply "." for the current directory.
+    unless ($dir eq ".") {
+    
+      # This is a subdirectory below the component/release root directory
+      $fullDir = "$compRlsDir/$dir";
+    }
+    else {
+    
+      # This is the component/release root directory
+      $fullDir = "$compRlsDir/";
+    }
+    
+    # Setting $readOnly = 1 will remove idwka from permissions.
+    $readOnly = 1;
+    if (exists $aclsHash{$fullDir}) {
+    
+      $rc = SetAccessFromStoredAcls($fullDir, $readOnly);
+      if ($rc > 0) {
+        print "ERROR: SetAccessFromStoredAcls($fullDir, $readOnly) failed.\n";
+        return $ERROR;
+      }
+    }
+    print "\n" if ($verbose);
+  }
+
+  return $OK;
+
+}
+
+
+#-----------------------------------------------------------------------------
+# Name   : RestoreOriginalAcls()
+# Purpose: Set restricted ACLs for $level/$component/$release.
+# RCs    : 0 = OK
+#          8 = ERROR
+#-----------------------------------------------------------------------------
+sub RestoreOriginalAcls { 
+
+  # Check if start directory exists
+  unless (-d $compRlsDir) {
+    print "ERROR: $compRlsDir does not exist\n";
+    return $ERROR;
+  }
+
+  # Make the target component release directory the current directory
+  chdir("$compRlsDir");
+
+  # Recursively identify all of the subdirectories below the target 
+  # component release directory (current directory).
+  chomp(@dirList = `find . -type d `);
+  $rc = $? >> 8;
+  if ($rc > 0) {
+    print "ERROR: Unable to recursively identify all of the subdirectories ";
+    print "below $compRlsDir\n";
+    return $ERROR;
+  }
+
+  # Iterate through each subdirectory below <component>/<release>
+  foreach $dir (sort(@dirList)) { 
+
+    # Remove the leading ./ from directory entry returned by find command.
+    # Without this, $dir looks like "./essinc".
+    $dir =~ s,^.\/,,;
+
+    # Construct full path to each directory to match what is stored in hash.
+    # The find command returns simply "." for the current directory.
+    unless ($dir eq ".") {
+    
+      # This is a subdirectory below the component/release root directory
+      $fullDir = "$compRlsDir/$dir";
+    }
+    else {
+    
+      # This is the component/release root directory
+      $fullDir = "$compRlsDir/";
+    }
+
+    # Run the appropriate subroutine depending on whether the current directory
+    # exists in the saved permissions.
+    $readOnly = 0;
+    if (exists $aclsHash{$fullDir}) {
+      $rc = SetAccessFromStoredAcls($fullDir, $readOnly);      
+      if ($rc > 0) {
+        print "ERROR: SetAccessFromStoredAcls($fullDir, $readOnly) failed.\n";
+        return $ERROR;
+      }      
+    }
+    else {
+      $rc = CopyAclFromCompRlsDir($dir);
+      if ($rc > 0) {
+        print "ERROR: CopyAclFromCompRlsDir($dir) failed.\n";
+        return $ERROR;
+      }        
+    }
+    print "\n" if ($verbose);
+  }
+
+  return $OK;  
+
+}

@@ -1,0 +1,274 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: timeIt
+#  SYNTAX: See "printSyntax" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# Benchmarks a scipr/application
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 05/12/2011 GS  Initial coding.
+# 05/19/2011 GS  Updated to optionally save results to a log file.
+# =============================================================================
+
+use warnings;
+use strict;
+use Time::HiRes qw(gettimeofday tv_interval);
+use Sys::Hostname;
+use Getopt::Long;
+Getopt::Long::Configure ("pass_through");
+use File::Path;
+
+#
+# Global variables
+#
+
+# Program name
+my $progName = "timeIt";
+my $progInvocation = $progName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $testApp;
+my $testCount;
+my $maxTime   = 0;
+my $minTime   = 0;
+my $avgTime   = 0;
+my $totalTime = 0;
+my $verbose   = 0;
+my $help      = "";
+my $log;
+my $logDir;
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+my @results = ();
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+  printSyntax();
+  print "\n[$progName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+
+#
+# Display initial information.
+#
+if ($verbose) {
+    print "\n";
+    print "Program     : $progName\n";
+    print "Test app    : $testApp\n";
+    print "Test count  : $testCount\n";
+}
+
+
+# Create the log file if requested
+if ($logDir) {
+  my $date = `date +%Y_%m_%d.%H:%M:%S`;
+  chomp $date;
+  $log = $logDir . "/" .$progName . "." . $date;
+}
+
+
+# Note the start uptime of this machine
+my $startUpTime = `uptime`;
+chomp $startUpTime;
+
+
+#
+# Generate the benchmark results
+#
+my $i;
+my $time = 0;
+my $startTime = localtime();
+for ($i = 0; $i < $testCount; $i++) {
+    my $time = timeRun();
+    print "$i) $time (sec)\n";
+    $totalTime += $time;
+    $minTime = $time if (($minTime == 0) || ($time < $minTime));
+    $maxTime = $time if ($time > $maxTime);
+   
+}
+my $endTime = localtime();
+
+# Note the end uptime of this machine
+my $endUpTime = `uptime`;
+chomp $endUpTime;
+
+
+# Compute average time
+$avgTime = $totalTime / $testCount;
+
+
+
+#
+# Display results
+#
+my $output = "Tests ran on: " . hostname . "\n";
+$output .= "Command tested: $testApp\n";
+$output .= "\n";
+$output .= "Start Time: $startTime\n";
+$output .= "Start Load: $startUpTime\n";
+$output .= "\n";
+$output .= "Min time(sec) = $minTime\n";
+$output .= "Max time(sec) = $maxTime\n";
+$output .= "Avg time(sec) = $avgTime\n";
+$output .= "\n";
+$output .= "End Time: $endTime\n";
+$output .= "End Load: $endUpTime\n";
+
+if ($log) {
+  open LOG, ">$log";
+  print LOG $output;
+  close LOG
+}
+print "\n$output";
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+
+# ------------------------------------------------------------------------------
+# Name   : printSyntax()
+# Purpose: Print syntax to console
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub printSyntax {
+
+  my $syntax = "
+SYNTAX:
+  $progName <-a testApp> <-c testCount> [-l logDir] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  print $syntax;
+
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Runs the given application as many times as specified.  Returns min, max and 
+average run times.";
+
+  my $where ="
+WHERE:
+  -a Application to test.
+  -c Run count (run application this many times).
+  -l Directory to log results if empty no logging will occur (optional)
+  -h Application help (optional)
+  -y Verbose mode (optional)
+";
+
+  print "$progDescription\n";
+  printSyntax();
+  print $where;
+
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+# ------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('a=s'        => \$testApp,
+	      'c=s'        => \$testCount,
+	      'log|l=s'    => \$logDir,
+              'verbose|y'  => \$verbose,
+              'help|h|?'   => \$help
+	      ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the testApp
+  my $msg = "";
+  if (! $testApp) {
+    $msg .= "[$progName] testApp (-a) must be specified.\n";
+  }
+
+  # Verify the testCount
+  if (! $testCount) {
+    $msg .= "[$progName] testCount (-c) must be specified.\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : timeRun()
+# Purpose: Time this run
+# RCs    : Elapsed time
+# ------------------------------------------------------------------------------
+sub timeRun {
+
+    my($startSec, $startUsec) = gettimeofday();
+    `$testApp`;
+    my($endSec, $endUsec) = gettimeofday();
+
+    print "Start: $startSec $startUsec\n" if ($verbose);
+    print "End  : $endSec $endUsec\n" if ($verbose);
+
+    return tv_interval([$startSec, $startUsec], [$endSec, $endUsec]);
+
+}
+
+
+

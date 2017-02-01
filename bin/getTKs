@@ -1,0 +1,56 @@
+#!/usr/bin/env tclsh
+
+set SVN  /afs/btv/data/subversion/bin/svn
+set GJ https://greenjiffy.fishkill.ibm.com/eda/tk
+set s ";"
+set GR /afs/eda/data/edainfra/tools/enablement/prod/bin/getRevisions
+
+set components [ exec  /afs/eda/data/edainfra/tools/enablement/prod/bin/getComponents -t 14.1.0 -q ]
+
+foreach component [ split $components "," ]  {
+  puts $component
+  foreach location {BUILD DEV PROD} {
+#   puts $location
+    set out1 [ catch { exec $GR -c $component -l $location -t 14.1.1 } error1 ]
+    set out0 [ catch { exec $GR -c $component -l $location -t 14.1.0 } error0 ]
+
+    if { $out1 == 0 } {
+      set toolkit 14.1.1
+      set revision [ exec  /afs/eda/data/edainfra/tools/enablement/prod/bin/getRevisions -t $toolkit -c $component -l $location -latest ]
+      set X(${component}${s}${location}${s}${toolkit}) $revision
+#     puts "${component} ${location} ${toolkit} X(${component}${s}${location}${s}${toolkit})"
+    } else {
+#     puts $error1
+    }
+    if { $out0 == 0 } {
+      set toolkit 14.1.0
+      set revision [ exec  /afs/eda/data/edainfra/tools/enablement/prod/bin/getRevisions -t $toolkit -c $component -l $location -latest ]
+      set X(${component}${s}${location}${s}${toolkit}) $revision
+#     puts "${component} ${location} ${toolkit} X(${component}${s}${location}${s}${toolkit})"
+    } else {
+#     puts $error1
+    }
+  }
+}
+
+puts "<html>"
+puts "<table border=1>"
+puts "<tr> <th> COMPONENT <th> 14.1.0 BUILD <th> 14.1.0 DEV <th> 14.1.0 PROD <th> 14.1.1 BUILD <th> 14.1.1 DEV <th> 14.1.1 PROD </tr>"
+foreach component [ split $components "," ] {
+  puts "<tr>"
+  set row "<td> $component"
+  foreach toolkit {14.1.0 14.1.1} {
+    foreach location {BUILD DEV PROD} {
+      lappend row "<td>"
+      if { [ info exists X(${component}${s}${location}${s}${toolkit}) ] } {
+        lappend row "$X(${component}${s}${location}${s}${toolkit})"
+      } else {
+        lappend row "\&nbsp\;"
+      }
+    }
+  }
+  puts "[ join $row ]"
+  puts "</tr>"
+}
+puts "</table>"
+puts "</html>"

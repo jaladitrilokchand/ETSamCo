@@ -1,0 +1,252 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: commit.finalize
+#  SYNTAX: See "printSyntax" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#
+#  INPUTS: See "printSyntax" and "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 03/21/2011 GFS  Initial coding.
+# 09/16/2011 GFS  Change -cq switch to -cr.
+# =============================================================================
+
+use warnings;
+use strict;
+
+use Getopt::Long;
+#Getopt::Long::Configure ("no_ignore_case");
+Getopt::Long::Configure ("pass_through");
+use File::Path;
+
+#
+# Global variables
+#
+
+# Program name
+my $progName = "commit.finalize";
+my $progInvocation = $progName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $dbMode  = "PROD";
+my $inFile  = "";
+my $verbose    = 0;
+my $help       = "";
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+my @results = ();
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+
+$SIG{__DIE__}  = sub { handleDIE();
+                       exit($ERROR);
+                     };
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+  printSyntax();
+  print "\n[$progName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+
+#
+# Display initial information.
+#
+if ($verbose) {
+    print "\n";
+    print "Program : $progName\n";
+    print "File    : $toolKit\n";
+}
+
+
+#
+# Determine the bin directory
+#
+my $appMode = "";
+$appMode = "prod" if ($dbMode =~ /PROD/);
+$appMode = "test" if ($dbMode =~ /TEST/);
+$appMode = "dev" if ($dbMode =~ /DEV/);
+my $binDir = "/afs/eda/data/edainfra/tools/enablement/$appMode/bin";
+
+
+#
+# Verify ChangeRequest is in the correct state.
+#
+my $app = "$binDir/createCodeUpdate";
+$app .= " -db $dbMode";
+$app .= " -f $inFile";
+print "Calling - $app\n" if ($verbose);
+
+#@results = `$app`;
+#my $rc = $? >> 8;
+my $rc = 0
+
+print join("/n", @results) if ($rc != 0);
+
+
+exit $rc;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+# ------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$progName] Caught interruption - Exiting with a cleanUp\n";
+  #chdir($startDir);
+
+}  # End of handleInterruption
+
+
+# ------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$progName] Caught an unexpected die - Exiting with a cleanUp\n";
+  #chdir($startDir);
+
+}  # End of handleDIE
+
+
+# ------------------------------------------------------------------------------
+# Name   : printSyntax()
+# Purpose: Print syntax to console
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub printSyntax {
+
+  my $syntax = "
+SYNTAX:
+  $progName <-t tool_kit> <-c component> <-cr change_req> [-db dbMode] [-h] [-y]
+
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  print $syntax;
+
+}       # End of printSyntax
+
+
+# ------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Determines if a Change Request can be used to commit changes for the given 
+ToolKit and Component.
+";
+
+  my $where ="
+WHERE:
+  -t ToolKit name (14.1.0, 14.1.1 ...).
+  -c Component name (ess, pds, model ...).
+  -cr ChangeRequest number (MDCMS00012345 ...)
+  -db Database mode [default = PROD] (DEV, GDEV ...)
+  -h Application help (optional)
+  -y Verbose mode (optional)
+";
+
+  print "$progDescription\n";
+  printSyntax();
+  print $where;
+
+}       # End of printHelp
+
+
+# ------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+# ------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('file|f=s'        => \$inFile,
+     	      'db=s'            => \$dbMode,
+              'verbose|y'       => \$verbose,
+              'help|h|?'        => \$help
+	      ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the input file
+  my $msg = "";
+  if (! $inFile) {
+    $msg .= "[$progName] Input File (-f) must be specified.\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+

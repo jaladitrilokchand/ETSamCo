@@ -1,0 +1,271 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: xmit.verify
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/06/2013 GFS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TKutils;
+
+# Global variables
+my $DEV_BIN = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $STATUS = "$DEV_BIN/statusXmit";
+
+# Program variables
+my $appName = "xmit.verify";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $toolKit         = "";
+my $component       = "";
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc  = $ERROR;
+my $startDir = $ENV{"PWD"};
+my $progRC = "";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Create the status hash
+my %status;
+if (GetStatus($toolKit, $component, \%status) != $OK) {
+  CleanExit("ERROR: unable to get XMIT status", $ERROR);
+}
+
+# Search for packages for each Pass component
+my %aixPkgs;
+my %linuxPkgs;
+foreach $entry (sort(keys(%status))) {
+  next if ($entry =~ /etreetest/);
+  next if ($entry =~ /svntest/);
+  next if ($status{$entry} ne "Pass");
+
+  my $aixPkg = "";
+  my $linuxPkg = "";
+  FindPackages($entry, \$aixPkg, \$linuxPkg);
+  $aixPkgs{$entry} = $aixPkg;
+  $linuxPkgs{$entry} = $linuxPkg;
+
+}
+
+
+# Display the results
+if (scalar(keys(%aixPkgs)) < 1) {
+  print "No components have passed XMIT!\n";
+  exit $OK;
+}
+
+printf("\n%-12s%-35s%-35s\n",
+	"Component", "AIX Package", "Linux Package");
+printf("%-12s%-35s%-35s\n",
+	"---------", "-----------", "-------------");
+foreach $entry (sort(keys(%aixPkgs))) {
+  printf("%-12s%-35s%-35s\n", $entry, $aixPkgs{$entry}, $linuxPkgs{$entry});
+}
+
+print "\n";
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script verifies transmit deliverables can be located for each component
+in the TK that as XMIT_SUCCES status
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit  = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+  component = (optional) verify on this component (e.g., einstimer)
+  -h          (optional) application help
+  -y          (optional) Verbose (print the invocation of each command)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'      => \$toolKit,
+              'comp|c=s'    => \$component,
+              'y'           => \$verbose,
+              'help|h|?'    => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) must be specified\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetStatus($tk, $comp, $ref_status)
+# Purpose: Read the component status and create a component keyed hash
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub GetStatus {
+
+  my ($tk, $comp, $ref_status) = @_;
+
+  # Construct the command
+  my $command = "$STATUS";
+  $command .= " -t $tk";
+  $command .= " -q";
+  $command .= " -c $comp" if ($comp ne "");
+
+  my @results = ();
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+
+  # Create the hash from the status report
+  my $line;
+  foreach $line (@results) {
+    chomp($line);
+    next if ($line eq "");
+    @tokens = split(/ +/, $line);
+    my $compName = $tokens[0];
+    my $status = $tokens[2];
+    $$ref_status{$compName} = $status;
+  }
+
+  return $OK;
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : FindPackages($comp, $ref_aix, $ref_linux)
+# Purpose: Tries to locate the aix/linux packges for the specified component
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub FindPackages {
+
+  my ($comp, $ref_aix, $ref_linux) = @_;
+
+  # Construct the command
+  my $command = "ls";
+  $command .= " -1 /afs/eda/edadist/products/$comp/1401/test";
+
+  my @results = ();
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  return $rc if ($rc != 0);
+
+  # Create the hash from the status report
+  my $line;
+  $$ref_aix = "---";
+  $$ref_linux = "---";
+  foreach $line (@results) {
+    chomp($line);
+    $$ref_aix = $line if ($line =~ /\.aix/);
+    $$ref_linux = $line if ($line =~ /\.lnx/);
+  }
+
+  return $OK;
+
+}
+
+
+

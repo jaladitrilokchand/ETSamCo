@@ -1,0 +1,14 @@
+#!/usr/bin/ksh
+cd .bin-aix64
+ln -s ../.bin-aix/beam-sort-log
+ln -s ../scripts/purify2
+ln -s /usr/bin/xlf
+cd .bin-linux64
+ln -s ../scripts/purify2
+cd .bin-linux
+ln -s /usr/opt/bin/lf95
+ln -s ../scripts/purify2
+cd .bin-aix
+ln -s /usr/bin/xlf
+ln -s ../scripts/purify2
+ln -s ../../9.1/bin/beam-sort-log

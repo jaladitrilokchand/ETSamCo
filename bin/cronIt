@@ -1,0 +1,235 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: cronIt
+#  SYNTAX: See "printSyntax" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# Runs timeIt at the given frequency. (mimics cron ??)
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 06/17/2011 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use Sys::Hostname;
+use Getopt::Long;
+Getopt::Long::Configure ("pass_through");
+use File::Path;
+
+#
+# Global variables
+#
+
+# Program name
+my $progName = "cronIt";
+my $progInvocation = $progName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $testFreq = 10;
+my $testApp;
+my $testCount;
+my $maxTime   = 0;
+my $minTime   = 0;
+my $avgTime   = 0;
+my $totalTime = 0;
+my $verbose   = 0;
+my $help      = "";
+my $log;
+my $logDir;
+my $logName;
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+my @results = ();
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+  printSyntax();
+  print "\n[$progName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+
+#
+# Display initial information.
+#
+if ($verbose) {
+    print "\n";
+    print "Program     : $progName\n";
+    print "Test app    : $testApp\n";
+    print "Test count  : $testCount\n";
+    print "Test freq   : $testFreq\n";
+}
+
+
+#
+# Run tests at the desired frequency
+#
+$testFreq = $testFreq * 60;
+my $command = "/afs/eda/data/edainfra/tools/enablement/prod/bin/timeIt ";
+$command .= "-a \"$testApp\" ";
+$command .= "-c $testCount ";
+$command .= "-l $logName " if ($logName);
+$command .= "-d $logDir " if ($logDir);
+
+while (1) {
+    #print "Running $command\n";
+    @results = `$command`;
+    print @results;
+
+    print "Sleeping for $testFreq seconds ...\n";
+    sleep($testFreq);
+}
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+
+# ------------------------------------------------------------------------------
+# Name   : printSyntax()
+# Purpose: Print syntax to console
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub printSyntax {
+
+  my $syntax = "
+SYNTAX:
+  $progName <-a testApp> <-c testCount> [-f testFreq] [-d logDir] [-l logName] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  print $syntax;
+
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Runs the given application as many times as specified.  Returns min, max and 
+average run times.";
+
+  my $where ="
+WHERE:
+  -a Application to test.
+  -c Run count (run application this many times).
+  -f Test frequency in minutes (default = 10 minutes)
+  -d Directory to log results if empty no logging will occur (optional)
+  -l Log name if empty log name is cronIt (optional)
+  -h Application help (optional)
+  -y Verbose mode (optional)
+";
+
+  print "$progDescription\n";
+  printSyntax();
+  print $where;
+
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+# ------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('a=s'        => \$testApp,
+	      'c=s'        => \$testCount,
+	      'f=s'        => \$testFreq,
+	      'l=s'        => \$logName,
+	      'd=s'        => \$logDir,
+              'verbose|y'  => \$verbose,
+              'help|h|?'   => \$help
+	      ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the testApp
+  my $msg = "";
+  if (! $testApp) {
+    $msg .= "[$progName] testApp (-a) must be specified.\n";
+  }
+
+  # Verify the testCount
+  if (! $testCount) {
+    $msg .= "[$progName] testCount (-c) must be specified.\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : timeRun()
+# Purpose: Time this run
+# RCs    : Elapsed time
+# ------------------------------------------------------------------------------
+sub timeRun {
+
+    my($startSec, $startUsec) = gettimeofday();
+    `$testApp`;
+    my($endSec, $endUsec) = gettimeofday();
+
+    print "Start: $startSec $startUsec\n" if ($verbose);
+    print "End  : $endSec $endUsec\n" if ($verbose);
+
+    return tv_interval([$startSec, $startUsec], [$endSec, $endUsec]);
+
+}
+
+
+

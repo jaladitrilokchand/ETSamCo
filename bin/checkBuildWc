@@ -1,0 +1,418 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: checkBuildWc
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 10/12/2011
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 10/12/2011 GS  Initial coding.
+# 02/22/2012 EH  Removed amagnan from email distribution
+# =============================================================================
+
+use warnings;
+use strict;
+use File::stat;
+use Time::localtime;
+use Sys::Hostname;
+use Cwd;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use File::Copy;
+
+#
+# Global variables
+#
+my $BUILD   = "/afs/eda/build/";
+
+
+# Program name
+my $appName = "checkBuildWc";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Constants
+my @DIST_LIST = ( 'stadtlag@us.ibm.com', 
+		  'jwcolem@us.ibm.com' );
+
+# Program arguments
+my $toolKit    = "";
+my $component  = "";
+my $emailResults = 0;
+my $help       = "";
+my $verbose = 0;
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+# Set the location and name of createFuncUpdate application
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $GET_REV = "$BIN/getRevisions ";
+my $GET_COMP = "$BIN/getComponents -q ";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# Define the current directory
+#
+my $startDir = $ENV{"PWD"};
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    #printSyntax();
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+#
+# Define custom perl libs path and modules depending on the
+# application mode.
+#
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use IcofFile;
+
+
+#
+# Query the database for components in this Tool Kit
+#
+my $command;
+my @results;
+my @components = ();
+if ($component) {
+  push(@components, $component);
+}
+else {
+  $command = $GET_COMP . " -t $toolKit -q -ct DELIVERED,BUILD_SUPPORT,TEST_SUPPORT ";
+  @results = `$command`;
+  @components = split(/,/, $results[0]);
+}
+
+
+#
+# For each component determine the build working copy revision and the
+# latest revision in build from the ETREE database
+#
+my $here = getcwd;
+my $problems = "";
+my $TK_VER  = $toolKit;
+chop $TK_VER;
+chop $TK_VER;
+
+my $header = sprintf("%-20s%5s%5s%5s%5s%5s%5s%5s%5s%5s%5s\n",
+		     "Component", "A", "C", "I", "D", "M", 
+		     "R", "X", "~", "!", "?");
+$header .= sprintf("%-21s%5s%5s%5s%5s%5s%5s%5s%5s%5s%5s\n",
+		   "----------", 
+		   "---", "---", "---", "---", "---",
+		   "---", "---", "---", "---", "---");
+
+
+my $report = "";
+my $errorCount = 0;
+my $compCount = scalar(@components);
+my %probs = ();
+my $line;
+foreach $entry (@components) {
+
+  chomp($entry);
+  print "Checking $entry ...\n";
+
+  # Find files not in the WC
+  chdir($BUILD . $entry . "/" . $TK_VER);
+  $command = "/afs/btv/data/subversion/bin/svn status -q";
+  @results = `$command`;
+  my $rc = $? >> 8;
+  print " found " . scalar(@results) . " errors\n";
+
+  if (scalar(@results) > 0) {
+
+    # Summarize the errors
+    my %probs = ();
+    $probs{"A"} = 0;
+    $probs{"C"} = 0;
+    $probs{"I"} = 0;
+    $probs{"D"} = 0;
+    $probs{"M"} = 0;
+    $probs{"R"} = 0;
+    $probs{"X"} = 0; 
+    $probs{"~"} = 0;
+    $probs{"!"} = 0;
+    $probs{"?"} = 0;
+    foreach $line (@results) {
+
+      chomp $line;
+      print "$line\n";
+
+      @tokens = split(/ +/, $line);
+      if (! exists($probs{$tokens[0]})) {
+	$probs{$tokens[0]} = 1;
+      }
+      else {
+	$probs{$tokens[0]} += 1;
+      }
+    }
+    
+    # Format errors and add to the report
+    my $row = sprintf("%-20s%5s%5s%5s%5s%5s%5s%5s%5s%5s%5s\n",
+		      $entry, 
+		      $probs{"A"}, $probs{"C"}, $probs{"I"}, 
+		      $probs{"D"}, $probs{"M"}, $probs{"R"}, 
+		      $probs{"X"}, $probs{"~"}, $probs{"!"}, 
+		      $probs{"?"});
+    $report = $header if ($report eq "");
+    $report .= $row;
+    $errorCount++;
+
+  }
+
+}
+
+
+# Determine the percentage of components with errors
+my $errorPercent = $errorCount / $compCount * 100;
+$errorPercent = sprintf("%.1d%%", $errorPercent);
+
+if ($report ne "") {
+  print "\n";
+  print "Components checked: $compCount\n";
+  print "Components w/errors: $errorCount\n";
+  print "Components w/errors: $errorPercent of total\n";
+  print "\n$report\n";
+}
+else {
+  print "\nAll build working copies are in sync with SVN!\n";
+}
+
+
+# Send an email to distribution list.
+SendEmail($report) if ($emailResults);
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}  # End of handleInterruption
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}  # End of handleDIE
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Determines if the build working copy is in sync with the corresponding 
+SVN repository.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-email] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  -t Tool Kit [14.1.0, 14.1.1 ...].
+  -c Component (run check for a single component [no mail sent])
+  -email Email results to distribution list [default = no email]
+  -h Application help (optional)
+  -y Verbose mode (optional)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}       # End of printHelp
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tool_kit|t=s'    => \$toolKit,
+              'comp|c=s'        => \$component,
+              'email'           => \$emailResults,
+              'verbose|y'       => \$verbose,
+              'help|h|?'        => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the obsolete file.
+  my $msg = "";
+  if (! $toolKit) {
+    $msg = "ERROR: tool_kit (-t) is a required parameter\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SendEmail()
+# Purpose: Emails the results
+# RCs    : none
+#------------------------------------------------------------------------------
+sub SendEmail {
+
+  my ($body) = @_;
+  my $host = hostname();
+  my $user = `whoami`;
+  chomp($user);
+
+  # Return if processing a single component
+  if ($component ne "") {
+    print "Running in single component mode - no mail sent!\n";
+    return;
+  }
+
+  # Return if no action required by admin.
+  #return if ($body eq "");
+  
+  # Determine the mailing list.
+  my $address;
+  foreach $address (@DIST_LIST) {
+    $address =~ s/\@/\\\@/;
+
+    `/bin/mailx -s "Results checkBuildWc ($errorPercent w/errors)" $address << EOF
+Hello,
+
+You are receiving this email because you are the owner or builder for one
+of the 14.1 components in the report below.
+
+This report compares the build SVN work copy (/afs/eda/build/<component>/14.1)
+to its corresponding SVN repository.  The components listed below have a 
+discrepance between the build working copy and their SVN repository.
+
+Typically, this differences are the result of someone updating the build
+working copy directly which is not desirable. Updates should be made in
+your sandbox, commited to SVN and extracted into the build working copy.
+
+To determine which file/directories require attention please cd to your
+build working copy and run "svn status -q".
+
+Legend
+-------
+ 'A' Items added to working copy but not to SVN repos
+ 'C' Items in conflict
+ 'D' Items deleted from working copy but from SVN repos
+ 'I' Items ignored
+ 'M' Items modified in working copy but not commited repos
+ 'R' Items replaced in working copy
+ 'X' an unversioned directory created by an externals definition
+ '?' Items in working copy not under version control
+ '!' Item is missing (removed by non-svn command) or incomplete
+ '~' versioned item obstructed by some item of a different kind
+
+
+Components checked: $compCount
+Components w/errors: $errorCount
+Components w/errors: $errorPercent of total
+
+$body
+
+Thanks,
+ETREE/SVN Team
+`;
+  }
+
+}

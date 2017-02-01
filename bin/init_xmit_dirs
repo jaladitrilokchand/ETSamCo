@@ -1,0 +1,268 @@
+#!/usr/bin/env perl
+use warnings;
+#use strict;
+#=============================================================================
+#    FILE: init_xmit_dirs
+#
+# CREATOR: Art Magnan
+#    DEPT: AZYX
+#
+# OUTPUTS:
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# Update the transmittal structures for components defined in the CM DB for a new
+# EDA Toolkit release like 14.1.
+#
+# This includes the .ship-{platform} directories and their underlying symlinks.
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 04/19/2011 AM  Initial version
+# 05/13/2011 AM  Changed all references to btv/edainfra to eda/edainfra for SVN migration.
+# 08/08/2011 AM  Updated to use the external component definition files. Handled by 
+#                subroutines added to TkCommon Perl module.
+# 08/09/2011 AM  Updated to allow testing of code in developer's sandbox via the
+#                codePath variable.
+#                Updated program for steup_xmit_dirs to accept -t <tkVersion> switch; 
+#                eliminated -r <release> switch.
+# 08/25/2011 AM  Updated to handle special TCLZ components. In 14.1, only TCLZ is
+#                transmitted, eliminating need for separate components as in 13.1.
+# 08/29/2011 AM  Updated code to handle tgsupport component (special case).
+#                Updated code to delete existing symlinks in the .ship-{plat} dirs.
+# 12/19/2011 AM  Updated code to get component definition from CM DB.
+#=============================================================================
+#=============================================================================
+#			       FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub help {
+        print "\nScript to create the platform-specific transmittal structures for all components defined in the CM DB in the EDA SHIP or TK repositories.";
+        print "\nUsage:  init_xmit_dirs -t <Toolkit version> -x <ship|tk> [-i <reference release>] [-C] [-d] [-g] [-h]\n";
+        print "\nInput parameters:\n";
+				print "  -t <EDA Toolkit release version> e.g. 14.1.0\n";
+				print "  -x <xmittal repository: ship|tk>\n";
+        print "  -d [Development Mode ON]\n";
+				print "  -g [Test mode ON - will see what would execute.]\n";
+				print "  -h This help\n";
+	      print "  -i <ref_release> e.g. 13.1 directory definition used to create 14.1 base component directories]\n";
+				print "  -C [Clean existing symlinks mode ON]\n";
+        print "\nNOTES:\n";
+				print "  1) The EDA Toolkit version and xmittal repository are required.\n";
+				print "  2) The xmittal repository locations are:\n";
+				print "     For SHIP: \"afs/eda/ship/{component}/{release}\"\n";
+				print "     For TK  : \"afs/eda/tk/{component}/{release}\"\n";
+				print "  3) An optional structural definition (component-specific) can be cloned from\n";
+				print "     a previous release using the -i switch. For example, if you wanted to initialize\n";
+				print "     the release 14.1 .ship-{platform} directories with the symlinks defined in\n";
+				print "     release 13.1, you would specify \"-i 13.1\" as one of the input parameters.\n";
+        exit 1;
+} # end help
+
+sub process_cmd_line {
+	#
+  # ---------------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+  # Parms defined:  -t <Toolkit version;  e.g. 14.1.0>
+  #                 -x <xmittal repository - ship, tk>
+  #                 -d [Development Mode ON - using code from DEV area]
+  #                 -g [Test mode ON - will see what would execute.]
+  #                 -h [help]
+	#                 -i [<ref_release> e.g. 13.1 directory definition used 
+	#                     to create 14.1 base component directories]
+	#                 -C [Clean existing symlinks mode ON]
+  # ---------------------------------------------------------------------
+  getopts('Cdghi:t:x:');
+	
+  $devMode     = "$opt_d";
+	$refRelease  = "$opt_i";
+  $tkVersion   = "$opt_t";
+  $xmitRepos   = "$opt_x";
+	
+	# Set DEBUG mode
+	if ( ${opt_g} ) {
+		$DEBUG = 1;
+		$dbgFlg = "-g";
+	}
+	else {
+		$DEBUG = 0;
+	}
+
+	if ($opt_C) {
+		$cleanLinks = "-C";
+	}
+	
+	# Display help if requested
+	if ( ${opt_h} ) { help(); }
+
+} # end process_cmd_line
+
+sub display_program_parms {
+	#
+	# Display program runtime parms
+	#
+	$compMode = "all";
+	$modeText = "All defined in TK version";
+	print "------------------------------------ \n";
+	print "    Runtime Parms: init_xmit_dirs  \n";
+	print "------------------------------------ \n";
+	print "TK Version        = \"$tkVersion\"\n";
+	print "Release           = \"$release\"\n";
+	print "Component(s)      = \"$compMode\" \n";
+	print "Component name    = \"$modeText\" \n";
+	print "Xmittal Repos     = \"$xmitRepos\" \n";
+	print "Reference release = \"$refRelease\" \n";
+	if ($opt_C) { print "Clean Symlinks = \"ON\" \n"; }
+	else { print "Clean Symlinks = \"OFF\" \n"; }
+	if ($opt_d) { print "DEV Mode       = \"ON\" \n"; }
+	else { print "DEV Mode       = \"OFF\" \n"; }
+	if ($opt_g) { print "DEBUG Mode     = \"ON\" \n"; }
+	else { print "DEBUG Mode     = \"OFF\" \n"; }
+	print "------------------------------------ \n\n";
+} # end display_program_parms
+
+#============================================================================================
+#					MAIN ROUTINE
+#============================================================================================
+use Env;
+use Getopt::Std;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+#$codePath = "/afs/eda/data";
+$codePath = "/afs/eda/u/amagnan";
+
+$sysRC = 0;
+$dbgFlg = "";       # Debug default: OFF
+$devFlg = "";       # DEV mode default: Production
+$dbType = "";       # CM DB default: Production
+$refRel = "";       # refRelease default: No reference release passed to called programs
+$cleanLinks = "";   # cleanLinks default: Do not clean symlinks prior to initialization.
+$compCnt = 0;       # Counts the number of components.
+$failCnt = 0;       # Counts the number of components that failed.
+
+my $compList;
+my $compDef = "DELIVERED";
+my $compCnt = 0;
+
+# Pass target host from command line
+process_cmd_line;
+
+# Make sure the required parameters are provided
+if ($tkVersion eq "") {
+  print "\nERROR: You must specify the EDA Toolkit release version in format 14.1.{n} using the -t input switch.\n\n";
+  exit 8;
+}
+
+# Ensure tkVersion is in correct format
+$rc = TkCommon::check_tkVersion ($tkVersion);
+if ($rc != 0) {
+  print "\nERROR: Toolkit version specified in an invalid format!\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+} else {
+	# Define the EDA release
+	$release = TkCommon::convert_tkVersion ($tkVersion, "release");      # Release format, e.g. 14.1
+}
+
+if ($xmitRepos eq "") {
+  print "\nERROR: You must specify the transmittal repository (ship or tk) using the -x input switch.\n\n";
+  exit 8;
+}
+
+# Validate input parameters
+if ( !(($xmitRepos eq "ship") || ($xmitRepos eq "tk")) ) {
+	print "\n[ERROR]: Valid values for the -x switch are \"ship\" or \"tk\".\n";
+	exit 8;
+}
+
+if ($refRelease ne "") {
+	if ($refRelease ne "13.1") {
+		print "\n[ERROR]: Valid values for the -i switch are \"13.1\".\n";
+		exit 8;
+	}
+}
+
+# Set up program parameters
+if ($devMode) {
+	$devFlg = "-d";
+	$scriptPath = "${codePath}/edainfra/tools/enablement/dev/bin";
+} else {
+	$scriptPath = "${codePath}/edainfra/tools/enablement/prod/bin";
+}
+
+# Display program runtime parms
+display_program_parms;
+
+# Disable buffering of stdout
+$|++;
+
+#
+# Get the list of components from CM DB that are defined for this release version
+#
+print "Using component definition: \"$compDef\"\n";
+my $cmdbCmd = "${scriptPath}/getComponents -t $tkVersion -ct $compDef -q $dbType";
+$compList = `$cmdbCmd`;
+chomp ($compList);
+$rc = $? >> 8;
+
+if ($rc) {
+	print "ERROR: Return code $rc from $cmdbCmd.\n";
+	exit $rc;
+} else {
+	print " \n";
+	print "Component list created. rc=$rc\n";
+	if ($DEBUG) {
+		print "Results:\n";
+		$compCnt = 0;
+		foreach $comp (sort split(/,/, $compList)) {
+			$compCnt++;
+			print "$compCnt) $comp\n";	
+		}
+	}
+}
+
+#
+# Create xmittal structures for all defined components
+#
+$compCnt = 0;
+foreach $comp (sort split(/,/, $compList)) {
+	$compCnt++;
+	print "\n***** $compCnt) PROCESSING Component $comp *****\n\n";
+	
+  if ($refRelease eq "") {
+			$refRel = "";
+	}
+	else {
+		# Handle special case: tgsupport
+		if ($comp eq "tgsupport") {
+			print "Overriding default reference release \"$refRelease\" with \"17.1\" to handle special case.\n";
+			$refRel = "-i 17.1";
+		}
+		else {
+			$refRel = "-i ${refRelease}";
+		}
+	}
+
+	# Create transmittal structures for each component.
+	# The setup_xmit_dirs script validates the component existence in the CM DB.
+	$setupCmd = "$scriptPath/setup_xmit_dirs -t $tkVersion -c $comp -x $xmitRepos $refRel $cleanLinks $devFlg $dbgFlg";
+	
+	# Execute the command
+	TkCommon::runcmd ("$setupCmd", "$DEBUG");
+	$sysRC = $? >> 8;
+	if ($sysRC) {
+		print "sysRC: $sysRC \n";
+		print "ERROR: Return code $sysRC from $setupCmd.\n";
+		$failCnt++;
+	} 
+	else {		
+		print "sysRC: $sysRC \n";
+		print "Operation successful for $setupCmd.\n";
+	}	
+}
+
+if ( $failCnt gt 0 ) {
+	$sysRC = 8;
+}
+exit ($sysRC);

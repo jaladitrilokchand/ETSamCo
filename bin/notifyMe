@@ -1,0 +1,249 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: notifyMe
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 03/31/2011 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use File::stat;
+use Time::localtime;
+use Sys::Hostname;
+
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use File::Copy;
+
+#
+# Global variables
+#
+
+# Program name
+my $appName = "notifyMe";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $scriptName    = "";
+my $mailList  = "";
+my $message    = "";
+my $verbose    = 0;
+my $help       = "";
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# Define the current directory
+#
+my $startDir = $ENV{"PWD"};
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    #printSyntax();
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+# Send an email to the admin.
+SendEmail();
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}  # End of handleInterruption
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}  # End of handleDIE
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Sends email to addresses in the email_list when an application/script is run.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-a app_name> <-e email_list> [-m message] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  app_name    Name of application being run
+  email_list  Comma delimited list of email addresses
+  message     Message of email (optional)
+  -h          Application help (optional)
+  -y          Verbose mode (optional)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}       # End of printHelp
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('app|a=s'      => \$scriptName,
+	      'email|e=s'    => \$mailList,
+	      'msg|m=s'      => \$message,
+              'verbose|y'    => \$verbose,
+              'help|h|?'     => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Verify the scriptName.
+  my $msg = "";
+  if (! $scriptName) {
+      $msg .= "Application name (-a) is a required parameter.";
+  }
+
+  # Verify the mailList
+  if (! $mailList) {
+      $msg .= "Email addresses (-e) is a required parameter.";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SendEmail()
+# Purpose: Emails the results
+# RCs    : none
+#------------------------------------------------------------------------------
+sub SendEmail {
+
+  my ($body) = @_;
+  my $host = hostname();
+  my $user = `whoami`;
+  chomp($user);
+
+  # Determine the mailing list.
+  my @mailList = split(/,/, $mailList);
+  my $address;
+  foreach $address (@mailList) {
+    $address =~ s/\@/\\\@/;
+
+    `/bin/mailx -s "Notify: $scriptName ($host $user)" $address << EOF
+Hey,
+
+The $scriptName application is running on $host under the $user id.
+
+$message
+
+Sincerly,
+The notifyMe script
+`;
+  }
+
+}

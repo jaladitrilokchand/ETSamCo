@@ -1,0 +1,385 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: createTkVols.patch
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/24/2016 GS  Initial coding.
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use FindBin qw($RealBin);
+
+
+use lib "$RealBin/../libperl";
+use TKutils;
+
+
+# Global variables
+my $BIN_DIR = $RealBin;
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+
+# Program variables
+my $appName = "createTkVols.patch";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dryRun          = 0;
+my $tkPatchLevel    = "";
+my $toolKit         = "";
+my $release         = "";
+my $component       = "";
+my $startDir;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+my $MAX_QUOTA = 15000;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+# Get the components to process
+my @components = TKutils::GetComponents($toolKit, $component, "");
+
+# Verify /afs/eda/tk<patch> HLQ exists
+if (! -e "/afs/eda/tk$tkPatchLevel") {
+  CleanExit("\nMissing /afs/eda/tk$tkPatchLevel AFS HLQ", $ERROR);
+}
+
+# Is user authorized to run this script?
+if (! TKutils::IsAuthorized("svnlib", $dryRun)) {
+  print "ERROR: user not authorized to run this application\n";
+  exit $ERROR;
+}
+
+# Create space for each component
+my @warnings = ();
+foreach $component (@components) {
+
+  # Skip test components
+  next if ($component =~ /^etree/);
+  next if ($component =~ /svntest/);
+  print "\n\n=======================================\n";
+  print "Processing $component ...\n";
+
+  # Skip if target directory already exists
+  my $compDir = "/afs/eda/tk$tkPatchLevel/$component";
+  my $tgtDir = "$compDir/$release";
+  if (-d $tgtDir) {
+    print " WARNING: target directory already exists = $tgtDir\n";
+    print "          Nothing to do here ...\n";
+    next;
+  }
+
+  # Create /afs/eda/tk<patch>/<component> directory
+  if (! -d $compDir) {  
+    print " Creating $compDir ...\n";
+    mkdir($compDir);
+  }
+  
+  # Determine size of parent TK's quota
+  my $srcDir = "/afs/eda/tk$toolKit/$component/$release";
+  my $srcSize = GetQuota($srcDir);
+
+  # Create new AFS volume
+  # my $volumeName = "tk" . $tkPatchLevel . $component;
+  # Volume name supported by afs is only 22chars. For few comps its going out of 22chars and failing
+  my $volumeName = "$tkPatchLevel$component";
+ 
+  my $tgtSize = CreateAfsVolume($tgtDir, $volumeName, $srcSize);
+
+  # Verify quota
+  if ($srcSize != $tgtSize) {
+    my $msg = "WARNING: new quota size does NOT match parent size\n";
+    $msg .= "         New dir(quota): $tgtDir ($tgtSize)\n";
+    $msg .= "         Parent (quota): $srcDir ($srcSize)\n";
+    $msg .= " >> as bradmin run fs sa $tgtDir " . $srcSize x 1000 . "\n\n";
+    print $msg;
+    push(@warnings, "$msg\n-------------\n");
+  }
+      
+  # Copy ACLs
+  CopyACLs($srcDir, $tgtDir);
+
+  # Config the directories
+  ConfigDirs($toolKit, $release, $tgtDir);
+
+}
+
+if (scalar(@warnings) > 0) {
+  print "WARNINGS\n=============\n";
+  print join("", @warnings) . "\n";   
+}
+else {
+  print "\n\nNo warnings to report\n";
+}
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  #LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Allocates/creates AFS volumes for a new patch level specific tool kit.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tk_patch> [-c component]
+                     [-dryrun] [-y] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tk        = Tool Kit patch (ie, 14.1.11.6, 14.1.11.7 ...)
+  component = Process just this component
+  -dryrun   = Run script in dryrun mode
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('t=s'       => \$tkPatchLevel,
+              'c=s'       => \$component,
+	      'dryrun'    => \$dryRun,
+	      'y'         => \$verbose,
+	      'help|h|?'  => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $tkPatchLevel) {
+    print "ERROR: Tool Kit patch (-t) is a required parameter\n";
+    return $ERROR;
+  }
+  @tokens = split(/\./, $tkPatchLevel);
+  if (scalar(@tokens) != 4) {
+    print "ERROR: Tool Kit patch format is x.y.z.a (ie, 14.1.2.3)\n";
+    return $ERROR;
+  }
+  pop(@tokens);
+  $toolKit = join(".", @tokens);
+  pop(@tokens);
+  $release = join(".", @tokens);
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetQuota($dir)
+# Purpose: Returns the AFS quota in MB for the given directory
+# RCs    : size or -1 if error
+#------------------------------------------------------------------------------
+sub GetQuota {
+
+  my ($dir) = @_;
+
+  print " Reading AFS quota - $dir\n" if ($verbose);
+
+  # Construct the command
+  my $command = "/usr/afsws/bin/fs lq";
+  $command .= " -path $dir";
+
+  # Run the command and show results
+  my $size = -1;
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  if ($rc == 0) {
+    my @tokens = split(/ +/, $results[1]);
+    $size = $tokens[1] / 1000;
+  }
+
+  print "  Size: $size\n" if ($verbose);
+
+  return $size;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateAfsVolume($dir, $volName, $volSize)
+# Purpose: Returns the AFS quota in MB for the given directory
+# RCs    : size or -1 if error
+#------------------------------------------------------------------------------
+sub CreateAfsVolume {
+
+  my ($dir, $volName, $volSize) = @_;
+
+  print " Creating new AFS volume at $dir\n" if ($verbose);
+
+  # If volSize is greater than $MAX_QUOTA then reset size to $MAX_QUOTA
+  $volSize = $MAX_QUOTA if ($volSize > $MAX_QUOTA);
+
+  # Construct the command
+  my $command = "/afs/eda/projects/luci/bin/luci_cmd";
+  $command .= " -o create ";
+  $command .= " -u svnlib";
+  $command .= " -c eda";
+  $command .= " -v $volName";
+  $command .= " -q $volSize";
+  $command .= " -m $dir";
+  $command .= " -w 30";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  print join("\n", @results) . "\n";
+  return(-1) if ($rc != 0);
+
+  # Verify the new quota size
+  my $size = GetQuota($dir);
+
+  return $size;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CopyACLs($srcDir, $tgtDir)
+# Purpose: Copies the ACLs from srcDir to tgtDir
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub CopyACLs {
+
+  my ($srcDir, $tgtDir) = @_;
+
+  print " Copying ACLs $srcDir -> $tgtDir\n" if ($verbose);
+
+  # Construct the command
+  my $command = "/usr/afsws/bin/fs ca";
+  $command .= " -fromdir $srcDir";
+  $command .= " -todir $tgtDir";
+  $command .= " -clear";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ConfigDirs($toolKit, $release, $dir)
+# Purpose: Run setup dirs for this dir
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub ConfigDirs {
+
+  my ($tk, $rel, $dir) = @_;
+
+  print " Running setup_dirs on $dir\n" if ($verbose);
+
+  # Construct the command
+  my $command = "/afs/eda/tk$tk/tools/$rel/scripts/setup_dirs";
+  $command .= " --all";
+  $command .= " --no_32bit";
+  $command .= " --makefiles";
+  $command .= " $dir";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+  return $rc;
+
+}

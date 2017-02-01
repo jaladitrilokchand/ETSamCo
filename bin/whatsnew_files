@@ -1,0 +1,419 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: whatsnew_files
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/13/2014 GS  Initial coding.
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TKutils;
+use IcofFile;
+
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $METRICS_DIR = "/afs/eda/data/edainfra/metrics";
+my $SVN_URL = "https://greenjiffy.fishkill.ibm.com/eda/tk";
+my $SVN = "/afs/eda/tools/bin/svn";
+
+# Program variables
+my $appName = "whatsnew_files";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dbMode          = "";  # default is prod if empty
+my $dryRun          = 0;
+my $tgtToolKit      = "";
+my $srcToolKit      = "";
+my $location        = "";
+my $startDir;
+my $component       = "";
+my $revision        = "";
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+
+# Determine the source tool kit (default to production tk)
+$srcToolKit = GetProductionTk() if (! $srcToolKit);
+print "Source Tk: $srcToolKit\n";
+print "Target Tk: $tgtToolKit\n";
+
+
+# Create the directory to store reports
+my $reportDir = "$METRICS_DIR/whatsnew/$tgtToolKit" . "_" . $srcToolKit;
+mkdir($reportDir) if (! -d $reportDir);
+print "Report dir: $reportDir\n" if ($verbose);
+
+
+# Generate the list of updated file for each component
+my @components = SetComponents($tgtToolKit, $component);
+foreach my $myComp (@components) {
+
+  next if ($myComp =~ /etreetest/);
+  next if ($myComp =~ /svntest/);
+
+  print " Component: $myComp\n";
+
+  # Determine the revision in given location (only if development tk)
+  if ($location) {
+    $revision = GetRevision($myComp, $location);
+    print "  $location revision: $revision\n";
+  }
+
+  # Create a list of updated files
+  my @changes = FindDifferences($tgtToolKit, $srcToolKit,
+                                $myComp, $revision);
+  print " Diff count: " . scalar(@changes) . "\n" if ($verbose);
+
+  # Write the list to file
+  my $fileName = "$myComp.html";
+  my $path = "$reportDir/$fileName";
+  WriteOutput($path, $verbose, @changes);
+
+}
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This scripts compares 2 tool kits to determine which files have changed. It
+generates a report in /afs/eda/data/edainfra/metrics/whatsnew for each
+component in the target tool kit listing the updated files.
+
+The defaults for this script are to compare the target TK with the
+procuction tool kit.  If the target TK is the tool kit under development
+then by default it will compare prod against the production TK.
+
+Sample usage:
+- Compare prod against production TK
+ $appName -tgt 14.1.builda
+
+- Compare build agaist production TK
+ $appName -tgt 14.1.build -l build
+
+- Compare prod against customtk (14.1.7)
+ $appName -tgt 14.1.build -src 14.1.7
+
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-tgt tgtTk> [-l location] [-src srcTk] [-c component] [-y] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tgtTk     = Target tool kit to compare against
+  location  = Target tool kit location (build, dev, prod) if tgtTk is dev tk
+  component = Generate diffs for this component only
+  srcTk     = Source tool kit to compare against tgtTk (default = prod tk)
+  -dryrun   = Run script in dryrun mode
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tgt=s'     => \$tgtToolKit,
+              'src=s'     => \$srcToolKit,
+              'l=s'       => \$location,
+              'c=s'       => \$component,
+	      'dryrun'    => \$dryRun,
+	      'y'         => \$verbose,
+	      'help|h|?'  => \$help)
+    || return $ERROR;
+
+# If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $tgtToolKit) {
+    print "ERROR: Target tool kit (-tgt) is a required parameter\n";
+    return $ERROR;
+  }
+
+  if ($location) {
+    if ($location ne "build" && $location ne "dev" && $location ne "prod") {
+      print "ERROR: Location (-l) must be build, dev or prod\n";
+      return $ERROR;
+    }
+    if ($tgtToolKit !~ /build/) {
+      print "WARNING: target tool kit is not a development TK so location ".
+        "will be ignored\n";
+      $location = "";
+    }
+  }
+  else {
+    $location = "prod" if ($tgtToolKit =~ /build/);
+  }
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents()
+# Purpose: Create a list of components for this Tool Kit
+# RCs    : List of component names or empty list
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  my ($tk, $comp) = @_;
+  print " Querying for components in $tk ...\n" if ($verbose);
+
+  # Query the DB for tk/components for the src tool kit
+  my @list = TKutils::GetComponents($tk, $comp, "");
+  print "Found " . scalar(@list) . " components\n" if ($verbose);
+
+  return @list;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetRevision($component, location)
+# Purpose: Query the DB for this component's revision at location
+# RCs    : revision
+#------------------------------------------------------------------------------
+sub GetRevision {
+
+  my ($comp, $loc) = @_;
+
+  # Construct the command
+  my $command = "$BIN_DIR/getRevisionsTk";
+  $command .= " -c $comp";
+  $command .= " -l prod";
+  $command .= " -latest";
+
+  # Run the command and show results
+  my $status = "";
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  my $rev = $results[0];
+  chomp $rev;
+
+  return  $rev;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : FindDifferences($newTk, $oldTk, $component, $revision)
+# Purpose: Create a list of files updated in new TK versus old TK
+# RCs    : revision
+#------------------------------------------------------------------------------
+sub FindDifferences {
+
+  my ($newTk, $oldTk, $comp, $rev) = @_;
+
+  # Construct the command
+  my $command = "$SVN diff";
+  $command .= " " . GetSvnUrl($newTk, $comp, $rev);
+  $command .= " " . GetSvnUrl($oldTk, $comp, "");
+  $command .= " --summarize";
+
+  # Run the command and show results
+  my $status = "";
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+
+  # remove new line chars
+  my @clean;
+  foreach my $line (@results) {
+    chomp $line;
+    push(@clean, $line);
+  }
+
+  return  @clean;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetSvnUrl($toolKit, $component, $revision)
+# Purpose: Generate the SVN URL for this tk, comp and revision
+#            https://greenjiffy.fishkill.ibm.com/eda/tk/ess/trunk@1086
+# RCs    : URL
+#------------------------------------------------------------------------------
+sub GetSvnUrl {
+
+  my ($tk, $comp, $rev) = @_;
+
+  # Construct the URL
+  my $url = "$SVN_URL/$comp";
+  if ($tk =~ /build/) {
+    $url .= "/trunk";
+    $url .= "@" . $rev if ($rev ne "");
+  }
+  else {
+    $url .= "/branches/tk" . $tk;
+  }
+
+  return  $url;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetProductionTk()
+# Purpose: Determine the production tool kit
+# RCs    : tool kit
+#------------------------------------------------------------------------------
+sub GetProductionTk {
+
+  # Construct the command
+  my $command = "$BIN_DIR/getToolKits";
+  $command .= " -r 14.1";
+  $command .= " -s production";
+  $command .= " -q";
+
+  # Run the command and show results
+  my $status = "";
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  my $tk = $results[0];
+  chomp $tk;
+
+  return $tk;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : WriteOutput($verbose, @changes)
+# Purpose: Dump the list of changes to the file and/or screen
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub WriteOutput {
+
+  my ($path, $verbose, @list) = @_;
+  chomp(my $date = `date +%m/%d/%Y" "%H:%M:%S `);
+
+  open(FILE, ">$path") or return;
+  print " Out file: $path\n" if ($verbose);
+
+  print FILE "Files that changed in target tool kit compared to source tool" .
+    " kit<br>";
+  print FILE "Generated: $date<br>";
+  print FILE "<br>";
+  print FILE "Src tool kit: $srcToolKit<br>";
+  print FILE "Tgt tool kit: $tgtToolKit<br>";
+  print FILE "Tgt location: $location<br>" if ($location);
+  if ($revision) {
+    print FILE "Location revision: $revision<br>";
+  }
+  elsif ($tgtToolKit =~ /build/) {
+    print FILE "Location revision: head<br>";
+  }
+  print FILE "<br>";
+
+  foreach my $line (sort(@list)) {
+    print FILE "$line<br>";
+    print "$line\n" if ($verbose);
+  }
+
+  close FILE;
+
+}

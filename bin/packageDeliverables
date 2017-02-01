@@ -1,0 +1,914 @@
+#!/usr/bin/perl
+#=============================================================================
+#
+#    FILE: packageDeliverables
+#
+#- PURPOSE --------------------------------------------------------------------
+# See "printHelp" method.
+#-----------------------------------------------------------------------------
+#
+#- CHANGE LOG -----------------------------------------------------------------
+# 06/01/2013 GFS  Initial coding.
+#=============================================================================
+
+use warnings;
+use strict;
+
+# Packages and constants
+use Env;
+use Getopt::Long qw(:config no_ignore_case);
+use File::Find;
+use File::Basename;
+use File::Path;
+use Cwd qw(chdir getcwd);
+use Time::Local;
+use FindBin qw($RealBin);
+use lib "$RealBin/../libperl";
+use TkCommon;
+use TKutils;
+use TkDels;
+
+# Global variables
+my $scriptName 	 = basename($0);
+my $scriptPath 	 = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $scriptArgs   = join(' ', @ARGV);
+my $logDir     	 = "/afs/eda/data/edainfra/logs";
+my $logFile      = "";
+my $authorizedId = "svnlib";
+
+# Return codes
+my $OK 	  = 0;
+my $ERROR = 8;
+my $rc 	  = $OK;
+
+# Change record variables
+our @crList = ();
+
+# Command line options
+my $component;
+my $devMode = 0;
+my $toolKit;
+my $tkPatches;
+my $reportDir;
+my $userPlatforms;
+my $checkMode  = 0;
+my $verbose    = 0;
+my $singleCr   = "";
+my $quiet      = 0;
+
+my @patches  = ();
+my $location = "unknown";
+my $release;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { HandleInterruption(); };
+$SIG{'QUIT'}  = sub { HandleInterruption(); };
+$SIG{__DIE__} = sub { HandleDIE(); };
+
+
+# Read the command line arguments
+exit $ERROR if (ProcessArgs() == $ERROR);
+
+
+# Enable logging
+$logDir .= "/$toolKit/$scriptName";
+$logDir = $reportDir/$toolKit if ($reportDir);
+$rc = SetupLogging($logDir, $component, $scriptName, $scriptArgs);
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to complete $scriptName initalization", $ERROR);
+}
+
+
+# Set datebase mode
+my $dbType = "-db PROD";
+if ($devMode) {
+  $dbType = "-db DEV";
+  $scriptPath = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+}
+
+
+# Set the source directory path and urgent flag if tk
+my $topDir = "/afs/eda/$location/$component/$release";
+# >> DEBUG <<
+$topDir = "/afs/btv/u/stadtlag/TK/$component/$release";
+my $urgent = ($location eq "tk") ? " -u" : "";
+
+if ($verbose) {
+  print "Component: $component\n";
+  print "Toolkit:   $toolKit\n";
+  print "Release:   $release\n";
+  print "Location:  $location\n";
+  print "Source:    $topDir\n";
+}
+
+
+# Set the shipdirs
+my @shipDirs  = GetShipDirs($topDir);
+my @platforms = ();
+foreach my $sd (@shipDirs) {
+  my ($plat) = $sd =~ /$topDir\/\.ship-(\S+)/;
+  push(@platforms, $plat);
+}
+
+
+# Retrieve the list of Change Requests (CR) that are in the COMPLETE state in
+# CM DB or are part of the TK Patch.
+
+# >> DEBUG <<
+@crList = ("MDCMS000000");
+print ">>>\n";
+print ">>> USING TEST CRs ... " . join(",", @crList);
+print ">>>\n";
+#$rc = SetChangeRequests($toolKit, $component, $scriptPath, $dbType,
+#                        $checkMode, $singleCr);
+#exit $rc if ($rc != 0);
+
+
+# Create a list of new deliverables.
+$rc = TkDels::SetDeliverablesXmit($topDir, \@platforms, 0, 0, $verbose);
+CleanExit("Error creating deliverables", $ERROR) if ($rc != $OK);
+
+my $delCount = TkDels::CountDeliverablesXmit($topDir, \@platforms,
+					     $checkMode, $verbose);
+
+if ($delCount == 0) {
+  CleanExit("No new files to package, nothing to do ... quitting\n", $OK);
+}
+
+
+# Add the packaging control files to the log
+TkDels::ShowAddonFiles($checkMode, $verbose);
+TkDels::ShowDontFollowFiles($checkMode, $verbose);
+TkDels::ShowDontShipFiles($checkMode, $verbose);
+TkDels::ShowSpecialPathFile($checkMode, $verbose);
+
+
+
+CleanExit("TESTING ...", 99);
+
+
+
+# Iterate over SHIP platform dirs for one component
+my $maxRc = 0;
+my $changeRequests = "";
+$changeRequests = ";" . join(",",  @crList) if (@crList);
+
+
+foreach my $sd (@shipDirs) {
+
+  print "\n\nStarting packaging of $sd ...\n";
+	
+  my ($plat) = $sd =~ /$topDir\/\.ship-(\S+)/;
+  TkDels::ShowReasons($plat, $checkMode, $verbose);
+  TkDels::ShowDeliverablesXmit($plat, $changeRequests, $checkMode, $verbose);
+
+  # check for writability to .ship dir
+  if (! CheckFileWritable($sd)) {
+    print "\n >>> ERROR <<<\n";
+    print " $sd is NOT writable\n";
+    CleanExit("Packaging cannot go forward ... aborting\n", $ERROR);
+  }
+  else {
+    print " $sd .... writable\n";
+  }
+
+  # Perform the packaging (once the interface is defined)
+  $rc = PackageIt($sd, $checkMode);
+  print " Packaging rc: $rc\n";
+  $maxRc = $rc if ($rc > $maxRc);
+
+  # Do these steps only if packaging was successful
+  if ($rc == 0 || ! $checkMode) {
+
+    # Rename existing prev file to prior and write new prev file
+    if (-e "${sd}/prev.ship.list" && ! $checkMode) {
+      rename("${sd}/prev.ship.list", "${sd}/prior.ship.list");
+    }
+
+    # Save the file results of these deliverables
+    TkDels::WritePrevFile($topDir, $plat, $checkMode, $verbose);
+
+  }
+  else {
+    if ($rc != 0) {
+      CleanExit("Skipping prev.ship.list processing (rc != 0)", $ERROR);
+    }
+    else {
+      print "Skipping prev.ship.list processing (check mode ON)\n";
+    }
+  }
+}
+
+
+# Complete the processing if packaging was successful
+if (! $checkMode && $maxRc == 0) {
+
+  # Mark the CR records that were transmitted with "TRANSMITTED" state.
+  MarkChangeRequestsXmitted($component, $scriptPath, $dbType, $checkMode,
+			    @crList);
+
+  # Send email
+  MailChangeRecords($component, $urgent, @crList);
+
+}
+else {
+
+  if ($maxRc != 0) {
+    CleanExit("Skipping CR updates/notification steps (rc != 0)", $ERROR);
+  }
+  else {
+    print "Skipping CR updates/notification steps (check amode ON)\n";
+  }
+
+}
+
+# Package updates and create Component Package.
+$rc = PackageUpdates($topDir, @platforms, $checkMode, $verbose, $devMode);
+if ($rc != $OK) {
+  CleanExit("ERROR: unable to complete packaging process", $ERROR);
+}
+
+
+# Report successful completion
+chomp(my $logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+CleanExit("\n$logDate $scriptName complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : HandleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub HandleInterruption {
+  CleanExit("\n[$scriptName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : HandleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub HandleDIE {
+  CleanExit("\n[$scriptName] Caught an unexpected die - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  print "Log can be found in $logFile.\n";
+  close (STDOUT);
+
+  exit $rc;
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : GetToolKitLocation($tk)
+# Purpose: return the location for the specified toolkit. needed by
+#          getRevisionsTk and to determine the source path
+# RCs    : Location or unknown
+#------------------------------------------------------------------------------
+sub GetToolKitLocation {
+  my ($tk) = @_;
+
+  my $location = "unknown";
+  TKutils::GetTkLocation($tk, \$location);
+
+  if (($location ne "ship")
+      && ($location ne "tk") 
+      && ($location !~ /^customtk\//)
+      && $location !~ /^xtinct\// ) {
+    print "\nERROR: toolkit $tk is in the \"$location\" location. "
+      . "toolkits must be in ship, tk, or a customtk location "
+      . "in order to be processed for packaging.\n";
+  }
+
+  return $location;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetupLogging()
+# Purpose: Enable logging
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SetupLogging {
+  my ($logDir, $component, $scriptName, $scriptArgs) = @_;
+
+  my $fileNameTime = `date +%C%y%m%d\_%H%M%S`;
+  chomp($fileNameTime);
+
+  # Create $logDir if it does not already exist
+  mkpath($logDir) if (! -d $logDir);
+
+  # Open log file for script messages
+  $logFile = "$logDir/" . $component . "_" . $fileNameTime . ".log";
+
+  # Open a filehandle for a log file only
+  #open(LOGFILE, ">$logFile") || die "open $logFile failed";
+
+  # Open a filehandle for both stdout and a log file
+  open (STDOUT, "| tee -a $logFile") ||
+      die "ERROR: unable to open log file $logFile  $!\n";
+
+  my $userId = getlogin()  || (getpwuid($<)) [0];
+  chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  chomp(my $machine = `hostname`);
+  print "\n$dateTime $userId on $machine invoked $scriptName $scriptArgs\n\n";
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Show script usage/help
+#------------------------------------------------------------------------------
+sub ShowHelp {
+
+  print STDERR <<End_of_Help;
+
+Determine deliverables for a set of toolkit patches
+
+SYNTAX:
+  $scriptName <-t toolkit> <-c component>
+                      [-T TK_patch] [-p <platform_list>] [-dghpqyz]
+
+WHERE:
+   REQUIRED:
+    -c  component name [ess, hdp, asf ...]
+    -t  toolkit [14.1.4, 14.1.4wookie ...]
+   OPTIONAL:
+    -d  run in development mode - use DEV code version and DEV CM DB.
+    -g  run in debug mode, show what would have been done ...
+    -h  script help
+    -p  platform_list (override normal platforms with these platforms)
+    -r  report deliverables to specified file. Do not perform packaging.
+    -T  Comma delimited list of Patches (MDCMS00123456,MDCMS00123457).
+        Defaults to the set of Preview/Production/custom change requests.
+    -y  Verbose mode  [show messages]
+    -z  Change Request number ... used only by doTK_xmit for recompiles
+
+
+  Examples (assuming 14.1.4 is in ship, 14.1.3 is in tk, and 14.1.4wookie
+            is a custom 14.1.4 toolkit for the wookie project):
+   $scriptName -t 14.1.4 -c model [ship xmit - initial tool kit]
+   $scriptName -t 14.1.4 -c model -T MDCMS00123456  [xmit ship injects]
+   $scriptName -t 14.1.3 -c model -T MDCMS00123456  [xmit TK injects]
+   $scriptName -t 14.1.3 -c model -T MDCMS00123456,MDCMS001234567
+   $scriptName -t 14.1.4wookie -c model -T MDCMS00123456,MDCMS001234567
+
+End_of_Help
+
+}
+
+
+#------------------------------------------------------------------------------
+# Description  : This routine processes command line parameters
+# Parms defined:  (see the help immediately above this)
+#------------------------------------------------------------------------------
+sub ProcessArgs {
+
+  # Parse command line arguments
+  my $help = 0;
+  GetOptions('c=s' => \$component,
+	     'd'   => \$devMode,
+	     'g'   => \$checkMode,
+	     'h'   => \$help,
+	     'p=s' => \$userPlatforms,
+	     'q'   => \$quiet,
+	     'r=s' => \$reportDir,
+	     't=s' => \$toolKit,
+	     'T=s' => \$tkPatches,
+	     'y'   => \$verbose,
+	     'z=s' => \$singleCr
+	    ) || return $ERROR;
+
+  # Show the help and quit
+  if ($help) {
+    ShowHelp();
+    exit $OK;
+  }
+
+  # report implies debug mode. it is intended to be used by users other than
+  # svnlib.
+  if ($reportDir) {
+    $checkMode = 1;
+  }
+
+  # Verify the user can run this script
+  return $ERROR if (! TKutils::IsAuthorized($authorizedId, $checkMode));
+
+  # Validate component
+  if (! $component) {
+    print "\nERROR: component (-c) must be specified\n\n";
+    return $ERROR;
+  }
+
+  # Validate toolKit
+  if (! $toolKit) {
+    print "\nERROR: toolkit (-t) must be specified\n\n";
+    return $ERROR;
+  }
+  $rc = TkCommon::check_tkVersion($toolKit);
+  if ($rc) {
+    print "\nERROR: The specified toolkit, $toolKit, has an invalid format.";
+    print "\n\tShould be \"14.1.{n}\".\n\n";
+    return $ERROR;
+  }
+
+  # Get release format (14.1) from toolKit
+  $release = TKutils::GetRelease($toolKit, ".");
+
+  # Determine TK location and validate it
+  $location = GetToolKitLocation($toolKit);
+  return $ERROR if ($location eq "unknown");
+
+  # Validate new -z usage (only used in ship)
+  if (($singleCr ne "") && ($location ne "ship")) {
+    print "ERROR: -z switch is only support for ship packaging\n";
+    ShowHelp();
+    exit $OK;
+  }
+
+  # Create a list of patches
+  if ($tkPatches) {
+    @patches = split(/,/, $tkPatches);
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+#
+# Package the deliverables in the specified directory
+#
+#------------------------------------------------------------------------------
+sub Package {
+  my ($topDir, $checkMode, $verbose) = @_;
+
+  # Determine TK patch level
+  my $pacthLevel = "";
+  my $rc = TkDels::GetTkPatchLevel($toolKit, \$patchLevel, $checkMode,
+                                   $verbose);
+  return $ERROR if ($rc != $OK);
+
+  # Set path to store deliverables and create dir if necessary
+  my $delPath = "";
+  $rc = TkDels::GetDeliverablesPath($component, $release, \$delPath,
+                                    $checkMode, $verbose);
+  return $ERROR if ($rc != $OK);
+  my $workDir = "$topDir/$delPath";
+
+  # Process each deliverable to be packaged
+  if (PackageUpdates($workDir, $toolKit, $checkMode, $verbose) != $OK) {
+    return $ERROR:
+  }
+
+  # Write control files to deliverables directory
+  $rc = TkDels::WriteControlFiles($topDir, $platform, $checkMode, $verbose);
+  return $ERROR if ($rc != $OK);
+
+  # Create the component package and log it in the DB
+  $rc = GenerateCompPackage($topDir, $patchLevel, $toolKit, $checkMode,
+                            $verbose);
+  return $ERROR if ($rc != $OK);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+#
+# Determine if file in question is writable
+#
+#------------------------------------------------------------------------------
+sub CheckFileWritable {
+
+  my ($dir) = @_;
+  my $file = "${dir}/test_writable";
+	
+  print "Checking write access ...\n";
+  `/usr/bin/touch ${file} > /dev/null 2>&1`;
+  if (-e $file) {
+    unlink $file;
+    return "true";
+  }
+
+  return 0;
+
+}
+
+
+#------------------------------------------------------------------------------
+#
+# Get list of change records for this packaging
+#
+#------------------------------------------------------------------------------
+sub SetChangeRequests {
+
+  my ($toolKit, $component, $scriptPath, $dbType, $checkMode, $singleCr) = @_;
+  @crList = ();
+
+  # Look up the Change Requests
+  my $subName = "";
+  my $myRc = 0;
+  if ($tkPatches) {
+    $myRc = SetPatchChangeRequests($scriptPath, $dbType, $checkMode);
+    $subName = "SetPatchChangeRequests()";
+  }
+  else {
+    $myRc = SetPreviewChangeRequests($toolKit, $component, $scriptPath,
+				     $dbType, $checkMode, $singleCr);
+    $subName = "SetChangeRequests()";
+  }
+
+  # Message results to the user
+  if ($myRc == 8) {
+    print "\n>>> ERROR <<<\n";
+    print "Return code $myRc from $subName.\n";
+  }
+  elsif ($myRc == 2) {
+    print "WARN: No change records, in found for $component.\n";
+    print "      No packaging required.\n";
+  }
+  else {
+    print "INFO: Change records, found for component $component\n";
+    if ($checkMode) {
+      print "Change records to include in packaging. rc=$myRc:\n";
+      foreach my $crRec (@crList) {
+	print "$crRec\n";
+      }
+    }
+  }
+
+  return $myRc;
+
+}
+
+
+#------------------------------------------------------------------------------
+#
+# Get list of change records in COMPLETE state from CM DB
+# - Determine the latest revision in ship/tk for this TK/component
+# - Create a list of completed CRs which don't exceed the latest revision
+#
+#------------------------------------------------------------------------------
+sub SetPreviewChangeRequests {
+
+  my ($tk, $component, $scriptPath, $dbType, $checkMode, $singleCr) = @_;
+  my $state = "complete";
+  my $crData;
+  my $crCmd;
+  my $rc = 0;
+  my $crRC = 0;
+
+  # New -z support .. doTK_xmit passed a single CR created for a component
+  # that did a recompile and had no actual svn commits but does have changes
+  # that need to be xmitted. This CR will not appear in the
+  # changeReqShowByStatus query since it is not associated with a svn revision.
+  if ($singleCr ne "") {
+    push(@crList, $singleCr);
+    return $rc;
+  }
+
+  # Get the revision for the xmit source location
+  my $command = "$scriptPath/getRevisionsTk $dbType -c $component -latest";
+  $command .= " -l $location";
+  if ($location eq "ship") {
+    $tk = "14.1.build";  # Set to 14.1.build for preview only xmits
+  }
+
+  my $revision = `$command`;
+  chomp ($revision);
+  my $cRC = $? >> 8;
+  if ($cRC == 0) {
+    $rc = 0;
+    print "INFO: Latest revision: $revision\n";
+  }
+  else {
+    return 8;
+  }
+
+  # Create a list of CRs for revisions equal to or less than the
+  # latest revision in ship/tk
+  $crCmd = "$scriptPath/changeReqShowByStatus $dbType -t $tk ";
+  $crCmd .= "-c $component -s $state -max $revision";
+  my @results = `$crCmd`;
+  $crData = $results[0];
+  chomp ($crData);
+  $crRC = $? >> 8;
+
+  if ($crRC == 0) {
+    $rc = 0;
+    print "INFO: Change record list created for $component in TK version ";
+    print "$tk. rc=$rc\n";
+    @crList = split(';', $crData);
+    if ($checkMode) {
+      print "Change records:\n";
+      foreach my $crRec (sort split(/;/, $crData)) {
+	print "$crRec\n";
+      }
+    }
+  }
+  elsif ($crRC == 2) {
+    $rc = 2;
+    print "INFO: No change records found for $component in TK version ";
+    print "$tk. rc=$crRC from $crCmd.\n";
+  }
+  elsif ($crRC == 1) {
+    $rc = 8;
+    print "\n>>> ERROR <<<\n";
+    print "Return code $crRC from $crCmd.\n";
+  }
+  else {
+    $rc = 8;
+    print "\n>>> ERROR <<<\n";
+    print "Unknown return code $crRC from $crCmd.\n";
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+#
+# Get list of change records from the user specified TK patch
+#
+#------------------------------------------------------------------------------
+sub SetPatchChangeRequests {
+
+  my ($scriptPath, $dbType, $checkMode) = @_;
+  my $rc = 0;
+  my $cr;
+
+  # Get the users CQ user id and password
+  my $id = "svnlib\@us.ibm.com";
+
+  my @results = `cat /afs/eda/u/svnlib/private/svnlib`;
+  my $myRc = $? >> 8;
+  if ($myRc != 0) {
+    print "ERROR: unable to read SVNLIB password!\n";
+    return 8;
+  }
+  my $pw = $results[0];
+  chomp $pw;
+
+  # Get the CRs for each patch
+  print "\nFetching patch data from ClearQuest ... please be patient.\n";
+  my $patch;
+  foreach $patch (@patches) {
+    print " Patch: $patch\n";
+    $patch =~ s/^\s+//;    # Remove leading spaces
+    $patch =~ s/\s+$//;    # Remove trailing spaces
+    my $command = "$scriptPath/patch.reqs -p $patch -pw $pw -u $id";
+    my @tmpList = `$command`;
+    my $rc = $? >> 8;
+    if ($rc != 0) {
+      return 8;
+    }
+
+    # Get the inject requests and component
+    my $entry;
+    my $found1 = 0;
+    my $found2 = 0;
+    my $patchComp = "";
+    foreach $entry (@tmpList) {
+      chomp $entry;
+      if (! $found1 && ($entry =~ /^---/)) {
+	$found1 = 1;
+	next;
+      }
+      if ($found1 && ($entry eq "")) {
+	$found2 = 1;
+	next;
+      }
+      if ($found1 && ! $found2) {
+	my @tokens = split(/ +/, $entry);
+	$patchComp = $tokens[1];
+	$cr = $tokens[2];
+	$cr =~ s/\s+$//;
+	push(@crList, $cr);
+      }
+    }
+
+    # Verify the component
+    if ($patchComp ne $component) {
+      print "\n";
+      print ">>> ERROR <<<\n";
+      print "Component name passed on command line ($component) does not\n";
+      print "match component name ($patchComp) associated with patch!\n";
+      print "Please confirm parameters and rerun ...\n";
+      print "\n";
+      return 8;
+    }
+  }
+
+  print " CRs: " . join(" ", @crList) . "\n";
+
+  return 0;
+
+}
+
+
+#------------------------------------------------------------------------------
+#
+# Create a list of ship(plataform) directories
+#
+#------------------------------------------------------------------------------
+sub GetShipDirs {
+  my ($topDir) = @_;
+  my @shipDirs = ();
+
+  if ($userPlatforms) {
+    # Set base path directories according to platform list provided.
+    foreach my $p (split(" ", $userPlatforms)) {
+
+      print "looking for $p....";
+      my $sd = "$topDir/.ship-${p}";
+
+      # Check to make sure dir exists
+      if (-d "$sd") {
+	print "found\n";
+	push(@shipDirs, $sd);
+      }
+      else {
+	# not added to list
+	print "\n>>> ERROR <<<\n";
+	print "$p does not have a .ship- directory\n";
+      }
+    }
+  }
+  else {
+    # set base path directories according to the .ship dirs we find
+    @shipDirs = glob("$topDir/.ship*");
+    if ($checkMode) {
+      print "\nSHIP Platform dirs to process:\n";
+      foreach my $sd (@shipDirs) {
+	print "  $sd\n";
+      }
+      print "\n";
+    }
+  }
+
+  return @shipDirs;
+
+}
+
+
+#------------------------------------------------------------------------------
+#
+# Mark the CR records that were transmitted with "TRANSMITTED" state.
+#
+#------------------------------------------------------------------------------
+sub MarkChangeRequestsXmitted {
+
+  my ($component, $scriptPath, $dbType, $checkMode, @crList) = @_;
+  my $state = "transmitted";
+  my $rc    = 0;
+	
+  foreach my $crRec (@crList) {
+
+    # Change the state of each CR record in crList
+    my $crCmd = "$scriptPath/changeReqUpdateAll $dbType -cq $crRec -s $state";
+		
+    # Execute the command
+    TkCommon::runcmd ("$crCmd", "$checkMode");
+    $rc = $? >> 8;
+		
+    if ($rc == 0) {
+      print "[INFO]: Updated change record, $crRec, to state of $state. rc=0\n";
+    }
+    else {
+      print "\n>>> ERROR <<<\n";
+      print "Unable to update change record, $crRec, to state of ";
+      print "$state. rc=$rc\.\n";
+    }
+  }
+
+  return ($rc);
+	
+}
+
+
+#------------------------------------------------------------------------------
+#
+# Get date/time info and output in various formats
+#
+#------------------------------------------------------------------------------
+sub SetDateAndTime {
+
+  my ($format) = @_;
+	
+  my $string = "";
+  if ($format eq "full") {
+    $string = `date +"%b %d %Y %H:%M:%S`;
+  }
+  elsif ($format eq "wday_mth_day") {
+    $string = `date +"%a %m/%d"`;
+  }
+
+  chomp $string;
+
+  return $string;
+	
+}
+
+
+#------------------------------------------------------------------------------
+#
+# Send e-mail containing the change record information to list of mail 
+# recipients
+# FOR NOW - only send mail to code owner
+#
+#------------------------------------------------------------------------------
+sub MailChangeRecords {
+
+  my ($component, $urgent, @crList) = @_;
+
+  # Don't send mail if in debug mode.
+  return if ($checkMode);
+
+  print "Sending mail containing change records for $component.\n";
+  print " -> Fetching CR data for email ...\n";
+
+  # Always send to packaging support
+  my $mailList = "stadtlag\@us.ibm.com ";
+
+  # Don't blast email if urgent xmittal
+  if ($urgent) {
+    $mailList .= "nanhuo\@us.ibm.com ";
+  }
+
+  # Always append these recipients:
+  $mailList .= "jwcolem\@us.ibm.com stadtlag\@us.ibm.com ";
+
+  # >> DEBUG <<:
+  $mailList = "stadtlag\@us.ibm.com ";
+	
+  # Get date time for email
+  my $start_time = SetDateAndTime("wday_mth_day");
+  $start_time = ucfirst($start_time);
+
+  # Gather CR data for the email body
+  my $body = "";
+  foreach my $crRec (@crList) {
+    print "$crRec\n";
+		
+    my $command = "$scriptPath/cr.relNotes -cq $crRec $dbType -pir";
+    #print "Running $command\n";
+    my @results = `$command`;
+    my $rc = $? >> 8;
+    if ($rc == 1) {
+      my $data = "";
+      $data = join("", @results);
+      $data =~ s/\[\[//;
+      $data =~ s/\]\]//;
+      $body .= $data . "\n";
+    }
+  }
+
+
+  # Set the email subject
+  my $subject = "xmittal";
+  $subject = "Urgent xmittal" if ($urgent);
+	
+  # NOTE: Make sure the @crList_text is in col 2 so other entries line up in 
+  #       email.
+  `mailx -s "$component $subject ($start_time)" $mailList << EOF
+
+$body
+
+    Note: Any maintenance defects are denoted with a '*'
+
+EOF`;   # tell xemacs to behave (syntax highlighting gets confused here)
+
+  print "Email sent!!!\n";
+	
+}
+
+

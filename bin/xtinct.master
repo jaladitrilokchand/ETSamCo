@@ -1,0 +1,465 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: xtinct.master
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 12/11/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 12/11/2012 GS  Initial coding.
+# =============================================================================
+#
+# FUTURE WORK -----------------------------------------------------------------
+# - Compare revs in prod, shipb and ship and they should match
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TKutils;
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+my $AUTH_ID = "cmlib";
+
+# Program variables
+my $appName = "xtinct.master";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $toolKit         = "";
+my $dbMode          = ""; # default is prod if empty
+my @components      = ();
+my $component       = "";
+my $startDir = $ENV{"PWD"};
+my $dryRun      = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleDIE(); };
+
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+if ($verbose) {
+  print "Tool Kit: $toolKit\n";
+  print "Dry run : $dryRun\n";
+}
+
+
+# Authorize the user
+if (! TKutils::IsAuthorized($AUTH_ID, $dryRun)) {
+  exit $ERROR;
+}
+
+
+# Log application start event exit if bad rc.
+if (LogAppEvent("start") > 0) {
+  CleanExit("Application already running ... exiting\n", $ERROR);
+}
+
+
+# Create a list of components to process
+@components = SetComponents();
+if (scalar(@components) < 1) {
+  CleanExit("No components to process ... exiting\n", $ERROR);
+}
+print "Comp count: " . scalar(@components) . "\n";
+
+
+# Process each component
+my @failedComps = ();
+foreach $component (@components) {
+
+  # Skip the etreetest* components
+  next if ($component =~ /etreetest/);
+
+  print "\nProcessing ... $component\n";
+
+  # Call XTINCT engine
+  my $xtinctRc = ExecuteXtinct_1($component);
+  push(@failedComps, $component) if ($xtinctRc != $OK);
+
+}
+
+
+# Update this TK's stage name if all comps processed
+if (scalar(@failedComps) == 0) {
+
+  # Update this tool kit's stage to xtinct
+  #$rc = SetStageName($toolKit, "xtinct");
+  #if ($rc > 0) {
+  #  CleanExit("ERROR: Unable to set Tool Kit stage to xtinct", $ERROR);
+  #}
+
+}
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  CleanExit("\n[$appName] Caught an unexpected die - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script executes the XTINCT process for all components in 
+the given EDA Tool Kit.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-dryrun] [-test] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit   = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+  component  = Process only this component
+  -dryrun    = (optional) Run script in dryrun mode
+  -h           (optional) application help
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'     => \$toolKit,
+	      'db=s'       => \$dbMode,
+	      'comp|c=s'   => \$component,
+	      'dryrun'     => \$dryRun,
+	      'y'          => \$verbose,
+	      'help|h|?'   => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) is a required parameter\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents()
+# Purpose: Create a list of components ready for XTINCT
+# RCs    : List of component names or empty list
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  print " Querying for components in $toolKit ...\n" if ($verbose);
+
+  # Populate the list if component was specified on command line
+  my @list = ();
+  if ($component ne "") {
+    push(@list, $component);
+    return @list;
+  }
+
+  # Otherwise query DB for components in this took kit
+  my $command = "$BIN_DIR/getComponents";
+  $command .= " -t $toolKit";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+
+  if ($rc == 0) {
+
+    my $comps = $results[0];
+    chomp $comps;
+    print "Results: $comps\n" if ($verbose);
+    @list = split(/,/, $comps);
+
+    print "Found " . scalar(@list) . " components\n" if ($verbose);
+
+  }
+  else {
+
+    print "ERROR: Found 0 components\n" if ($verbose);
+
+  }
+
+  return @list;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LogAppEvent($event)
+# Purpose: Log an application specific event
+# RCs    : 0 = ok
+#          1 = error or if start instance already running
+#------------------------------------------------------------------------------
+sub LogAppEvent {
+
+  my ($event) = @_;
+
+  print " Logging application event ($event) ...\n" if ($verbose);
+
+  # Log in the DB that this application is running or has completed
+  # Construct the command
+  my $command = "$BIN_DIR/appLog";
+  $command .= " -a $appName";
+  if ($event eq "start") {
+    $command .= " -start";
+  }
+  else {
+    $command .= " -end";
+  }
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my @results = ();
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print join("\n", @results);
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LogComponentEvent($event, $message)
+# Purpose: Log a tool kit/component specific event
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub LogComponentEvent {
+
+  my ($myComponent, $event, $message) = @_;
+
+  print " Logging TK/Component event ($event) ...\n" if ($verbose);
+
+  # Construct the command
+  my $command = "$BIN_DIR/svnLog";
+  $command .= " -c $myComponent";
+  $command .= " -e $event";
+  $command .= " -l tkb";
+  $command .= " -m \"$message\"" if ($message);
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my @results;
+  TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetStatus()
+# Purpose: Run the XTINCT engine for the specified tool kit ann component
+# RCs    : 0 = failed or no status
+#          1 = ok/pass
+#------------------------------------------------------------------------------
+sub GetStatus {
+
+  my ($myComponent) = @_;
+
+  print " Querying for status ...\n" if ($verbose);
+
+  # Get this compnent's xtinct status.
+  # If pass/ok then don't call xtinct.engine and return with a good return code
+  my $command = "$BIN_DIR/xtinctStatus";
+  $command .= " -t $toolKit";
+  $command .= " -c $myComponent";
+  $command .= " -y " if ($verbose);
+  $command .= " -dryrun " if ($dryRun);
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my @results = ();
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+  # Parse the result
+  $rc = 1 if ((scalar(@results) > 0) && ($results[0] =~ /_SUCCESS/));
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ExecuteXtinct_1()
+# Purpose: Run the XTINCT engine for the specified tool kit ann component
+# RCs    : rc from XTINCT
+#------------------------------------------------------------------------------
+sub ExecuteXtinct_1 {
+
+  my ($myComponent) = @_;
+
+  print " Running XTINCT engine ...\n" if ($verbose);
+
+  # Get this compnent's xtinct status.
+  # If pass/ok then don't call xtinct.engine and return with a good return code
+  #my $passed = GetStatus($myComponent);
+  #if ($passed) {
+  #  print " Skipping XTINCT engine ... already run successfully\n";
+  #  return $OK;
+  #}
+
+  # Construct the command
+  my $command = "$BIN_DIR/xtinct.engine1";
+  $command .= " -t $toolKit";
+  $command .= " -c $myComponent";
+  $command .= " -y " if ($verbose);
+  $command .= " -dryrun " if ($dryRun);
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunSystem($command, $dryRun, $verbose);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetStageName()
+# Purpose: Update the ToolKit's  stage name
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub SetStageName {
+
+  my ($tkVersion, $stageName) = @_;
+
+  print "Updating TK $tkVersion stage to \"$stageName\" in ETREE DB\n";
+
+  # Construct the command
+  my $command = "$BIN_DIR/updateToolKit";
+  $command .= " -t $tkVersion";
+  $command .= " -s $stageName";
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+  if ($rc > 0) {
+    print "ERROR: Unable to update TK $tkVersion $component stage " .
+      "to \"$stageName\" in ETREE DB\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+

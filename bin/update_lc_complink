@@ -1,0 +1,413 @@
+#!/usr/bin/env perl
+
+#=============================================================================
+#    FILE: update_lc_complink
+#
+# CREATOR: Art Magnan
+#    DEPT: AZYX
+#
+# OUTPUTS:
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# Update the lifecycle symlink for a given component defined in the ETREE DB.
+#
+# The lifecycle symlinks, called 14.1, are made from either the SHIPB, TKB, or
+# XTINCT/TKVERSION component to the corresponding component/14.1 location in
+# the release version tree /afs/eda/tkrepos/<tkversion>/<component>/14.1.
+#
+# This is run for a single component defined by the -c switch.
+#
+#  update_lc_complink -c etreetest3 -s shipb -t 14.1.4 -O delete -g
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 04/09/2011 AM  Initial version
+# 04/18/2011 AM  Updated to use the TkCommon Perl module for runcmd.
+#                Updated scriptPath to use main DEV and PROD tool development 
+#                areas. Added component validation against CM DB.
+# 06/01/2011 AM  Changed all references to btv/edainfra to eda/edainfra for 
+#                SVN migration.
+# 07/27/2011 AM  Updated for the new TK version tree naming convention.
+#                Defined GDEV as CM DB to use in DEV mode.
+# 08/08/2011 AM  Updated to use the external component definition files. 
+#                Handled by subroutines added to TkCommon Perl module.
+# 12/16/2011 AM  Updated to validate comps against CM DB instead of flat file.
+# 04/22/2012 EH  Removed hardcoded TK version = 14.1.0
+# 04/22/2012 EH  Enabled use of getToolKits to determine valid TK version.
+# 04/23/2012 EH  Eliminated use of TkCommon::runcmd to reduce number of msgs.
+# 04/23/2012 EH  Added logic to determine appropriate $stageName. Previously,
+#                the stage was hardcoded to development which will not work
+#                at FCS when creating links in tkb.
+# 06/25/2012 EH  Applied workaround for getToolKits stage used for tkb.
+# 08/07/2012 EH  Changed stagename to READY for shipb.
+# 08/07/2012 EH  Changed stagename to PREVIEW for shipb.
+# 09/23/2012 EH  Disabled validation of tkversion because of the dependency on 
+#                the current Tool Kit stage name (which is too dynamic now).
+# 12/18/2012 GS  Updated to support 14.1 xtinct tool kits.
+# 03/12/2013 EH  Added ability to process all components in specified Tool Kit
+#                by omitting the -c <component> on the command line.
+# 03/12/2013 EH  Refactored to be more maintainable and consistent with 
+#                other scripts.
+# 03/22/2013 GS  Refactored comments and code.  Added @VALID_OPS/@VALID_SRC
+#                and enhanced input validation.  Updated to use TKutils.pm
+#                Updated to support customtkb locations.
+#=============================================================================
+
+use warnings;
+use strict;
+use Env;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TKutils;
+
+# Global variables
+my @VALID_OPS = ("create", "delete");
+my @VALID_SRC = ("shipb", "tkb", "ship", "customtkb", "tk");
+my $AFS_EDA = "/afs/eda/data";
+
+# Program arguments
+my $appName    = "update_lc_complink";
+my $srcPrefix  = "";
+my $srcRepos   = "";
+my $tgtPrefix  = "";
+my $toolKit    = "";
+my $component  = "";
+my @components = "";
+my $release    = "";
+my $opMode     = "";
+my $debug      = "";
+my $devMode    = 0;
+my $verbose    = 0;
+my $noStop     = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my $startDir = $ENV{"PWD"};
+
+
+# Read the command line arguments
+if (ProcessArgs() == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+# Define list of components to process
+my $cats = "";
+$cats .= "DELIVERED,TEST_SUPPORT" if ($srcRepos !~ /b$/);
+@components = TKutils::GetComponents($toolKit, $component, $cats);
+
+if (scalar(@components) < 1) {
+  CleanExit("ERROR: Unable to define list of components", $ERROR);
+}
+
+if ($verbose) {
+  print "------------------------------------------------------ \n";
+  print "TK version        = $toolKit\n";
+  print "Source repos      = $srcRepos\n";
+  print "Operation mode    = $opMode\n";
+  print "Source dir prefix = $srcPrefix\n";
+  print "Target dir prefix = $tgtPrefix\n";
+  print "Dev mode          = $devMode\n";
+  print "Debug mode        = $debug\n";
+  print "Verbose mode      = $verbose\n";
+  print "No stop           = $noStop\n";
+  print "------------------------------------------------------ \n\n";
+}
+
+
+# Iterate through the list of components
+foreach $component (@components) {
+
+  next if ($component =~ /etreetest/);
+  print "Component: $component\n";
+
+  # Create directory if processing for customtk
+  if ($srcRepos =~ /customtk/) {
+    $srcRepos = "$srcRepos/tk$toolKit";
+    if (! $debug && ! -d "$srcPrefix/$srcRepos/$component") {
+      mkdir("$srcPrefix/$srcRepos/$component");
+    }
+  }
+
+  # Process component
+  if (ProcessComponent($component) > 0) {
+    CleanExit("ERROR: Unable to $opMode symlink", $ERROR);
+  }
+
+}
+
+exit $OK;
+
+
+#=============================================================================
+#			       FUNCTIONS and SUBROUTINES
+#=============================================================================
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  close (STDOUT);
+
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : PrintHelp()
+# Purpose: Prints description and usage
+# RCs    : none
+#------------------------------------------------------------------------------
+sub PrintHelp {
+
+  my $progDescription = "
+This script creates or deletes a RELEASE symlink from a source repository 
+to a tkx.y.z repository.
+
+SYNTAX:
+  $appName <-t toolkit> <-c component> <-s src_repos> 
+                     [-f src_path_prefix] [-p tgt_path_prefix>] 
+                     [-O operation] [-d] [-g] [-h] [-y] [-nostop]
+
+RETURN CODES:
+  0(ok) 8(error)
+
+WHERE:
+  toolkit         = Tool Kit version (ie, 14.1.4, 15.1.0)
+  component       = TK Component name (ie, einstimer)
+  src_repos       = Source location name
+                    (ie, shipb, tkb, xtinct, customtkb/tkx.y.z)
+  src_path_prefix = Path prefix of source repository 
+                    (ie, $srcPrefix/shipb/einstimer/RELEASE)
+  tgt_path_prefix = Path prefix of target repository 
+                    (ie, $tgtPrefix/tk14.1.x/einstimer/RELEASE])
+  operation       = Action to take [create | delete ... default is create] 
+  -d              = Development mode [default = off]
+  -g              = Debug mode ... only see what would execute
+  -h              = Application help
+  -y              = Verbose mode
+  -nostop         = Process each component even if errors
+
+NOTES:
+  1) A symlink called RELEASE is built in the source repository for a given
+     component.
+  2) The source repository location is defined as 
+     \"{srcPrefix}/{srcRepos}/{component}\"
+     e.g. Component model in SHIPB is \"/afs/eda/shipb/model\"
+  3) The target repository location is defined as 
+     \"{tgtPrefix}/tkrepos/{tkversion}/{component}/RELEASE\"
+     e.g. Version x.y.z, model/x.y.z is 
+     \"/afs/eda/tkrepos/x.y.z/shipb/einstimer/RELEASE\"
+";
+
+  print $progDescription;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ProcessArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub ProcessArgs {
+
+  my $rc = $OK;
+  my $help = "";
+
+  # Parse command line arguments
+  GetOptions ('c=s'      => \$component,
+              'd'        => \$devMode,
+              'f=s'      => \$srcPrefix,
+              'g'        => \$debug,
+              'y'        => \$verbose,
+              'nostop'   => \$noStop,
+              'p=s'      => \$tgtPrefix,
+              's=s'      => \$srcRepos,
+              't=s'      => \$toolKit,
+              'O=s'      => \$opMode,
+              'help|h|?' => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    PrintHelp();
+    return $ERROR;
+  }
+
+  # Is Tool Kit version specified?
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) must be specified\n";
+    return $ERROR;
+  }
+
+  # Is source repository specified?
+  if ($srcRepos eq "") {
+    print "\nERROR: The source level repository (";
+    print join(", ", @VALID_SRC) . ") must be specified with -s\n";
+    exit $ERROR;
+  }
+
+  # Validate source repository
+  my @tokens = split(/\//, $srcRepos);
+  my $loc = $tokens[0];
+  if (! grep(/^$loc$/, @VALID_SRC)) {
+    print "\nERROR: Valid values for the -s switch are ";
+    print join(", ", @VALID_SRC) . "\n";
+    exit $ERROR;
+  }
+
+  # Validate op mode
+  if (! grep(/^$opMode$/, @VALID_OPS)) {
+    print "\nERROR: Valid values for -O are ";
+    print join(", ", @VALID_OPS) . "\n";
+    exit $ERROR;
+  }
+
+  # Get release from TK version
+  $release = TKutils::GetRelease($toolKit, ".");
+
+  # Set default operation
+  $opMode = "create" if ($opMode eq "");
+	
+  # If $srcPrefix was not specified with -f, set $srcPrefix to appropriate 
+  # value depending on $devMode.
+  unless ($srcPrefix) {
+    $srcPrefix = "/afs/eda";
+    $srcPrefix = "/afs/eda/u/$USER" if ($devMode);
+  }
+
+  # If $tgtPrefix was not specified with -p, set $tgtPrefix to appropriate 
+  # value depending on $devMode.
+  unless ($tgtPrefix) {
+    if ($srcRepos =~ /b$/) {
+      $tgtPrefix =  "/afs/eda/customtkb";
+    }
+    else {
+      $tgtPrefix =  "/afs/eda/customtk";
+    }
+    $tgtPrefix =  "/afs/eda/u/$USER" if ($devMode);
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ProcessComponent($component)
+# Purpose: Prints discription and full usage to console
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub ProcessComponent {
+
+  my ($component) = @_;
+
+  # Symlink source location
+  my $srcLoc = "/afs/eda/$srcRepos/$component";
+
+  # Symlink target location
+  my $tgtLoc = "/afs/eda/tk$toolKit/$component/$release";
+  if (! -e $tgtLoc) {
+    print "ERROR: target directory doesn't exist - $tgtLoc\n";
+    return $ERROR;
+  }
+
+  my $rc = $ERROR;
+  if ($opMode ne "delete") {
+    $rc = CreateLink($tgtLoc, $srcLoc, $release);
+  }
+  else {
+    $rc = RemoveLink("$srcLoc/$release", $release, 1);
+  }
+
+  if ($rc != $OK) {
+    print "ERROR: Unable to $opMode symlink for component $component from ";
+    print "$srcLoc to $tgtLoc\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateLink($old, $new, $release)
+# Purpose: Create the new link or overwrite the existing link
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateLink {
+
+  my ($old, $new, $release) = @_;
+  $new .= "/$release";
+
+  # Construct command to create symlink
+  my $rc = $ERROR;
+  print " Creating symlink $new -> $old\n";
+  if ($debug) {
+    print " [DEBUG] link not really created!\n";
+    $rc = $OK;
+  }
+  else {
+    $rc = RemoveLink($new, $release, 0) if (-e $new);
+    return $OK if ($rc == 2); # continue to next component
+    $rc = $OK if (symlink($old, $new));
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RemoveLink($old, $release)
+# Purpose: Remove the symlink
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub RemoveLink {
+
+  my ($old, $release, $verby) = @_;
+
+  # Construct command to create symlink
+  my $rc = $ERROR;
+  print " Deleting symlink -> $old\n" if ($verby);
+  if ($debug) {
+    print " [DEBUG] link not really deleted!\n" if ($verby);
+    $rc = $OK;
+  }
+  else {
+    if (! -l $old) {
+      print "ERROR: found real file/dir ... $old\n";
+      print "       this file/dir is expected to be a symlink\n";
+      return 2 if ($noStop);
+      return $ERROR;
+    }
+    $rc = $OK if (unlink($old));
+  }
+
+  return $rc;
+
+}
+
+
+

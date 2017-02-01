@@ -1,0 +1,171 @@
+Test ETREE Database Applications
+---------------------------------
+
+Application list
+-----------------
+[ ] addRole
+[ ] branchCheck - NEW
+[ ] changeReqCheckState - NEW
+[ ] compStatus - NEW
+[ ] changeReqCreate - NEW
+[ ] changeReqUpdate - NEW
+[ ] createCodeUpdate - NEW
+[ ] createFuncUpdate
+[ x ] commit.finalize - NEW (not ready for testing)
+[ ] commit.ready - NEW
+[ x ] cr.commit - NEW  (not ready for testing)
+[ ] cr.getByCQ - NEW
+[ ] cr.getUpdated - NEW
+[ ] generateLevelHist
+[ ] getComponents
+[ ] getRevisions - NEW
+[ ] getToolKits
+[ ] modifyFuncUpdate - OBSOLETE
+[ ] showComponent
+[ ] showFuncUpdates
+[ ] showRelComps
+[ ] svnLog
+[ ] updateComponent
+[ ] updateCurrentStatus
+[ ] updateTkComp
+[ ] updateToolKit
+[ ] userAdd - NEW
+[ ] userUpdate - NEW
+[ ] validateRelComp
+
+
+Test Process
+-------------
+Verify all applications run with -h swtich
+   [ ] Application help should be displayed for all apps (rc = 0)
+       cd to bin directory
+       for i in *
+       do
+         print "TESTING - $i"
+         $i -h
+       done
+
+Test showRelComps
+   [ ] showRelComps -db DEV -r 14.1         (rc = 0 & displays a list of compononents)
+   [ ] showRelComps -db DEV -c ess          (rc = 0 & displays a list of releases for ess)
+   [ ] showRelComps -db DEV -r 1401 -c ess  (rc = 0 & displays 14.1 releases for ess)
+   [ ] showRelComps -db DEV -a              (rc = 0 & displays releases/components)
+   [ ] showRelComps -db DEV                 (rc = 0 & displays releases/components)
+
+Test validateRelComp
+   [ ] validateRelComp -db DEV -r 14.1 -c ess (rc = 0)
+   [ ] validateRelComp -db DEV -r 1401 -c ess (rc = 0)
+   [ ] validateRelComp -db DEV -r 1400 -c ess (rc = 1)
+   [ ] validateRelComp -db DEV -r 1401 -c es  (rc = 2)
+   [ ] validateRelComp -db DEV -r 1400 -c es  (rc = 3)
+
+Test getComponents
+   [ ] getComponents -db DEV -t 14.1.0      (rc = 0 & shows all comps w/details)
+   [ ] getComponents -db DEV -t 14.1.0 -q   (rc = 0 & shows comma delimited list of comps)
+   [ ] getComponents -db DEV -t 13.1.0      (rc = 1 & error no tool kit with that name)
+
+Test getToolKits
+   [ ] getToolKits -db DEV -r 14.1 -s DEVELOPMENT    (rc = 0 & shows all TKs w/details)
+   [ ] getToolKits -db DEV -r 14.1 -s DEVELOPMENT -q (rc = 0 & shows comma delmited list of TKs)
+   [ ] getToolKits -db DEV -r 14.1 -s READY -q       (rc = 0 & no TKs in that state)
+   [ ] getToolKits -db DEV -r 13.1      (rc = 1 & error no tool kit with that name)
+
+Test getRevisions
+   [ ] getRevisions -db DEV -t 14.1.0 -c ess -l build -latest  (rc = 0 & prints 1 revision)
+   [ ] getRevisions -db DEV -t 14.1.0 -c ess -l build  (rc = 0 & prints cdl of all revs)
+
+Test updateTkComp
+   [ ] updateToolKitComp -db DEV -t 14.1.0 -s READY -c ess  (rc = 0)
+   [ ] updateToolKitComp -db DEV -t 14.1.0 -s DEVELOPMENT -c ess  (rc = 0)
+
+Test updateToolKit
+   [ ] updateToolKit -db DEV -t 14.1.0 -s READY       (rc = 0)
+   	   [ ] getToolKits -db DEV -r 14.1 -s READY       (rc = 0 & show 14.1.0)
+   	   [ ] getToolKits -db DEV -r 14.1 -s READY       (rc = 0 & show no TKs)
+   [ ] updateToolKit -db DEV -t 14.1.0 -s DEVELOPMENT (rc = 0)
+
+Test createCodeUpdate
+   [ ] Edit the test input file (test/post_commit.test) increment revision and remove 
+       DB_ID line
+   [ ] createCodeUpdate -db DEV -f test/post_commit.test (rc = 0)
+   [ ] createCodeUpdate -db DEV -f test/post_commit.test (rc = 2 second run = nothing to do)
+
+-----------------------------
+Skipped these 2 test suites
+-----------------------------
+
+Test createFuncUpdate
+   [ ] Edit the test input file (test/post_commit.test) increment revision and remove 
+       DB_ID line
+   [ ] createFuncUpdate -db DEV -f test/post_commit.test (rc = 0)
+   [ ] createFuncUpdate -db DEV -f test/post_commit.test (rc = 2 second run = nothing to do)
+
+Test showFuncUpdates
+   [ ] showFuncUpdates -db DEV -r 1401 -c ess         (rc = 0 & all 14.1.1 ess func updates)
+   [ ] showFuncUpdates -db DEV -r 1401 -c ess -v 7    (rc = 0 & only 14.1.1 ess revision 7)
+   [ ] showFuncUpdates -db DEV -r 1401 -c ess -v 7 -a (rc = 0 & only 14.1.1 ess revision 7 details)
+
+Test svnLog - NEW
+   [ ] svnLog -db DEV -t 14.1.0 -c ess -e extracted -l build -m "TEST"
+   [ ] svnLog -db DEV -t 14.1.0 -c ess -e build_start -l build -m "TEST" (error needs platform)
+   [ ] svnLog -db DEV -t 14.1.0 -c ess -e build_start -l build -p 64-linux50 -m "TEST"
+   [ ] svnLog -db DEV -t 14.1.0 -c ess -e build_success -l build -p 64-linux50 -m "TEST"
+   [ ] svnLog -db DEV -t 14.1.0 -c ess -e advance_start -l build -m "TEST"
+   [ ] svnLog -db DEV -t 14.1.0 -c ess -e advance_fail -l build -m "TEST"
+   [ ] svnLog -db DEV -t 14.1.0 -c ess -e advanced_to_dev 
+
+ Test generateLevelHist - NEW
+   [ x ] generateLevelHist -db DEV -t 14.1.0 -c ess -last
+   [ x ] generateLevelHist -db DEV -t 14.1.0 -c ess -last -l ../test/LEVELHIST_ESS
+   [ x ] generateLevelHist -db DEV -t 14.1.0 -c ess -last -l ../test/LEVELHIST_ESS -w ../test/LEVELHIST_ess.web
+
+Add a Role
+   To EdaTkRole ...
+     [ ] addRole -db DEV -r ROLE_1a -d "Test role" -t edatkrole
+   To CompTkRelRole ...
+     [ ] addRole -db DEV -r ROLE_1b -d "Test role" -t comptkrelrole
+
+Update user/role for component release
+     [ ] updateComponent -db DEV -t 14.1.0 -c ess -b stadtlag@us.ibm.com (adds stadtlag@us.ibm.com as a BUILDER)
+     [ ] showComponent -db DEV -r 14.1 -c ess -a (Should see stadtlag@us.ibm.com as 1 of the builders)
+
+Test branchCheck
+	[ ] branchCheck -db DEV -c ess -b trunk [prints 1 to stdout, rc = 0]
+	[ ] branchCheck -db DEV -c ess -b blah [prints 0 to stdout, rc = 0]
+	[ x ] branchCheck -db DEV -c blah -b blah [prints 0 to stdout, rc = 1]
+
+-----------------------------
+Re-start testing here ...
+-----------------------------
+
+Test Change Request
+	[ ] changeRegCreate -db DEV -t 14.1.0 -c ess -auto -d "Testing"
+	[ ] changeReqCheckState -db DEV -t 14.1.0 0c ess -cq PROT00000100 -s APPROVED
+	[ ] changeRegCreate -db DEV -t 14.1.0 -c ess -cq PROT00000100 -d "Testing"
+	    [ ] cr.getByCQ -db DEV -cqid PROT00000100 -output test.xml (cat test.xml)
+	[ ] changeRegUpdate -db DEV -t 14.1.0 -c ess -cq PROT00000100 -s SUBMITTED
+	    [ ] cr.getByCQ -db DEV -cqid PROT00000100 -output test.xml (cat test.xml)
+	    [ ] changeReqCheckState -db DEV -t 14.1.0 0c ess -cq PROT00000100 -s SUBMITTED
+	[ ] changeRegUpdate -db DEV -t 14.1.0 -c ess -cq PROT00000100 -s APPROVED
+	[ ] changeRegUpdate -db DEV -t 14.1.0 -c ess -cq PROT00000100 -d "Testing update"
+	[ ] cr.getUpdated =db DEV -startdate '2011-01-01 00:00:00' -enddate '2011-06-01 00:00:00' -output test.xml
+
+Test commit functions
+	[ ] commit.ready -db DEV -t 14.1.0 -c ess -cq PROT00000100 (rc = 0)
+	[ ] commit.ready -db DEV -t 14.1.0 -c ess -cq PROT00000999 (rc != 0)
+	
+-----------------------------
+The remaining have been tested
+-----------------------------
+
+Test User functions
+	[ ] userAdd -db DEV -a stadtlag -i stadtlag@us.ibm.com (error since already in DB)
+	[ ] userUpdate -db DEV -u stadtlag@us.ibm.com -a zzzz 
+	[ ] userUpdate -db DEV -u stadtlag@us.ibm.com -a stadtlag
+
+Test compStatus
+	[ ] compStatus -db DEV -t 14.1.0 -c ess,edautils,einstimer (partial report)
+	[ ] compStatus =db DEV -t 14.1.0 (full report)
+
+Check test logs as needed ...
+

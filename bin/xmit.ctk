@@ -1,0 +1,287 @@
+#!/usr/bin/perl
+#
+#=============================================================================
+#
+#    FILE: xmit.ctk
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 11/22/2011
+#
+#- PURPOSE --------------------------------------------------------------------
+# See "printHelp" method.
+#-----------------------------------------------------------------------------
+
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+# Define custom perl libs path and modules
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TKutils;
+
+# Program name
+my $appName = "xmit.ctk";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $toolKit    = "";
+my $debug      = 0;
+my $help       = "";
+my $verbose    = 0;
+my $component  = "";
+my $release    = "";
+my $location   = "";
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+# Set the location and name of createFuncUpdate application
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $startDir = $ENV{"PWD"};
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# To exit cleanly from a Ctrl+C or an unexpected die()
+$SIG{'INT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{'QUIT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{__DIE__}  = sub { handleInterruption(); };
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Verify user is running as svnlib
+if (! TKutils::IsAuthorized("svnlib", $debug)) {
+  exit #ERROR;
+}
+
+# Create a list of DELIVERED components
+my @delComponents = TKutils::GetComponents($toolKit, "", "DELIVERED");
+my @allComponents = TKutils::GetComponents($toolKit, $component, "");
+
+# Package components that have successfully completed customtk.master
+print "\n";
+print "Starting component packaging ... \n";
+print "---------------------------------\n";
+foreach $component (@allComponents) {
+
+  # Skip etree* and svntest test components
+  next if ($component =~ /^etree/);
+  next if ($component =~ /^svntest/);
+  print "\nPackaging component: $component\n";
+
+  # Get current PKG status of this component
+  my $status = GetStatus($toolKit, $component);
+  if (($status eq "Pass") || ($status eq "noop")) {
+    print " - Already been packaged - $status\n";
+    next;
+  }
+  elsif ($status eq "WIP") {
+    print " - Packaging underway by another process - $status\n";
+    next;
+  }
+
+  # Look for non-delivered components - don't package these just mark as NOOP
+  if (! grep(/^$component$/, @delComponents)) {
+    TKutils::LogComponentEvent($toolKit, $component, $location, "CTK_PKG_NOOP",
+                               "Logged by $appName", $verbose, $debug);
+    print " - Component not delivered .. logged CTK_PKG_NOOP event\n";
+    next;
+  }
+
+  # Package this component
+  PackageIt($toolKit, $component, $location, $verbose, $debug);
+
+}
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Package components that have completed AGTS or CUSTOMTK. Will
+only process components that have not already been packaged.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-dryrun] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit   Tool Kit [14.1.0, 14.1.1 ...].
+  component  (optional) Component to process
+  -dryrun    (optional) Run in dry run mode [no actions taken]
+  -h         (optional) Application help
+  -y         (optional) Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tool_kit|t=s'    => \$toolKit,
+              'comp|c=s'        => \$component,
+              'dryrun|g'        => \$debug,
+              'verbose|y'       => \$verbose,
+              'help|h|?'        => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the required parameters.
+  my $msg = "";
+  if (! $toolKit) {
+    $msg = "ERROR: tool_kit (-t) is a required parameter\n";
+  }
+
+  # Set the release and location
+  $release = TKutils::GetRelease($toolKit, "0");
+  $location = "customtkb/tk$toolKit";
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : PackageIt($toolKit, $component, $location)
+# Purpose: Transmit this component
+# RCs    : none
+#------------------------------------------------------------------------------
+sub PackageIt {
+
+  my ($tk, $comp, $loc, $verbose, $debug) = @_;
+  my $rc = $OK;
+
+  # Log the packaging start event
+  print " [PackageIt] ... $tk - $comp\n";
+  TKutils::LogComponentEvent($tk, $comp, $loc, "CTK_PKG_START",
+                             "Logged by $appName", $verbose, $debug);
+
+  # Run the pkg.create command
+  my $command = "$BIN/pkg.create -full";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " -ctk";
+  $command .= " -y";
+
+  my @results;
+  $rc = TKutils::RunCommand($command, \@results, $debug, $verbose);
+  print "  Return code: $rc\n";
+  print join("", @results);
+  if ($rc == $OK) {
+    TKutils::LogComponentEvent($tk, $comp, $loc, "CTK_PKG_SUCCESS",
+                               "Logged by $appName", $verbose, $debug);
+  }
+  else {
+    TKutils::LogComponentEvent($tk, $comp, $loc, "CTK_PKG_FAIL",
+                               "Logged by $appName", $verbose, $debug);
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetStatus($toolKit, $component)
+# Purpose: Refresh the AGTS web status report
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetStatus {
+
+  my ($tk, $comp) = @_;
+
+  print " Reading XMIT/CTK_PKG status ...\n" if ($verbose);
+
+  # Construct the command
+  my $command = "$BIN/statusXmit";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " -q";
+
+  # Run the command and show results
+  print "Running $command\n" if ($verbose);
+  my @results = `$command`;
+  my $status = "";
+  foreach $entry (@results) {
+    if ($entry =~ /^$comp /) {
+      my @tokens = split(/ +/, $entry);
+      $status = $tokens[2];
+      last;
+    }
+  }
+
+  return $status;
+
+}

@@ -1,0 +1,364 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: check.findWcs
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 03/19/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 03/13/2013 GS  Initial coding
+# 03/27/2012 GS  Updated to allow tk14* locations.   Updated to use tk14*
+#                instead of shipb/tkb/xtinct as the location.
+# 09/12/2012 GS  Updated to ignore etreetest* components.
+# =============================================================================
+
+use warnings;
+use strict;
+use File::stat;
+use Time::localtime;
+use Sys::Hostname;
+use Cwd;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use File::Copy;
+
+# Global variables
+my $AFS_EDA   = "/afs/eda";
+my @VALID_LOCS = ( "dev", "prod", "ship", "tk" );
+
+# Program name
+my $appName = "check.findWcs";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $toolKit    = "";
+my $testComp   = "";
+my $component  = "";
+my $location   = "";
+my $header     = "";
+my $help       = "";
+my $verbose = 0;
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+# Set the location and name of createFuncUpdate application
+my $SVN = "/afs/eda/tools/bin/svn";
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $GET_COMP = "$BIN/getComponents -q ";
+my $LOG_DIR = "/afs/eda/data/edainfra/checks/";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# Define the current directory
+#
+my $startDir = $ENV{"PWD"};
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    #printSyntax();
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+# Verify the log directory exists
+$LOG_DIR .= $location . "Wcs";
+mkpath($LOG_DIR) if (! -d $LOG_DIR);
+
+
+#
+# Define custom perl libs path and modules depending on the
+# application mode.
+#
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use IcofFile;
+
+
+#
+# Query the database for components in this Tool Kit
+#
+my $command;
+my @results;
+my @components = ();
+if ($testComp) {
+  push(@components, $testComp);
+}
+else {
+  $command = $GET_COMP . " -t $toolKit -q -ct DELIVERED,BUILD_SUPPORT,TEST_SUPPORT ";
+  @results = `$command`;
+  @components = split(/,/, $results[0]);
+}
+
+
+# Set the "real" location so SVN working copies can be found
+my $realLocation = $location;
+if (($location =~ /^ship/) || ($location =~ /^tk/)) {
+  $realLocation = "tk" . $toolKit;
+}
+
+
+#
+# For each component determine if the location is a working copy or
+# if it contains .svn directories
+#
+@tokens = split(/\./, $toolKit);
+pop @tokens;
+my $TK_VER  = join(".", @tokens);
+
+foreach $component (@components) {
+
+  chomp($component);
+  next if ($component =~ /etreetest/);
+  print "Checking $component ...\n";
+
+  my $FAIL = $component . "_FAIL.html";
+  my $PASS = $component . "_PASS.html";
+  my $WARN = $component . "_WARN.html";
+  my $logFile = $PASS;
+
+  # Determine if /afs/eda/dev/COMP/TK is a working copy
+  my $report = "";
+  my $dir = "$AFS_EDA/$realLocation/$component/$TK_VER";
+  $command = "$SVN info $dir";
+  @results = `$command`;
+  my $rc = $? >> 8;
+  if ($rc == 0) {
+    $logFile = $FAIL;
+    $report .= "Status: $dir is a working copy<br>\n";
+  }
+  else {
+    $report .= "Status: $dir is NOT a working copy<br>\n";
+  }
+  $report .= "<br>\n";
+
+  # Determine if /afs/eda/dev/comp/14.1 contains .svn dirs/files
+  $command = "find $dir -type d -name .svn";
+  print "$command\n" if ($verbose);
+  @results = `$command`;
+  if (scalar(@results) > 0) {
+    $logFile = $WARN if ($logFile eq $PASS);
+    $report .= "Status: $dir contains .svn directories/files<br>\n";
+    my $line;
+    foreach $line (@results) {
+      chomp $line;
+      $report .= "$line<br>";
+    }
+  }
+  else {
+    $report .= "Status: $dir does NOT contain .svn directories/files<br>\n";
+  }
+  $report .= "<br>";
+
+  # Set the log header text.
+  SetHeader($component, $rc);
+
+  # Clean up the old files
+  unlink("$LOG_DIR/$PASS");
+  unlink("$LOG_DIR/$FAIL");
+  unlink("$LOG_DIR/$WARN");
+
+  # Write the log file
+  if (! $verbose) {
+    my $file = "$LOG_DIR/$logFile";
+    open LOG, ">$file" || die("Unable to open file for writing $!");
+    print LOG $header;
+    print LOG $report;
+    close LOG;
+  }
+  else {
+    print $header;
+    print $report;
+  }
+
+}
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Determines if /afs/eda/LOCATION/COMPONENT/TK is a SVN working copy
+or if it contains .svn directories.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> <-l location> [-c component] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit  = Tool Kit [14.1.0, 14.1.1 ...].
+  location  = location to check (dev, prod, ship, tk)
+  component = (run check for a single component [no mail sent])
+  -h        = Application help (optional)
+  -y        = Verbose mode (optional)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'      => \$toolKit,
+              'comp|c=s'    => \$testComp,
+              'loc|l=s'     => \$location,
+              'verbose|y'   => \$verbose,
+              'help|h|?'    => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the obsolete file.
+  my $msg = "";
+  if (! $toolKit) {
+    $msg .= "ERROR: tool_kit (-t) is a required parameter\n";
+  }
+  if (! $location) {
+    $msg .= "ERROR: location (-l) is a required parameter\n";
+  }
+  $location = lc($location);
+  if (! grep(/^$location$/, @VALID_LOCS)) {
+    $msg .= "ERROR: location must be dev, prod, ship or tk\n";
+    $msg .= "       Location: $location\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetHeader()
+# Purpose: Create the error log header text
+# RCs    : none
+#------------------------------------------------------------------------------
+sub SetHeader {
+
+  my ($component, $addLegend) = @_;
+
+  # Generate log file data
+  my $date = `date +%Y-%m-%d`;
+  chomp $date;
+  my $time = `date +%H:%M:%S`;
+  chomp $time;
+  $header = "Component: $component<br>\n";
+  $header .= "Date: $date<br>\n";
+  $header .= "Time: $time<br>\n";
+  $header .= "<br>\n";
+
+}

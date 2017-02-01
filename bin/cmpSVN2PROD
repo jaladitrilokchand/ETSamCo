@@ -1,0 +1,85 @@
+#!/usr/bin/env tclsh
+#====================================================================================
+#
+# Compare contents of prod with contents of corresponding revision in SVN
+#
+# Usage: cmpSVN2PROD $COMPONENT
+#
+# Return:  0 on success
+#         >0 error
+#
+#- CHANGE LOG -----------------------------------------------------------------------
+# 12/08/2011 TSG  Initial coding
+# 01/03/2012 GFS  Updated to call getRevisionsTk instead of getRevisions.
+# 04/05/2012 GFS  Updated to dynamically set the TMP directory
+#====================================================================================
+
+set myUser $env(USER)
+
+set COMPONENT [ lindex $argv 0 ]
+set TMP  /data/$myUser/svn2prod_tmp
+set SVN  /afs/eda/tools/bin/svn
+set GJ https://greenjiffy.fishkill.ibm.com/eda/tk
+set GET_REV /afs/eda/data/edainfra/tools/enablement/prod/bin/getRevisionsTk
+
+set dirs {.dll* .lib* .bin* dll* lib* bin* Arch-* LEVELHIST Make* .svn }
+
+set revision [ exec $GET_REV -c $COMPONENT -l prod -latest ]
+
+puts "<pre>"
+#puts "RUNTIME = [ exec date +%F-%H-%M-%S-%N]"
+puts "EXCLUDING FROM DIFF = $dirs"
+
+puts "REVISION IN PROD = $revision"
+
+puts "Creating: $TMP/$COMPONENT"
+if { ![ file exists $TMP/$COMPONENT ] } {
+  exec mkdir $TMP/$COMPONENT
+}
+
+puts "Creating: $TMP/$COMPONENT/14.1"
+if { [ file exists $TMP/$COMPONENT/14.1 ] } {
+  exec rm -rf $TMP/$COMPONENT/14.1
+}
+
+puts "Running: $SVN checkout $GJ/$COMPONENT/trunk@$revision $TMP/$COMPONENT/14.1"
+exec $SVN checkout $GJ/$COMPONENT/trunk@$revision $TMP/$COMPONENT/14.1
+puts "SVM checkout complete ..."
+
+set cmd " exec diff -r --brief "
+foreach dir $dirs {
+  puts "In: $dir"
+  lappend cmd --exclude $dir
+}
+lappend cmd  /afs/eda/prod/$COMPONENT/14.1 $TMP/$COMPONENT/14.1
+
+puts "Running: $cmd ..."
+set rc [ catch { eval $cmd  } error ]
+puts "Diff Complete"
+if { $rc > 0 } {
+
+  set lines [ split $error \n ]
+  set lines [ lrange $lines 0 end-1 ]
+  set lines [ lsort $lines ]
+  if { [ string first "Files "  [ lindex $lines 0 ] ] == 0  &&
+       [ string first " differ" [ lindex $lines 0 ] ] != -1  } {
+    set rc 2
+  } else {
+    set rc 1
+  }
+  puts "RC = $rc"
+  foreach line [ lsort $lines ] {
+    puts $line
+  }
+} else {
+  puts "RC = $rc"
+}
+
+
+# Cleanup the tmp directory
+puts "\nCleaning up $TMP/$COMPONENT/14.1 ..."
+exec rm -rf $TMP/$COMPONENT/14.1
+
+puts "</pre>"
+
+exit $rc

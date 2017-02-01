@@ -1,0 +1,375 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: diffTkDirs
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 01/21/2015 GS  Initial coding.
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Find;
+
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+#use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TKutils;
+
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+my $AFS_EDA = "/afs/eda";
+
+# Program variables
+my $appName = "diffTkDirs";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dbMode          = "";  # default is prod if empty
+my $dryRun          = 0;
+my $toolKit         = "";
+my $srcDir          = "";
+my $tgtDir          = "";
+my $srcLocation     = "";
+my $tgtLocation     = "";
+my $component       = "";
+my @components      = ();
+my @fileList        = ();
+my $release         = "";
+
+my $startDir;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+# Determine the src loction tk
+$release = "14.1";
+if (SetToolKit($srcLocation, $release, \$toolKit) != $OK) {
+  CleanExit("\nERROR: unable to determine src location tool kit\n", $ERROR);
+}
+
+# Create a list of components to process
+@components = SetComponents($toolKit, $component);
+
+# Compare contents
+foreach $component (@components) {
+
+  @fileList = ();
+
+  print "\nComponent: $component\n";
+
+  # Set the source and target directories
+  $srcDir = "$AFS_EDA/$srcLocation/$component/$release";
+  $tgtDir = "$AFS_EDA/$tgtLocation/$component/$release";
+
+  # Create a list of files in the source location
+  GetFiles($srcDir);
+  print " Files: " . scalar(@fileList) . "\n";
+
+  # Compare against target
+  my @diffs = Compare($srcLocation, $tgtLocation, @fileList);
+  print " Diffs: " . scalar(@diffs) . "\n";
+  print "  " . join("  \n", @diffs) . "\n";
+  print "\n Diffs: " . scalar(@diffs) . "\n";
+
+  # Display differences
+  #ShowDiffs($srcDir, $tgtDir, @diffs);
+
+}
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  #LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script compares files in the source location against files in the
+target location.  It will only look at file in the source location.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-src srcLoc> <-tgt tgtLoc> [-c component]
+                  [-dryrun] [-y] [-db dbMode] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  srcLoc    = Source location (build, dev, prod, ship ...)
+  tgtLoc    = Target location (build, dev, prod, ship ...)
+  component = Process just this component
+  -dryrun   = Run script in dryrun mode
+  dbMode    = Database mode [default = PROD] (PROD, DEV, TEST)
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('t=s'       => \$toolKit,
+              'src=s'     => \$srcLocation,
+              'tgt=s'     => \$tgtLocation,
+              'c=s'       => \$component,
+	      'db=s'      => \$dbMode,
+	      'dryrun'    => \$dryRun,
+	      'y'         => \$verbose,
+	      'help|h|?'  => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $srcLocation) {
+    print "ERROR: Source Location (-src) is a required parameter\n";
+    return $ERROR;
+  }
+
+  if (! $tgtLocation) {
+    print "ERROR: Target Location (-tgt) is a required parameter\n";
+    return $ERROR;
+  }
+
+  my @validLocs = ("build", "dev", "prod", "prod_long", "shipb", "ship",
+                   "tkb", "tk");
+  if (! grep(/^$srcLocation$/, @validLocs)) {
+    print "ERROR: Source Location is not valid .. \n";
+    print "       valid locs: " . join(" ", @validLocs) . "\n";
+    return $ERROR;
+  }
+  if (! grep(/^$tgtLocation$/, @validLocs)) {
+    print "ERROR: Target Location is not valid .. \n";
+    print "       valid locs: " . join(" ", @validLocs) . "\n";
+    return $ERROR;
+  }
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents()
+# Purpose: Create a list of components ready for this Tool Kit
+# RCs    : List of component names or empty list
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  my ($tk, $comp) = @_;
+  print " Querying for components in $tk ...\n" if ($verbose);
+
+  # Query the DB for tk/components for the src tool kit
+  my @list = TKutils::GetComponents($tk, $comp, "");
+  print "Found " . scalar(@list) . " components\n" if ($verbose);
+
+  return @list;
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : SetToolKit()
+# Purpose: Determine the tool kit in the given location
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub SetToolKit {
+
+  my ($loc, $rel, $ref_tk) = @_;
+  print " Finding TK in $loc ...\n" if ($verbose);
+
+  my $stage = "development";
+  $stage = "preview" if ($loc eq "shipb" || $loc eq "ship");
+  $stage = "production" if ($loc eq "tkb" || $loc eq "tk");
+
+  # Construct the command
+  my $command = "$BIN_DIR/getToolKits";
+  $command .= " -r $rel";
+  $command .= " -s $stage -q";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  if ($rc == 0) {
+    $$ref_tk = $results[0];
+    chomp $$ref_tk;
+  }
+  else {
+    $rc = $ERROR;
+  }
+  print " Tool kit: $$ref_tk\n" if ($verbose);
+
+  return $rc
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : GetFiles($dir)
+# Purpose: Create a list of files in the given directory
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub GetFiles {
+
+  my ($dir) = @_;
+  print " Querying for directory for files ...\n" if ($verbose);
+
+  find({wanted => \&SaveFiles,
+       follow => 1,
+       follow_skip => 2
+       },
+       $dir);
+
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : SaveFiles()
+# Purpose: Save the file
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SaveFiles {
+
+  return if (-d $File::Find::name); # Exclude directories
+  return if ($File::Find::name =~ /\/\.svn\//);
+  return if ($File::Find::name =~ /\/\.ship\//);
+  return if ($File::Find::name =~ /\/\.update$/);
+  return if ($File::Find::name =~ /\/\.update_history$/);
+
+
+  push(@fileList, $File::Find::name);
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : Compare($srcLoc, $tgtLoc, @fileList
+# Purpose: Compares files in the list between src and tgt locations
+# RCs    : list of diffs
+#------------------------------------------------------------------------------
+sub Compare {
+
+  my ($src, $tgt, @files) = @_;
+  print " Comparing files $src vs $tgt ...\n" if ($verbose);
+
+  my @errors = ();
+  foreach my $srcFile (@files) {
+
+    my @tokens = split(/\//, $srcFile);
+    $tokens[3] = $tgt;
+    my $tgtFile = join("/", @tokens);
+
+    # Skip if this file not in target loc
+    next if (! -e $tgtFile);
+
+    my $srcSize = -s $srcFile;
+    my $tgtSize = -s $tgtFile;
+
+    print "\nSrc: $srcFile ($srcSize)\n" if($verbose);
+    print "Tgt: $tgtFile ($tgtSize)\n" if ($verbose);
+
+    if ($srcSize != $tgtSize) {
+      push(@errors, $srcFile);
+      print "ERROR ==> $srcFile\n" if ($verbose);
+    }
+
+  }
+
+  return @errors;
+
+}
+
+

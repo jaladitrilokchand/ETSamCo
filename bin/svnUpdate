@@ -1,0 +1,159 @@
+#!/usr/bin/perl
+#=============================================================================
+#    FILE: svnUpdate
+#
+# CREATOR: Art Magnan
+#    DEPT: AZYX
+#    DATE: 05/10/2010
+#
+# OUTPUTS:
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# Update the target SVN working copy from the SVN source repository.
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 05/13/2010 AM  Initial version
+# 07/08/2010 AM  Removed $svn_server variable, data now part of $svnRepos.
+# 08/12/2010 AM  Removed unneeded debug statements.
+# 09/29/2010 AM  Added SVN environment variable declaration so CRON would run
+#                the svn_auth.exp expect script correctly.
+# 10/07/2010 AM  Commented out the svn_auth.exp code for now until intermittent 
+#                issues are resolved with it. Will use direct call to SVN for now.
+# 12/23/2010 AM  Changed SVN tool location to be EDA cell.
+#=============================================================================
+#=============================================================================
+#			       FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub Process_Cmd_Line {
+
+  # --------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+  # Parms defined:  -c <component_name; e.g. einstimer>
+  #                 -d [Development Mode ON]
+  #                 -e <SVN tool executable code location>
+  #                 -h [help]
+  #                 -r <release in rr.v format; e.g. 14.1
+  #                 -s <SVN REPOS>
+  #                 -t <EDA BUILD WC>
+  # -------------------------------------------------------------- 
+  getopts('c:de:hr:s:t:');
+
+  $compName  = "$opt_c";
+  $devMode   = "$opt_d";
+  $toolLoc   = "$opt_e";
+  $helpFlg   = "$opt_h";
+  $release   = "$opt_r";
+  $svnRepos  = "$opt_s";
+  $svnWC     = "$opt_t";
+
+  if ($devMode) {
+    print "------------------------------------ \n";
+    print "   Parms Read By svnUpdate Program:  \n";
+    print "------------------------------------ \n";
+    print "Component name = \"$compName\" \n";
+    print "Release        = \"$release\"  \n";
+    print "Dev Mode       = \"$devMode\"  \n";
+    print "Tool Location  = \"$toolLoc\"  \n";
+    print "SVN Repos      = \"$svnRepos\" \n";
+    print "SVN WC         = \"$svnWC\"    \n";
+    print "------------------------------------ \n\n";
+  }
+}
+#============================================================================================
+#					MAIN ROUTINE
+#============================================================================================
+use Env;
+use Getopt::Std;
+
+$sysRC = 0;
+$autoAuth = 0;
+
+# Pass target host from command line
+&Process_Cmd_Line;
+
+# Make sure the required parameters are provided
+if ($compName eq "") {
+  print "\nERROR: You must specify the component name using the -c parameter syntax.\n\n";
+  exit 8;
+} elsif ($release eq "") {
+  print "\nERROR: You must specify the release using the -r {rr.v format} syntax.\n\n";
+  exit 8;
+} elsif ($svnRepos eq "") {
+  print "\nERROR: You must specify the SVN repository URL.\n\n";
+  exit 8;
+} elsif ($toolLoc eq "") {
+  print "\nERROR: You must specify the eTree tool AFS location.\n\n";
+  exit 8;
+} elsif ($svnWC eq "") {
+  print "\nERROR: You must specify the EDA BUILD SVN WC.\n\n";
+  exit 8;
+}
+
+# Run auto-authentication on these components only (for now)
+if ($compName eq "model" || $compName eq "modelio" ||  $compName eq "modelutil") {
+  $autoAuth = 1;
+}
+
+if ($autoAuth) {
+  # Get functional ID password for use in auto-authentication.
+  $funcPW = `cat /tmp/local/$USER.funcid`;
+  
+  # Add environment variable declarations for CRON to run the auto-authentication script.
+  $ENV{'SVN'} = '/afs/eda/tools/bin/svn';
+
+  # Define command to perform the SVN update through the auto-authentication script.
+  $svnUpdateCmd = "/usr/bin/expect $toolLoc/svn_auth.exp 2>&1";
+
+} else {
+  # Define command to perform the SVN update directly.
+  $svnApp = "/afs/eda/tools/bin/svn";
+  $svnUpdateCmd = "$svnApp update";
+}
+
+if ($devMode) {
+  print "SVN command string: \"$svnUpdateCmd\" \n\n";
+} else { 
+  print "\n";
+}
+
+# Disable buffering of stdout
+$|++;
+
+# Update the SVN WC from the SVN repository
+# Get into the WC directory
+chdir ($svnWC) or die "ERROR: Can't change directory to $svnWC.\n";
+print "Updating WC located at $svnWC.\n";
+
+# Perform the update
+# @results contains the message back from the SVN update operation which
+# would contain the revision number if there were file changes.
+
+if ($autoAuth) {
+  print "Calling auto-authentication script.\n";
+  @results = `$svnUpdateCmd $funcPW`;
+} else {
+  @results = `$svnUpdateCmd`;
+}
+
+$sysRC = $? >> 8;
+
+if ($autoAuth) {
+  print "Results from auto-authentication script:\n";
+} else {
+  print "Results from SVN update command:\n";
+}
+
+print "@results\n";
+
+if ($sysRC) {
+  print "sysRC: $sysRC \n";
+  print "ERROR: Return code $sysRC from $svnUpdateCmd.\n";
+  exit 8;
+} else {
+  print "sysRC: $sysRC \n";
+  print "SVN update completed.\n";
+}
+print "\n";

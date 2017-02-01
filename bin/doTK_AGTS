@@ -1,0 +1,420 @@
+#!/usr/bin/env perl
+#use warnings;
+#use strict;
+#=============================================================================
+#    FILE: doTK_AGTS
+#
+# CREATOR: Eric Hull
+#    DEPT: AZYX
+#
+# RETURN CODES: 0 = OK
+#   8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# Execute a command, fed from the command line, across all components defined
+# for a specific Toolkit version and having a particular set of attributes.
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 11/16/2011 EH  Initial version
+# 11/21/2011 EH  Changed log file names and directories. Added -s option
+#                to specifiy a previous summary log file to avoid
+#                reprocessing components previously processed.
+# 12/13/2011 EH  Removed Dev mode switch from runAGTS invocation.
+#                Removed validity checking of attributes input from cmd line.
+#=============================================================================
+#=============================================================================
+#      FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub help {
+  print "\nScript to execute a command from command line, across all components defined for a specific Toolkit version and having a particular set of attributes.";
+  print "\nUsage:  doTK_AGTS -t <Toolkit version> -a <component attrib types> [-d] [-g] [-h]\n";
+  print "\nInput parameters:\n";
+  print "  -t <EDA Toolkit release version> e.g. 14.1.{n}\n";
+  print "  -a <component definition attributes> e.g. DELIVERED,BUILD_SUPPORT,TEST_SUPPORT,32-BIT \n";
+  print "  -d [Development Mode ON]\n";
+  print "  -g [Test mode ON - will see what would execute.]\n";
+  print "  -h This help\n";
+  print "  -s [path to summary log file from previous run]\n";
+  print "\nNOTES:\n";
+  exit 1;
+} # end help
+
+sub process_cmd_line {
+  #
+  # ---------------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+  # Parms defined:  -t <Toolkit version;  e.g. 14.1.0>
+  #       -a <component definition attributes>
+  #       -d [Development Mode ON - using code from DEV area]
+  #       -g [Test mode ON - will see what would execute.]
+  #       -h [help]
+  #       -s [path to summary log file from previous run]
+  # ---------------------------------------------------------------------
+  getopts('a:dghs:t:');
+
+  $tkVersion  = "$opt_t";
+  $compAttrList = "$opt_a";
+  $prevSummaryLogFile = "$opt_s";
+
+  # Set DEVMODE
+  if ( ${opt_d} ) {
+    $devMode = 1;
+  }
+  else {
+    $devMode = 0;
+  }
+
+  # Set DEBUG mode
+  if ( ${opt_g} ) {
+    $DEBUG = 1;
+  }
+  else {
+    $DEBUG = 0;
+  }
+
+  # Display help if requested
+  if ( ${opt_h} ) { help(); }
+
+} # end process_cmd_line
+
+sub check_userID {
+  #
+  # AFS ID svnlib must be used to execute this script
+  #
+  my ($userID, $debug, @authID) = @_;
+  my ($found) = 1;
+
+  foreach $id (@authID) {
+    if ($debug) {
+      print "userID: \"$userID\"  authID: \"$id\"\n";
+    }
+    if ( $userID eq $id ) {
+      $found = 0;
+      last;
+    }
+  }
+  return ($found);
+} # end check_userID
+
+sub create_timestamp {
+  #
+  # Get date and time info from system
+  #
+
+  @months = qw(jan feb mar apr may jun jul aug sep oct nov dec);
+
+  ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+
+  $year = $year + 1900;
+
+  $month = $mon + 1;
+  $monthName = $months[$mon];
+  $monthDay = $monthName . $mday;
+
+  $date_now = $month . "/" . $mday . "/" . $year;
+
+  if ($min < 10) {
+    $newmin = "0" . $min;
+  }
+  else {
+    $newmin = $min;
+  }
+  $time_now = $hour . ":" . $newmin;
+} # end create_timestamp
+
+sub log_execution {
+  #
+  # Define the logging, execution timestamps
+  #
+  my ($when, $compType) = @_;
+  my $tkVer = "";
+
+  if ($when eq "start") {
+
+    # Convert tkVersion for use in log file name
+    $tkVer = TkCommon::convert_tkVersion ($tkVersion, "selfstore");
+
+    # Set up the log file
+    create_timestamp;
+    $datetime = "$date_now at $time_now";
+
+    $logTop  = "/afs/eda/u/svnlib/logs/${monthName}";
+    if (! -d $logTop) {
+      `mkdir -p $logTop`;
+    }
+    $logFile = "$logTop/${monthDay}.${compType}.${tkVer}.${scriptName}";
+    unless (open(STDOUT, "| tee -ai $logFile")) {
+      die ("Output file $logFile cannot be opened.\n");
+    }
+
+    # Log the start time
+    print ("#\n");
+    print ("# $fullScrName started at $datetime by $userID\n");
+    print ("#\n");
+
+  } elsif ($when eq "end") {
+
+    create_timestamp;
+    $datetime = "$date_now at $time_now";
+
+    # Log the end time
+    print ("#\n");
+    print ("# $fullScrName ended at $datetime by $userID\n");
+    print ("#\n");
+
+  } else {
+    print "ERROR: log_execution: Can't figure out when I need to log!\n";
+  }
+} # end log_execution
+
+sub dateTimeStamp {
+  my ($sec, $min, $hr, $day, $month, $year) = (localtime) [0..5];
+  my $datetime = sprintf "%04d%02d%02d_%02d%02d%02d",
+         $year + 1900,
+         $month + 1,
+         $day,
+         $hr,
+         $min,
+         $sec;
+  return $datetime;
+}
+
+#============================================================================================
+#   MAIN ROUTINE
+#============================================================================================
+use Env;
+use Getopt::Std;
+use File::Path qw(mkpath) ;
+use Cwd;
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TkCommon;
+
+$codePath = "/afs/eda/data";
+#$codePath = "/afs/eda/u/ehull";
+
+our $scriptName = "doTK_AGTS";
+our $fullScrName = $0;
+our $rc = 0;
+our $maxRC = 0;
+our $dbType="";
+#our %valid_attrs = map {$_ => 1} qw(DELIVERED BUILD_SUPPORT TEST_SUPPORT 32-bit);
+
+my $compList;
+my $compAttr;
+my $compCnt = 0;
+my $badCnt = 0;
+my $goodCnt = 0;
+my $pctGood = 0;
+my $comp;
+my $compRel;
+
+my $logSuffix;
+my $runAgtsLogPath;
+my $tgtScriptName;
+my $tkVerUS;
+my $compResult;
+my %excludeCompHash;
+my $compLine;
+my @prevRun;
+
+# Only AFS ID svnlib should run this script!!!
+our $rlseID = "svnlib";
+our $userID = $LOGNAME;
+my (@authID) = ($rlseID);
+$rc = check_userID ($userID, 0, @authID);
+if ($rc) {
+  print "\nERROR: You MUST run this script as AFS ID \"@authID\" to manage the locks!!!\n\n";
+  exit 8;
+} else {
+  print "\nINFO: Running script using authorized AFS ID.\n\n";
+}
+
+# Process parms from command line
+process_cmd_line;
+
+# Make sure the required parameters are provided
+if ($tkVersion eq "") {
+  print "\nERROR: Missing Toolkit version.\n";
+  print " You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+# Ensure tkVersion is in correct format
+$rc = TkCommon::check_tkVersion ($tkVersion);
+if ($rc != 0) {
+  print "\nERROR: Toolkit version specified in an invalid format!\n";
+  print " You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+
+if ($compAttrList eq "") {
+  $compDef = "DELIVERED,BUILD_SUPPORT,TEST_SUPPORT";
+  print "INFO: No component group attribute specified.\n";
+  print "Using default component attribute definition of \"$compDef\".\n\n";
+}
+else {
+  # Process the component attribute list
+  my $onetime = 1;
+  print "\nComponent attributes specified:\n";
+  foreach $compAttr (sort split(/ /, $compAttrList)) {
+    print "$compAttr\n";
+    if ($onetime) {
+      $compDef = $compAttr;
+      $onetime = 0;
+    } else {
+      $compDef = $compDef . "," . $compAttr;
+    }
+  }
+}
+
+#
+# Set up program parameters
+#
+if ($devMode) {
+  our $scriptPath = "${codePath}/edainfra/tools/enablement/dev/bin";
+} else {
+  our $scriptPath = "${codePath}/edainfra/tools/enablement/prod/bin";
+}
+
+# Process the previous summary log file information provided
+# the -s option on cmd line
+if ($prevSummaryLogFile ne "") {
+  open (PREV_RUN, "$prevSummaryLogFile")
+    or die "Cannot read $prevSummaryLogFile $!\n";
+  chomp(@prevRun = <PREV_RUN>);
+  close(PREV_RUN);
+
+  foreach $compLine (@prevRun) {
+
+    my ($excludedComp) = (split(/;/, $compLine)) [0];
+    #print "excludedComp:  $excludedComp\n";
+
+    # Create a hash containing component names not to be processed
+    if (! exists $excludeCompHash{$excludedComp}) {
+      $excludeCompHash{$excludedComp} = "";
+    }
+  }
+}
+
+# Start the logging
+log_execution ("start", "full_TK");
+
+print "Using component definition: \"$compDef\"\n";
+
+#
+# Get the TK version-specific component definition
+#
+my $cmdbCmd = "$scriptPath/getComponents -t $tkVersion -ct $compDef -q $dbType";
+$compList = `$cmdbCmd`;
+chomp ($compList);
+$rc = $? >> 8;
+
+if ($rc) {
+  print "ERROR: Return code $rc from $cmdbCmd.\n";
+  exit $rc;
+} else {
+  print " \n";
+  print "Component list created. rc=$rc\n";
+  if ($DEBUG) {
+    print "Results:\n";
+    $compCnt = 0;
+    foreach $comp (sort split(/,/, $compList)) {
+      $compCnt++;
+      print "$compCnt) $comp\n";
+    }
+  }
+}
+
+# Convert tkVersion for use in summary file name
+#$tkVer = TkCommon::convert_tkVersion ($tkVersion, "selfstore");
+
+# Define summary files
+#$codePath = "/afs/eda/u/ehull";
+
+if ($devMode) {
+  our $logDirPath = "$codePath/edainfra/tools/enablement/dev/logs";
+} else {
+  our $logDirPath = "$codePath/edainfra/tools/enablement/prod/logs";
+}
+
+# Create the logs directory if it does not exist
+if (! -d $logDirPath) {
+  `mkdir -p $logDirPath`;
+}
+
+# Human readable results
+my $resultsLogFilePath = "$logDirPath/doTK_AGTS_results_" . dateTimeStamp() . "_" . getppid() . ".log";
+unless (open (RESULTS_LOG_FILE, ">$resultsLogFilePath") ) {
+  die ("Output file $resultsFilePath cannot be opened.\n");
+}
+
+# Summary for reading from script
+# doTK_AGTS_20111121_112510_8650752.log
+my $summaryLogFilePath = "$logDirPath/doTK_AGTS_summary_" . dateTimeStamp() . "_" . getppid() . ".log";
+unless (open (SUMMARY_LOG_FILE, ">$summaryLogFilePath") ) {
+  die ("Output file $summaryLogFilePath cannot be opened.\n");
+}
+
+#
+# Process a command against the list of defined components  #####
+#
+$compCnt = 0;
+foreach $comp (sort split(/,/, $compList)) {
+  $compCnt++;
+  print "\n$compCnt) $comp\n";
+
+
+  #-----------------------------------------------------------------------------
+  # Determine file name for runAGTS log file (gets posted to summary log file below)
+  #-----------------------------------------------------------------------------
+  # Convert tkVersion for use in log file name
+  $tkVerUS = TkCommon::convert_tkVersion ($tkVersion, "underscore");
+
+  # Get the current date
+  create_timestamp;
+  $tgtScriptName = "runAGTS";
+  #$logSuffix = "devlog";
+  $logSuffix = "log";
+  $runAgtsLogPath = "$logTop/${monthDay}.${comp}.${tkVerUS}.${tgtScriptName}.${logSuffix}";
+
+  # Only process this component if it has not been previously processed
+  if (! exists $excludeCompHash{$comp}) {
+
+    $validCmd = "${scriptPath}/${tgtScriptName} -t $tkVersion -c $comp";
+
+    # Execute the command
+    TkCommon::runcmd("$validCmd", "$DEBUG");
+    $rc = $? >> 8;
+
+    if ($rc) {
+      $badCnt++;
+      print "\n[ERROR]: Command, \"$validCmd\", did NOT execute successfully\n";
+      $compResult = "FAIL";
+      $pctGood = (($goodCnt/$compCnt) * 100);
+    }
+    else {
+      $goodCnt++;
+      print "\nAGTS for component $comp completed successfully\n";
+      $compResult = "PASS";
+      $pctGood = (($goodCnt/$compCnt) * 100);
+    }
+
+    # Write to results file (human readable)
+    create_timestamp;
+    #printf RESULTS_LOG_FILE "%10s %5s AGTS for component %-15s %-10s total_comp_pass=%3s\, total_comp_fail=%3s\, total_pct_good=%3s\%\n",
+    printf RESULTS_LOG_FILE "%10s %5s AGTS for component %-15s %-10s total_comp_pass=%3s\, total_comp_fail=%3s\, total_pct_good=%4.1f\%\n",
+    $date_now, $time_now, $comp, $compResult, $goodCnt, $badCnt, $pctGood;
+
+    # Write to semicolon delimited summary file (script readable)
+    print SUMMARY_LOG_FILE "$comp;$rc;$runAgtsLogPath;\n";
+    }
+
+  else {
+    print "component $comp has already been processed\n";
+  }
+}
+
+print "\nThe script, $scriptName, finished with $badCnt out of $compCnt components having errors.\n";
+
+log_execution ("end", "");
+print "\nLOG file located at $logFile\n\n";
+close (STDOUT);

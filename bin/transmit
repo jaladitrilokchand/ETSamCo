@@ -1,0 +1,1682 @@
+#!/usr/bin/env perl
+#===============================================================================
+# Program Name: transmit
+#
+# Purpose  : Performs the transmittal operation in the 14.1 release system.
+#            Performs transmittal (interface to PI&R) for given component/release.
+#
+# Notes:
+#   (1) The input is a component/release pair (e.g. model.1401)
+#   (2) NOAUTOPACK: Several components trigger a question in the old script to the
+#       transmitter regarding the suspension of autopacking. They include ciwipc,
+#       ciwtk, 3dxutils, synz, tla, idme, tcl, release, xerces, pwrspice/9.1.
+#       The -P flag provided so transmitter can turn off autopackaging.
+#   (3) Check mode (no-op, just show what would have been done); uses -c switch.
+#   (4) Send all files if forced / ignore the prev file; uses -R switch.
+#   (5) For each .ship-<platform> directory the script will:
+#       (a) find the files visibile through that directory and create a
+#           .curr-<platform> list.%
+#       (b) turn any files linked to nutshell into *_link files.
+#       (c) compare that list to the .prev-<platform> list.
+#       (d) compare the resultant list to the .dont_ship file (or file manifest
+#           if it can be made to serve double duty).
+#       (e) produce a file contaning files to send and change records included
+#           in the format that SelfStore expects. This file is passed to the
+#           sendxmit command.
+#   (6) SENDXMIT
+#       (a) sendxmit command / check for success
+#       (b) The prefix args, used by sendxmit, specify the top level directory
+#           name for the component.
+#       (c) The 'auto_package' flags and/or 'move to GA' flags set for the
+#           sendxmit command.
+#       (d) Tested successfully on 08/11/11 for first 14.1 component (model/14.1).
+#   (7) Code will continue if no .prev file.
+#   (8) Filters out dot files in bin & dll dirs.
+#   (9) E-mail for transmittal by platform 
+#  (10) Code implemented so print output also writes to log file.
+#
+#===============================================================================
+# Change History:
+#-------------------------------------------------------------------------------
+# 08/12/11 AM Initial version; derived from Perl code written for release 13.1
+#             Updated to decouple transmittal operations from CMVC. This involved
+#             creation, removal, and modification of various subroutines.
+#             Updated to remove dependency on LEVELHIST file as the basis for
+#             which change records should be included in a component transmittal.
+#             Updated to interface with the CM DB to get the change records for a
+#             given component.
+# 08/15/11 AM Turned on mail to send change record list for development work only.
+#             sub mail_change_record_list.
+# 08/29/11 AM Added code to mark CRs as transmitted (sub mark_cr_transmitted).
+# 09/13/11 AM Updated to remove component switch from changeReqUpdateAll API
+#             call to CM DB.
+# 11/07/11 AM Made the default for eda_t_dir to be ~svnlib/xmittals. This is where
+#             the xmittal list files will be kept.
+# 01/10/12 GS Fixed problem where files in dont_ship list were not filtered out
+#             from new deliverables list. Refactored code to be more readable.
+#             Updated to send system emails to me instead of Art.
+#             Updated so prev_ship file contains deliverables that were actually
+#             xmitted and not all the ship files.
+# 01/11/12 GS Fixed problem where _link files were not added into the xmit list.
+#             Updated GetChangeReq function to return a list of CR that match
+#             the revisions it ship or tk.
+#             Updated SetShipFiles to use unix find command since File::Find
+#             has trouble with duplicate symlinks.
+# 01/12/12 GS Fixed problem with bin directories missing some files.
+# 01/13/12 GS Updated process to find Ship/Bin files.
+# 01/19/12 GS Updated to read the user specified Patch to determine the CRs.
+# 01/23/12 GS Updated to get the user CQ user id since this script must be run as
+#             svnlib and svnlib does not have a CQ id.
+# 01/24/12/GS Updated the Mail function to read CR data from the DB and populate
+#             the email with accurate change data.
+# 01/26/12 GS Updated SetChangeRequests to read/process the RCs correctly.
+# 02/03/12 GS Updated to take multiple patches on the command line.  Moved the
+#             mail step to the end of the process to avoid unnecessary emails.
+#             Updatd Transmit function to read the RC and the sendxmit message to
+#             determine if the command was successful or not since the sendxmit
+#             RC is not accurate at this time. Turned on strict and warnings
+#             which required major rework to get clean.
+# 02/23/12 GS Fixed a bug in Transmit().
+# 02/28/12 GS Updated how the sendxmit results are tested as successful. Updated
+#             Mail function to use the edacm_release. Updated so all platforms are
+#             run even if 1 fails (keeps spin numbers consistent across
+#             all platforms). Updated Getopt to not ignore case. Updated email
+#             addresses and removed Gene.
+# 03/05/12 GS Fixed bug in how sendxmit message was parsed to determine success.
+# 04/03/12 GS Removed Steve Calvin from notification list.
+# 05/30/12 GS MDCMS00117011 - updated to include all ship files in the prev file
+#             which prevents files that were not updated from being transmitted.
+#             MDCMS00122511 - added dll/binary consistency check across platforms.
+#             MDCMS00116947 - dded check to ensure command line comp name matches
+#             component associated with patch.
+#             Cleaned up code and added verbose mode to hide details from user.
+# 12/12/12 EH Added call to bomChecker.xmit2ss for MDCMS00131758.
+# 02/01/13 GS Added support for -C switch that will allow a single change 
+#             request to be passed.  Needed for recopiles when there are no svn
+#             commits and no developer CRs.  The doTK_xmit script will create a
+#             CR so the updates can be xmitted by this script.
+# 02/06/13 GS Changed -C to -z and fixed a bug with singleCr processing.
+#             Added -q to subdue user interaction (for batch processing)
+# 03/12/13 GS Updated so user does not have to enter CQ password anymore.
+# 08/19/13 GS Removed Nan and Barb from mail list.
+#===============================================================================
+
+use warnings;
+use strict;
+
+# Packages and constants
+use Env;
+use File::Find;
+use Getopt::Long qw(:config no_ignore_case);
+use File::Basename;
+use Time::Local;
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TkCommon;
+
+# Global variables
+my $userID = $LOGNAME;
+my $scriptName = "transmit";
+my $fullScrName = $0;
+my $command;
+my @results;
+
+my $rc = 0;
+my $maxRc = 0;
+
+# Change record variables
+our @crList = ();
+my $crRec = "";
+
+# Client/server code
+my $sendxmit = "/afs/eda/edadist/tools/xmit/sendxmit";
+
+# set trap for INT
+$SIG{'INT'} = sub { goodbye(); };
+
+# Command line options
+my $compName;        # $opt_c
+my $devMode;         # $opt_d
+my $tkVersion;       # $opt_v
+my $tkPatches;       # $opt_T
+my $debug = 0;       # $opt_g
+my $postMaint = 0;   # $opt_m
+my $userPlatforms;   # $opt_p
+my $noAutoPackage;   # $opt_P
+my $replaceAll = 0;  # opt_R
+my $useShip = 0;     # $opt_s
+my $useTk = 0;       # $opt_t
+my $verbose = 0;     # $opt_y
+my $singleCr = "";   # opt_z
+my $quiet = 0;      # opt_q
+my @patches = ();
+ProcessArgs();
+
+
+# Verify the user can run this script
+exit 8 if (! ValidateUser());
+
+
+# Validate tkVersion
+$rc = TkCommon::check_tkVersion($tkVersion);
+if ($rc) {
+  print "\n>>> ERROR <<<\n";
+  print "The TK version, $tkVersion, has an invalid format. ";
+  print "Should be \"14.1.{n}\".\n";
+  exit $rc;	
+}
+else {
+  print "The TK version, $tkVersion, has a valid format.\n" if ($verbose);
+}
+
+
+# Validate the transmit from level
+if (! $useShip && ! $useTk) {
+  print "\n>>> ERROR <<<\n";
+  print "You must specify ship (-s) or tk (-t) ...quitting\n\n";
+  exit 8;
+}
+if ($useShip && $useTk) {
+  print "\n>>> ERROR <<<\n";
+  print "-s and -t are mutually exclusive, you must use one or the other ";
+  print "... quitting\n\n";
+  exit 8;
+}
+
+
+# Use product for component name to maintain compatability
+our $product = $compName;
+
+
+# Get Selfstore release format from tkVersion
+my $verType = "selfstore";		# selfstore format, e.g. 1401
+my $zf_version;
+my $dot_version;
+($rc, $zf_version) = TkCommon::convert_tkVersion($tkVersion, $verType);
+if ($rc == 0) {
+  # Get release format from tkVersion
+  $verType = "release";		# release format, e.g. 14.1
+  ($rc, $dot_version) = TkCommon::convert_tkVersion($tkVersion, $verType);
+  if ($rc != 0) {
+    print "\n>>> ERROR <<<\n";
+    print "Unable to convert tkVersion \"$tkVersion\" into release format.\n";
+    exit 8;
+  }
+}
+else {
+  print "\n>>> ERROR <<<\n";
+  print "Unable to convert tkVersion \"$tkVersion\" into SelfStore format.\n";
+  exit 8;
+}
+
+if ($debug && $verbose) {
+  print "tkVersion: \"$tkVersion\"  zf_version: \"$zf_version\"  ";
+  print "dot_version: \"$dot_version\"\n";
+}
+
+
+# Define component.release in SelfStore format
+my $edacm_release = "${product}.${zf_version}";
+
+
+# Default is production
+my $dbType = "-db PROD";
+my $scriptPath = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $ship_path = "/afs/eda/ship";
+my $tk_path   = "/afs/eda/tk";
+if ($devMode) {
+  # development mode-specific declarations
+  $dbType = "-db DEV";
+  $scriptPath = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+  $ship_path = "/afs/eda/u/svnlib/ship";
+  $tk_path   = "/afs/eda/u/svnlib/tk";
+}
+
+
+# Set the source directory path and urgent flag if tk
+my $src_base_path;
+my $urgent = "";
+if ($useShip) {
+  $src_base_path = "$ship_path/$product/$dot_version";
+}
+else {
+  $src_base_path = "$tk_path/$product/$dot_version";
+  $urgent = " -u";
+}
+print "sbp: $src_base_path  urgent: $urgent \n" if ($verbose);
+
+# Invoke xmit2selfstore BOM comparison
+# Add checking of return code later after the initial deployment phase is complete
+CompareXmit2SelfstoreBOM($compName, $useShip, $useTk);
+
+# Common xmit code sourced here 
+do "/afs/eda/data/edainfra/tools/enablement/prod/bin/xmit_common";
+our %plat_map;
+
+
+# Determine specific files that should be filtered from xmittal, if any,
+# based on contents of the .ship-{platform}/.dont_ship file.
+my %dont_ship = ();
+SetDontShip();
+
+
+# Set the shipdirs
+my @shipdirs = ();
+my $sd = "";
+if ($userPlatforms) {
+  # Set base path directories according to platform list provided.
+  my $p;
+  foreach $p (split(" ", $userPlatforms)) {
+
+    print "looking for $p....";
+    $sd = "$src_base_path/.ship-${p}";
+
+    # Check to make sure dir exists
+    if (-d "$sd") {
+      print "found\n";
+      push(@shipdirs, $sd);
+    }
+    else {
+      # not added to list
+      print "\n>>> ERROR <<<\n";
+      print "$p does not have a .ship- directory\n";
+    }
+  }
+}
+else {
+  # set base path directories according to the .ship dirs we find
+  @shipdirs = glob("$src_base_path/.ship*");
+  if ($debug) {
+    print "\nSHIP Platform dirs to process:\n";
+    foreach $sd (@shipdirs) {
+      print "  $sd\n";
+    }
+    print "\n";
+  }
+}
+print "EDACM_RELEASE: $edacm_release\n" if ($verbose);
+
+
+# Set up the log file
+my $year = `date +%Y`;
+chomp $year;
+my $log_date = make_log_date(time());
+my $logPath = "$ENV{HOME}/xmittals/$year";
+if (! -d $logPath) {
+  `mkdir -p $logPath`;
+}
+my $logFile = "${logPath}/${edacm_release}.${log_date}";
+
+
+# Open a log file for writing and initialize the execution start time
+Log("start", $edacm_release, $userID, $logFile);
+
+
+# Test to see if an environment variable sets the "tmp" dir for this transmittal
+my $eda_t_dir;
+if ($ENV{"EDA_t_dir"}) {
+  print "environment var \$EDA_t_dir is set...using $ENV{EDA_t_dir}\n" if ($verbose);
+  $eda_t_dir = $ENV{"EDA_t_dir"};
+}
+else {
+  print "\$eda_t_dir set to /tmp\n" if ($verbose);
+  $eda_t_dir = "/afs/eda/u/svnlib/xmittals";
+}
+
+
+# Set SelfStore flags based on operational parms
+my $maint_flag = "";
+my $replace = "";
+
+# POST MAINT update; move packaged transmittal from TEST to GA.
+$maint_flag = " -m" if ($postMaint);
+
+# Turn OFF auto-packaging in SelfStore
+$replace    = " -P" if ($noAutoPackage);
+
+# REPLACE all files in SelfStore.
+$replace    = " -r" if ($replaceAll);
+
+if ($verbose) {
+  print "Source base path is set to: $src_base_path\n";
+  print "p: $product dv: $dot_version zf: $zf_version\n";
+}
+
+
+# Retrieve the list of Change Requests (CR) that are in the COMPLETE state in
+# CM DB or are part of the TK Patch.
+$rc = SetChangeRequests($tkVersion, $product, $scriptPath, $dbType,
+                        $debug, $singleCr);
+exit $rc if ($rc != 0);
+
+
+# Create a list of new deliverables to be delivered
+my %prev_filesT = ();
+my %prev_filesS = ();
+my %link_files = ();
+my %ship_filesT = ();
+my %ship_filesS = ();
+my %newDeliverables = ();
+my $files_found = 0;
+ReadNewShipDeliverables();
+if (! $files_found) {
+  print "No new files to transmit, nothing to do ... quitting\n";
+  goodbye();
+}
+
+if (! VerifyDeliverables()) {
+  print "\n>>> WARNING <<<\n";
+  print "Some dlls and/or binaries not found for all platforms!\n";
+  if (! $quiet) {
+    print "\nDo you want to continue (y/n)? ";
+    my $answer =  <STDIN>;
+    chomp $answer;
+    goodbye() if ((lc($answer) eq "n") || (lc($answer eq "no")));
+  }
+}
+
+
+# The prefix overrides what base path the SelfStore files use for packaging and
+# ultimately which base directory they get installed in.
+# For example: code sent from oa_server/13.1 will get installed in oa/13.1
+# if $prefix = "oa/13.1"
+# tcl and tclz have the path set up correctly already within the .ship* dirs
+my $prefix = " -p $product/$dot_version";
+if (($product eq "ddm") || ($product eq "tgsupport")) {
+  $prefix = "";
+}
+elsif ($product eq "DCLrte") {
+  $prefix = "-p dcl/$dot_version";
+}
+elsif (($product eq "fusion") || ($product eq "TLT_env") ||
+       ($product eq "EDAdochtml")) {
+  $prefix = "";
+}
+else {
+}
+print "\nprefix for transmittal set to: $prefix\n" if ($verbose);
+
+
+# Iterate over SHIP platform dirs for one component
+my $xmit_file;
+my $plat;
+my $xmittal;
+my $list_plat;
+foreach $sd (@shipdirs) {
+  print "\nStarting transmittal of $sd ...\n";
+	
+  # $list_plat contains the platform in a format that the transmittal expects
+  ($plat) = $sd =~ /$src_base_path\/\.ship-(\S+)/;
+  $list_plat = $plat_map{$plat};
+	
+  print "Querying integ for xmittal authorization .... ";
+  my $status =
+    system("$sendxmit -a ${product}.${zf_version}.${list_plat} > /dev/null 2>&1");
+  if ($status) {
+    print " Failed\n";
+    print "\n>>> ERROR <<<\n";
+    die "Xmittal cannot go forward, aborting\n";
+  }
+  else {
+    print "Okay\n";
+  }
+	
+  # check for writability to .ship dir
+  if (! CheckFileWritable($sd)) {
+    print "\n >>> ERROR <<<\n";
+    print " $sd is NOT writable\n";
+    die "Xmittal cannot go forward ... aborting\n";
+  }
+  else {
+    print " $sd .... writable\n";
+  }
+	
+  # Create transmittal file
+  SetXmitFile($product, $zf_version, $list_plat, @crList);
+
+  # Perform the transmittal
+  $rc = Transmit($sd, $debug);
+  print " Transmit rc: $rc\n";
+  $maxRc = $rc if ($rc > $maxRc);
+
+  # Do these steps only if transmit was successful
+  if ($rc == 0 || $debug) {
+
+    # Rename existing prev file to prior and write new prev file
+    if (-e "${sd}/prev.ship.list" && ! $debug) {
+      rename("${sd}/prev.ship.list", "${sd}/prior.ship.list");
+    }
+
+    # Save the file results of this transmittal
+    WritePrevFile($sd, $plat);
+
+  }
+  else {
+    print "Skipping prev.ship.list processing (rc != 0 or debug mode)\n";
+  }
+
+}
+
+
+# Complete the transmittal processing if xmit was successful
+if (! $debug && $maxRc == 0) {
+
+  # Mark the CR records that were transmitted with "TRANSMITTED" state.
+  MarkChangeRequestsXmitted($compName, $scriptPath, $dbType, $debug, @crList);
+
+  # Send email
+  MailChangeRecords($compName, $urgent, @crList);
+
+}
+else {
+  print "Skipping CR updates and notification steps (rc != 0 or debug mode)\n";
+}
+
+# Clean up after all operations complete
+Log("end", $edacm_release, $userID, $logFile);
+
+
+goodbye();
+
+
+#---------------------------------------------------------------------------------
+# Show script usage/help
+#---------------------------------------------------------------------------------
+sub help {
+
+  # c:dghmp:T:PRstv:C:"
+  print "\n";
+  print "transmit <-v TK> <-c component> <-s|-t> \n";
+  print "         [-T TK_patch] [-p <platform_list>] [-dghimqPRy] \n\n";
+  print " REQUIRED:\n";
+  print "  -c  component name [ess, hdp, asf ...]\n";
+  print "  -v  TK version [14.1.0, 14.1.1 ..]\n";
+  print "  -s  transmit deliverables from ship OR\n";
+  print "  -t  transmit deliverables from tk\n";
+  print " OPTIONAL:\n";
+  print "  -d  run in development mode - use DEV code version and DEV CM DB.\n";
+  print "  -g  run in debug mode, show what would have been done ... \n";
+  print "  -h  script help\n";
+  print "  -m  post maintenance update, move xmit package from test to GA\n";
+  print "  -p  platform_list (override normal platforms with these platforms)\n";
+  print "  -q  quiet mode ... don't interact with user (for PK processing)\n";
+  print "  -P  turn off auto-packaging\n";
+  print "  -R  replace all files in Selfstore\n";
+  print "  -T  Comma delimited list of Patches (MDCMS00123456,MDCMS00123457)\n";
+  print "  -y  Verbose mode  [show messages]\n";
+  print "  -z  Change Request number ... used only by doTK_xmit for recompiles \n";
+  print "\n";
+  print "Examples:\n";
+  print " transmit -v 14.1.0 -c model -s  [ship xmit - initial tool kit]\n";
+  print " transmit -v 14.1.0 -c model -s -T MDCMS00123456  [xmit ship injects]\n";
+  print " transmit -v 14.1.0 -c model -t -T MDCMS00123456  [xmit TK injects]\n";
+  print " transmit -v 14.1.0 -c model -t -T MDCMS00123456,MDCMS001234567\n";
+  print "\n";
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Unlink files and terminate this script
+#
+# note: links in bin to nuthell/<r.v>/bin/nutsh are automatically removed from the
+#       list of candidate files for transmittal, they are not deleted from the
+#       actual bin dir, and do not need to be replaced/re-created in the bin dir
+#       the "link files" created so that SelfStore knows there is a link do need
+#       to be deleted though.
+#---------------------------------------------------------------------------------
+sub goodbye {
+
+  print "\nExit through goodbye()\n";
+  my $lf;
+  foreach $lf (keys(%link_files)) {
+    print "removing: $lf\n";
+    unlink($lf);
+  }
+
+  exit;
+
+}
+
+
+#---------------------------------------------------------------------------------
+# Description  : This routine processes command line parameters
+# Parms defined:  -c <component_name>    e.g. einstimer
+#                 -d  Development mode ON - using code from DEV area
+#                 -g  Debug mode ON - no execution of data updates -
+#                     will see what would execute.
+#                 -h  Help
+#                 -m  POST MAINT update; move packaged transmittal from TEST to GA.
+#                 -p <platform_list>  Override normal platform list with a user's
+#                                     platforms
+#                 -q  Quiet mode
+#                 -s  Transmit code from EDA SHIP
+#                 -t  Transmit code from EDA TK
+#                 -T  Tool Kit Patch number (MDCMS12345678) 
+#                 -v <Toolkit version>   e.g. 14.1.0
+#                 -P  Turn OFF auto-packaging in SelfStore.
+#                 -R  Replace ALL files in SelfStore.
+#                 -z  <CR> used by doTK_xmit to pass a CR to support recompiles
+#---------------------------------------------------------------------------------
+sub ProcessArgs {
+
+  # Parse command line arguments
+  my $help = 0;
+  GetOptions('c=s' => \$compName,
+	     'd'   => \$devMode,
+	     'g'   => \$debug,
+	     'h'   => \$help,
+	     'm'   => \$postMaint,
+	     'p=s' => \$userPlatforms,
+	     'P'   => \$noAutoPackage,
+	     'q'   => \$quiet,
+	     'R'   => \$replaceAll,
+	     's'   => \$useShip,
+	     't'   => \$useTk,
+	     'T=s' => \$tkPatches,
+	     'v=s' => \$tkVersion,
+	     'y'   => \$verbose,
+	     'z=s' => \$singleCr
+	    ) || return 8;
+
+  # Show the help and quit
+  if ($help) {
+    help;
+    exit 0;
+  }
+
+  # Create a list of patches
+  if ($tkPatches) {
+    @patches = split(/,/, $tkPatches);
+  }
+
+  # Validate new -z usage (only used in ship)
+  if (($singleCr ne "") && ! $useShip) {
+    print "ERROR: -z switch is only support for ship transmits\n";
+    help;
+    exit 0;
+  }
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Display the operational parameters for this transmittal
+# getopts("c:dghmp:PRstv:")
+#
+#---------------------------------------------------------------------------------
+sub DisplayOpts {
+
+  if ($compName) {
+    print "EDA tool component being transmitted: \"$compName\".\n";
+  }
+  if ($devMode) {
+    print "-d switch set: DEVELOPMENT Mode is ON; Using non-production code and ";
+    print "DEV CM DB.\n";
+  }
+  if ($debug) {
+    print "-g switch set: DEBUG mode is ON; this is a dry run.\n";
+  }
+  if ($postMaint) {
+    print "-m switch set: This is a POST MAINT transmittal; move packaged ";
+    print "transmittal from TEST to GA.\n";
+  }
+  if ($userPlatforms) {
+    print "PLATFORM override selected.\n";
+    print "Will process $userPlatforms.\n";
+  }
+  if ($useShip) {
+    print "-s switch set: Transmittal is from EDA SHIP.\n";
+  }
+  if ($useTk) {
+    print "-t switch set: Transmittal is URGENT from EDA TK.\n";
+  }
+  if ($noAutoPackage) {
+    print "-P switch set: Autopackaging step will be skipped in SelfStore.\n";
+  }
+  if ($replaceAll) {
+    print "-R switch set: Transmittal will REPLACE all files in SelfStore.\n";
+  }
+  if ($tkPatches) {
+    print "TK Patch(es) being processed \"$tkPatches\".\n";
+  }
+  if ($tkVersion) {
+    print "Transmittal is being processed for TK version \"$tkVersion\".\n";
+  }
+  if ($verbose) {
+    print "Verbose mode: ON\n";
+  }
+  if ($singleCr) {
+    print "Single change request: $singleCr\n";
+  }
+  if ($quiet) {
+    print "Quiet mode: ON\n";
+  }
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Define the logging, execution timestamps
+#
+#---------------------------------------------------------------------------------
+sub Log {
+
+  my ($when, $edacm_rel, $userID, $logFile) = @_;
+
+  if ($when eq "start") {
+
+    my $start_time = make_date_string();
+
+    unless (open(STDOUT, "| tee -ai $logFile")) {
+      die ("Output file $logFile cannot be opened.\n");
+    }
+    open (STDERR, ">&STDOUT");
+		
+    # Log the start time
+    print "#\n";
+    print "# Transmittal operation for $edacm_rel started $start_time ";
+    print "by $userID\n";
+    print "#\n";
+		
+    # Display the options selected on the command line
+    DisplayOpts;
+		
+  }
+  elsif ($when eq "end") {
+
+    my $stop_time = make_date_string();
+		
+    # Log the end time
+    print "#\n";
+    print "# Transmittal operation for $edacm_rel ended $stop_time by $userID\n";
+    print "#\n";
+    print "\nLOG file: $logFile\n";
+
+  }
+  else {
+    print "\n>>> ERROR <<<\n";
+    print "Log: Can't figure out what I need to log!\n";
+
+  }
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Determine if file in question is writable
+#
+#---------------------------------------------------------------------------------
+sub CheckFileWritable {
+
+  my ($dir) = @_;
+  my $file = "${dir}/test_writable";
+	
+  print "Checking write access ...\n";
+  `/usr/bin/touch ${file} > /dev/null 2>&1`;
+  if ( -e $file) {
+    unlink $file;
+    return "true";
+  }
+  else {
+    return 0;
+  }
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Convert links to nutshell into *_link files. Remove these entries from the
+# ship_files* collections. Keep track of these links so they can be removed
+# upon completion.
+#
+# IN: $plat
+#     $file (in bin directory)
+# OUT: %link_files
+#	
+#---------------------------------------------------------------------------------
+sub CreateLinkFiles {
+
+  my($plat, $shipDir) = @_;
+
+  if ($verbose) {
+    print "Creating link files ... \n";
+    print " Platform: $plat\n";
+    print " Ship dir: $shipDir\n";
+  }
+
+  my $shipFile;
+  foreach $shipFile (sort(keys(%{$ship_filesT{$plat}}))) {
+    next if ($shipFile !~ /^bin/);   # only process bin* files
+
+    print " File: $shipFile\n";
+    $shipFile = "$shipDir/$shipFile";
+    print "  => $shipFile\n";
+
+    # If file is a link
+    if (-l $shipFile) {
+      my $ls_result = `ls -l $shipFile`;
+
+      # If link points to nutshell then replace it *_link sym link
+      if ($ls_result =~ /nutsh$/) {
+	my $nver;
+	($nver) = $ls_result =~ m|/nutshell/([\d\.]+)/|;
+	my $bdir = dirname($shipFile);
+	my $bfile = basename($shipFile);
+	
+	my $lfile = "$bdir/${bfile}_${nver}_link";
+	print "  => $ls_result  ";
+	print "  lf: $lfile\n";
+			
+	# Remove the original sym link from the ship list and add the
+	# new *_link file
+	my $relpath_file;
+	my $relpath_lfile;
+	($relpath_file = $shipFile) =~ s/$shipDir\///;
+	($relpath_lfile = $lfile) =~ s/$shipDir\///;
+
+	#print "  RelPath_file: $relpath_file\n";
+	#print "  RelPath_lfile: $relpath_lfile\n";
+	
+	$ship_filesT{$plat}{$relpath_lfile} = $ship_filesT{$plat}{$relpath_file};
+	$ship_filesS{$plat}{$relpath_lfile} = $ship_filesS{$plat}{$relpath_file};
+	
+	delete $ship_filesT{$plat}{$relpath_file};
+	delete $ship_filesS{$plat}{$relpath_file};
+		
+	if (! $debug) {
+
+	  # Create a list of link files to clean up later
+	  $link_files{$lfile} = "t";
+	
+	  # note: link file is empty, path is assumed to be back to nutshell
+	  open(LF, ">$lfile") or
+	    die "link file: $lfile could not be created...exiting\n";
+	  close(LF);
+	}
+
+      }
+
+    }
+
+  }
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Get list of change records for this transmittal
+#
+#---------------------------------------------------------------------------------
+sub SetChangeRequests {
+
+  my ($tkVersion, $compName, $scriptPath, $dbType, $debug, $singleCr) = @_;
+  @crList = ();
+
+  # Look up the Change Requests
+  my $subName = "";
+  my $myRc = 0;
+  if ($tkPatches) {
+    $myRc = SetPatchChangeRequests($scriptPath, $dbType, $debug);
+    $subName = "SetPatchChangeRequests()";
+  }
+  else {
+    $myRc = SetPreviewChangeRequests($tkVersion, $compName, $scriptPath,
+				     $dbType, $debug, $singleCr);
+    $subName = "SetChangeRequests()";
+  }
+
+  # Message results to the user
+  if ($myRc == 8) {
+    print "\n>>> ERROR <<<\n";
+    print "Return code $myRc from $subName.\n";
+  }
+  elsif ($myRc == 2) {
+    print "WARN: No change records, in found for $compName.\n";
+    print "      No transmittal required.\n";
+  }
+  else {
+    print "INFO: Change records, found for component $compName and/or Patch.\n";
+    if ($debug) {
+      print "Change records to include in transmittal. rc=$myRc:\n";
+      foreach $crRec (@crList) {
+	print "$crRec\n";
+      }
+    }
+  }
+
+  return $myRc;
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Get list of change records in COMPLETE state from CM DB
+# - Determine the latest revision in ship/tk for this TK/component
+# - Create a list of completed CRs which don't exceed the latest revision
+#
+#---------------------------------------------------------------------------------
+sub SetPreviewChangeRequests {
+
+  my ($tk, $compName, $scriptPath, $dbType, $debug, $singleCr) = @_;
+  my $state = "complete";
+  my $crData;
+  my $crRec;
+  my $crCmd;
+  my $rc = 0;
+  my $crRC = 0;
+
+  # New -z support .. doTK_xmit passed a single CR created for a component
+  # that did a recompile and had no actual svn commits but does have changes
+  # that need to be xmitted. This CR will not appear in the changeReqShowByStatus
+  # query since it is not associated with a svn revision.
+  if ($singleCr ne "") {
+    push(@crList, $singleCr);
+    return $rc;
+  }
+
+  # Get the revision for the xmit source location
+  my $command = "$scriptPath/getRevisionsTk $dbType -c $compName -latest";
+  if ($useShip) {
+    $command .= " -l ship";
+    $tk = "14.1.build";  # Set to 14.1.build for preview only xmits
+  }
+  elsif ($useTk) {
+    $command .= " -l tk";
+  }
+  else {
+    print "\n>>> ERROR <<<\n";
+    print "unrecognized location ... neither ship or tk\n";
+    return 8;
+  }
+
+  my $revision = `$command`;
+  chomp ($revision);
+  my $cRC = $? >> 8;
+  if ($cRC == 0) {
+    $rc = 0;
+    print "INFO: Latest revision: $revision\n";
+  }
+  else {
+    return 8;
+  }
+
+  # Create a list of CRs for revisions equal to or less than the
+  # latest revision in ship/tk
+  $crCmd = "$scriptPath/changeReqShowByStatus $dbType -t $tk ";
+  $crCmd .= "-c $compName -s $state -max $revision";
+  my @results = `$crCmd`;
+  $crData = $results[0];
+  chomp ($crData);
+  $crRC = $? >> 8;
+
+  if ($crRC == 0) {
+    $rc = 0;
+    print "INFO: Change record list created for $compName in TK version ";
+    print "$tk. rc=$rc\n";
+    @crList = split(';', $crData);
+    if ($debug) {
+      print "Change records:\n";
+      foreach $crRec (sort split(/;/, $crData)) {
+	print "$crRec\n";
+      }
+    }
+  }
+  elsif ($crRC == 2) {
+    $rc = 2;
+    print "INFO: No change records found for $compName in TK version ";
+    print "$tk. rc=$crRC from $crCmd.\n";
+  }
+  elsif ($crRC == 1) {
+    $rc = 8;
+    print "\n>>> ERROR <<<\n";
+    print "Return code $crRC from $crCmd.\n";
+  }
+  else {
+    $rc = 8;
+    print "\n>>> ERROR <<<\n";
+    print "Unknown return code $crRC from $crCmd.\n";
+  }
+
+  return $rc;
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Get list of change records from the user specified TK patch
+#
+#---------------------------------------------------------------------------------
+sub SetPatchChangeRequests {
+
+  my ($scriptPath, $dbType, $debug) = @_;
+  my $rc = 0;
+  my $cr;
+
+  # Get the users CQ user id and password
+  my $id = "svnlib\@us.ibm.com";
+
+  my @results = `cat /afs/eda/u/svnlib/private/svnlib.funcid`;
+  my $myRc = $? >> 8;
+  if ($myRc != 0) {
+    print "ERROR: unable to read SVNLIB password!\n";
+    return 8;
+  }
+  my $pw = $results[0];
+  chomp $pw;
+
+  # Get the CRs for each patch
+  print "\nFetching patch data from ClearQuest ... please be patient.\n";
+  my $patch;
+  foreach $patch (@patches) {
+    print " Patch: $patch\n";
+    $patch =~ s/^\s+//;    # Remove leading spaces
+    $patch =~ s/\s+$//;    # Remove trailing spaces
+    my $command = "$scriptPath/patch.reqs -p $patch -pw $pw -u $id";
+    my @tmpList = `$command`;
+    my $rc = $? >> 8;
+    if ($rc != 0) {
+      return 8;
+    }
+
+    # Get the inject requests and component
+    my $entry;
+    my $found1 = 0;
+    my $found2 = 0;
+    my $patchComp = "";
+    foreach $entry (@tmpList) {
+      chomp $entry;
+      if (! $found1 && ($entry =~ /^---/)) {
+	$found1 = 1;
+	next;
+      }
+      if ($found1 && ($entry eq "")) {
+	$found2 = 1;
+	next;
+      }
+      if ($found1 && ! $found2) {
+	my @tokens = split(/ +/, $entry);
+	$patchComp = $tokens[1];
+	$cr = $tokens[2];
+	$cr =~ s/\s+$//;
+	push(@crList, $cr);
+      }
+    }
+
+    # Verify the component
+    if ($patchComp ne $compName) {
+      print "\n";
+      print ">>> ERROR <<<\n";
+      print "Component name passed on command line ($compName) does not\n";
+      print "match component name ($patchComp) associated with patch!\n";
+      print "Please confirm parameters and rerun ...\n";
+      print "\n";
+      return 8;
+    }
+  }
+
+  print " CRs: " . join(" ", @crList) . "\n";
+
+  return 0;
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Print files that will be transmitted for a given platform.
+#
+#---------------------------------------------------------------------------------
+sub ShowNewDeliverables {
+
+  my ($plat) = @_;
+
+  if (defined(@{$newDeliverables{$plat}})) {
+    print "\nNew or updated files found for $plat:\n";
+    print "----------------------------------------------------\n";
+  }
+  else {
+    print "\nNo new or updated files found for $plat\n";
+    return;
+  }
+
+  my $file;
+  foreach $file (@{$newDeliverables{$plat}}) {
+    print "$file\n";
+  }
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Update the prev.ship.list file with new deliverables, size and/or
+# timestamp data
+#
+#---------------------------------------------------------------------------------
+sub WritePrevFile {
+
+  my ($shipDir, $platform) = @_;
+
+  my $outfile = "${shipDir}/prev.ship.list";
+
+
+  # If debug write prev.ship.list contents to stdout vs file
+  print "\n";
+  if (! $debug) {
+    print "Writing ... $outfile\n";
+    open(OUT, ">$outfile") or die "cannot open output file: $outfile\n";
+  }
+  else {
+    print "New contents of prev.ship.list file ...\n";
+  }
+
+  my $file;	
+  foreach $file (sort(keys(%{$ship_filesT{$platform}}))) {
+    my $mtime = $ship_filesT{$platform}{$file};
+    my $fsize = $ship_filesS{$platform}{$file};
+    my $date_string = GetDateString($mtime);
+		
+    if (! $debug) {
+      printf OUT ("s: %12d t: %d (%s) %s\n", $fsize, $mtime, $date_string, $file);
+    }
+    else {
+      printf("s: %12d t: %d (%s) %s\n", $fsize, $mtime, $date_string, $file);
+    }
+  }
+
+  close(OUT) if (! $debug);
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Read the prev.ship.list files to determine files xmitted last time this
+# script was excuted.
+#
+# OUT: %prev_filesT
+#      %prev_filesS
+#
+#---------------------------------------------------------------------------------
+sub SetPrevFiles {
+	
+  my ($platform, $prevFile) = @_;
+  my $line;
+
+  # Skip this step if the user asked to replace all files.
+  return if ($replaceAll);
+
+  # Read the prev files - if prev file does not exist, assume new xmittal
+  if (-f $prevFile) {
+    open(PREV, "<$prevFile") or die "cannot open $prevFile\n";
+
+    foreach $line (<PREV>) {
+      my ($size, $time, $file) = $line =~ /^s:\s+(\S+)\s+t:\s+(\S+)\s+\(.+\)\s+(\S+)/;
+      $prev_filesT{$platform}{$file} = $time;
+      $prev_filesS{$platform}{$file} = $size;
+    }	
+
+    close(PREV);
+
+  }
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+#  Create a list of all files and directories  opened through the "transmittal
+#  window" symlinks in .ship*
+#
+# OUT: %ship_filesT
+#      %ship_filesS
+#
+#---------------------------------------------------------------------------------
+sub SetShipFiles {
+
+  my ($shipDir, $plat) = @_;
+
+  # Read the directory's contents
+  my @myShipFiles = `find -L $shipDir`;
+  my @myShipDirs = `find -L $shipDir -type d`;
+
+  my $shipFile;
+  foreach $shipFile (sort(@myShipFiles)) {
+
+    chomp($shipFile);
+    print "Found: $shipFile" if ($verbose);
+    if (grep(/^$shipFile$/, @myShipDirs)) {  # Skip directories
+      print " ... skipping (directory)\n" if ($verbose);
+      next;
+    }
+    print " ... is ok\n" if ($verbose);
+
+    # Get the file details - skipping files(links) that aren't real
+    next if (! -e $shipFile);
+    my ($fsize, $mtime) = (stat($shipFile))[7,9];
+    print "s: $fsize\tt:$mtime\t$shipFile\n" if ($verbose);
+	
+    # Get the relative path
+    my $relpath_file;
+    ($relpath_file = $shipFile) =~ s/$shipDir\///;
+		
+    # Filter out files using subroutine defined in xmit_common
+    print "testing: $relpath_file...." if ($verbose);
+    if (! valid_file($relpath_file)) {
+      print "excluded\n" if ($verbose);
+      next;
+    }
+    else {
+      print "included\n" if ($verbose);
+    }
+
+    $ship_filesT{$plat}{$relpath_file} = $mtime;
+    $ship_filesS{$plat}{$relpath_file} = $fsize;
+
+  }
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Check ship_files for timestamp or size changes
+#
+# OUT: @(%newDeliverables)
+#
+#---------------------------------------------------------------------------------
+sub SetNewDeliverables {
+
+  my($platform) = @_;
+
+  my $shipFile;
+  foreach $shipFile (sort(keys(%{$ship_filesT{$platform}}))) {
+
+    # Skip files if they're also in the dont_ship list
+    if (exists($dont_ship{$shipFile})) {
+      print "Not sending file: $shipFile  \n\t dsf: $dont_ship{$shipFile}\n";
+      next;
+    }
+		
+    if (! exists $prev_filesT{$platform}{$shipFile}) {
+      print "New file: $shipFile\n" if ($verbose);
+      push(@{$newDeliverables{$platform}}, $shipFile);
+    }
+    elsif ($ship_filesT{$platform}{$shipFile} >
+	   $prev_filesT{$platform}{$shipFile}) {
+      print "Updated file(time): $shipFile\n" if ($verbose);
+      push(@{$newDeliverables{$platform}}, $shipFile);
+    }
+    elsif ($ship_filesS{$platform}{$shipFile} !=
+	   $prev_filesS{$platform}{$shipFile}) {
+      print "Updated file(size): $shipFile\n" if ($verbose);
+      push(@{$newDeliverables{$platform}}, $shipFile);
+    }
+    else {
+    }
+
+  }
+	
+  # set flag if files found
+  if (defined(@{$newDeliverables{$platform}}) &&
+      scalar(@{$newDeliverables{$platform}}) > 0) {
+    if ($verbose) {
+      print "Current files array is populated (non-empty) for $platform\n";
+    }
+    $files_found = 1;
+  }	
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Read the files from .dont_ship file that represent the files that are to be
+# filtered and not sent as part of the transmittal list for a given component.
+#
+# OUT: %dont_ship
+#
+#---------------------------------------------------------------------------------
+sub SetDontShip {
+
+  my $ds = "$src_base_path/.dont_ship";
+	
+  # not all comps have .dont_ship files
+  if (-f $ds) {
+
+    open(DONT, "<$ds") or die "cannot open dont_ship file: $ds....exiting\n";
+
+    my $file;	
+    foreach $file (<DONT>) {
+      print "ds: $file";
+      chomp $file;  # remove return char
+      $dont_ship{$file} = "t";
+    }
+
+    close(DONT);
+
+  }
+
+}
+
+
+#-------------------------------------------------------------------------------
+#
+# For each ship directory determine which files have changed since the
+# last transmittal
+#  - Read the prev file unless (user asked to replace all files)
+#  - Locate all files in the xmittal (.ship*) window
+#  - Create links in the bin directory for nutshell files
+#  - Filter out files that have not changed
+#  - Show user the files
+#
+#-------------------------------------------------------------------------------
+sub ReadNewShipDeliverables {
+
+  foreach $sd (@shipdirs) {
+    my ($platform) = $sd =~ /$src_base_path\/\.ship-(\S+)/;
+		
+    print "\nScanning $sd ...\n";
+		
+    # Read file signatures from last transmittal
+    SetPrevFiles($platform, "$sd/prev.ship.list");
+
+    # Find all deliverable files in the xmittal window (.ship* directory)
+    # for this ship directory.
+    SetShipFiles($sd, $platform);
+		
+    # Convert bin* sym links to nutshell symlinks (*_link)
+    if ($product ne "nutshell") {
+      CreateLinkFiles($platform, $sd);
+    }
+
+    # Look for ship files that have changed since last transmittal and
+    # remove dont_ship files.
+    SetNewDeliverables($platform);
+
+    # Show user the new deliverables that will be sent
+    ShowNewDeliverables($platform);
+
+  }
+
+}
+
+
+#-------------------------------------------------------------------------------
+#
+# For each platform verify the dlls/bin files are the same
+#
+#-------------------------------------------------------------------------------
+sub VerifyDeliverables {
+
+  my @platforms = ();
+  my $platform;
+
+  # Uncomment to test this function ...
+  #push(@{$newDeliverables{"64-amd64_linux26_RH5"}}, "dll-64/test");
+
+  print "\nVerifying deliverable consistency across platforms ...\n";
+
+  # Determine the platforms
+  foreach $sd (@shipdirs) {
+    ($platform) = $sd =~ /$src_base_path\/\.ship-(\S+)/;
+    push(@platforms, $platform);
+  }
+
+  return 1 if (scalar(@platforms) <= 1);
+
+  # Check the dlls and binaries
+  my $rc = 1;
+  my $file;
+  my $error = "";
+  foreach $platform (@platforms) {
+    print " Checking dlls/binaries found for $platform\n";
+
+    foreach $file (@{$newDeliverables{$platform}}) {
+      chomp $file;
+      next if (($file !~ /^dll/) && ($file !~ /^bin/));
+
+      # Found a bin/dll file
+      my $plat;
+      foreach $plat (@platforms) {
+	next if ($plat eq $platform);
+	if (! grep(/$file/, @{$newDeliverables{$plat}})) {
+	  print "  > WARNING < file $file not found for $plat\n";
+	  $rc = 0;
+	}
+      }
+    }
+  }
+
+  return $rc;
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Generate the file that will be sent to PI&R
+#
+#---------------------------------------------------------------------------------
+sub SetXmitFile {
+
+  my ($product, $zf_version, $list_plat, @crList) = @_;
+
+  # Get the last number from SelfStore
+  print "Querying integ for next available xmittal spin number\n";
+  my $command = "$sendxmit -q ${product}.${zf_version}.${list_plat}+1";
+  print " Running: $command\n" if ($verbose);
+
+  # Handles very first transmittal since list would be list0000 and our PI&R
+  # repository starts at list0001
+  $xmittal = `$command`;
+
+  if ($?) {
+    print " Could not obtain the next list number\n";
+    exit 8;
+  }
+  else {
+    print " Next list file: $xmittal";
+  }
+	
+  # Create the CR text from list of CRs
+  my $crText = join(" ", @crList);
+
+  # full file path to write to and pass to sendxmit
+  $xmit_file = "$eda_t_dir/$xmittal";
+  print " Xmit file: $xmit_file\n";
+
+  open(XF, ">$xmit_file") or
+    die "Cannot open transmittal file: $xmit_file ....quitting\n";
+
+  # Process the list of new deliverables...
+  my $file;
+  foreach $file (@{$newDeliverables{$plat}}) {
+    chomp $file;
+    print    "> $file $crText\n" if ($verbose);
+    print XF "> $file $crText\n";
+  }
+
+  close(XF);
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Mark the CR records that were transmitted with "TRANSMITTED" state.
+#
+#---------------------------------------------------------------------------------
+sub MarkChangeRequestsXmitted {
+
+  my ($compName, $scriptPath, $dbType, $debug, @crList) = @_;
+  my $state = "transmitted";
+  my $crRec;
+  my $crCmd;
+  my $rc = 0;
+	
+  foreach $crRec (@crList) {
+
+    # Change the state of each CR record in crList
+    $crCmd = "$scriptPath/changeReqUpdateAll $dbType -cq $crRec -s $state";
+		
+    # Execute the command
+    TkCommon::runcmd ("$crCmd", "$debug");
+    $rc = $? >> 8;
+		
+    if ($rc == 0) {
+      print "[INFO]: Updated change record, $crRec, to state of $state. rc=$rc\n";
+    }
+    else {
+      print "\n>>> ERROR <<<\n";
+      print "Unable to update change record, $crRec, to state of ";
+      print "$state. rc=$rc\.\n";
+    }
+  }
+
+  return ($rc);
+	
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Get date/time info and output in various formats
+#
+#---------------------------------------------------------------------------------
+sub SetDateAndTime {
+
+  my ($format) = @_;
+	
+  my $string = "";
+  if ($format eq "full") {
+    $string = `date +"%b %d %Y %H:%M:%S`;
+  }
+  elsif ($format eq "wday_mth_day") {
+    $string = `date +"%a %m/%d"`;
+  }
+
+  chomp $string;
+  return $string;
+	
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Send e-mail containing the change record information to list of mail recipients
+# FOR NOW - only send mail to code owner
+#
+#---------------------------------------------------------------------------------
+sub MailChangeRecords {
+
+  my ($compName, $urgent, @crList) = @_;
+
+  # Don't send mail if in debug mode.
+  return if ($debug);
+
+  print "Sending mail containing change records for $edacm_release.\n";
+  print " -> Fetching CR data for email ...\n";
+
+  # Always send to transmittal support
+  my $mailList = "stadtlag\@us.ibm.com ";
+
+  # Don't blast email if urgent xmittal
+  #if ($urgent) {
+  #  $mailList .= "nanhuo\@us.ibm.com ";
+  #}
+
+  # Always append these recipients:
+  #$mailList .= "hogana\@us.ibm.com jwcolem\@us.ibm.com antolb\@us.ibm.com ";
+  $mailList .= "hogana\@us.ibm.com jwcolem\@us.ibm.com lathakannan\@in.ibm.com bhawani.nayak\@in.ibm.com";
+	
+  # Get date time for email
+  my $start_time = SetDateAndTime("wday_mth_day");
+  $start_time = ucfirst($start_time);
+
+  # Gather CR data for the email body
+  my $body = "";
+  foreach $crRec (@crList) {
+    print "$crRec\n";
+		
+    my $command = "$scriptPath/cr.relNotes -cq $crRec $dbType -pir";
+    #print "Running $command\n";
+    my @results = `$command`;
+    my $rc = $? >> 8;
+    if ($rc == 1) {
+      my $data = "";
+      $data = join("", @results);
+      $data =~ s/\[\[//;
+      $data =~ s/\]\]//;
+      $body .= $data . "\n";
+    }
+  }
+
+
+  # Set the email subject
+  my $subject = "xmittal";
+  $subject = "Urgent xmittal" if ($urgent);
+	
+  # NOTE: Make sure the @crList_text is in col 2 so other entries line up in email.
+  `mailx -s "$edacm_release $subject ($start_time)" $mailList << EOF
+
+$body
+
+    Note: Any maintenance defects are denoted with a '*'
+
+EOF`;   # tell xemacs to behave (syntax highlighting gets confused here)
+
+  print "Email sent!!!\n";
+	
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Send the tranmittal file to PI&R through the sendxmit program
+#
+#---------------------------------------------------------------------------------
+sub Transmit {
+
+  my ($sd, $debug) = @_;
+  print "Executing sendxmit command ...\n";
+
+  if ($debug) {
+    print " SENDXMIT: $sendxmit\n";
+    print " SD: $sd\n";
+    print " URGENT: $urgent\n";
+    print " MAINT_FLAG: $maint_flag\n";
+    print " REPLACE: $replace\n";
+    print " PREFIX: $prefix\n";
+    print " XMIT_FILE: $xmit_file\n";
+  }
+
+  # Execute the command
+  my @results = ();
+  my $command = "$sendxmit -o $sd $urgent $maint_flag $replace";
+  $command .= " $prefix $xmit_file 2>&1";
+  if ($debug) {
+    print " DEBUG: $command\n";
+    print "        Command was not actually executed!!!\n";
+    return 8;
+  }
+  else {
+    @results = `$command`;
+  }
+  my $rc = $? >> 8;
+	
+  # Process results.
+  print "\n *******\n" ;
+  print " RC = $rc\n";
+  my $allResults = join("", @results);
+  print " Results: $allResults\n";
+  if (($rc == 0) && ($allResults =~ /successfully/)) {
+    print " SUCCESS: sendxmit returnedcompleted successfully\n";
+  }
+  else {
+    print "\n >>> ERROR <<<\n";
+    print " sendxmit command failed ... aborting\n";
+    $rc = 8;
+  }
+  print " *******\n\n" ;
+
+  return $rc;
+
+}
+
+
+#---------------------------------------------------------------------------------
+#
+# Verify the user is authorized to run this script
+#
+#---------------------------------------------------------------------------------
+sub ValidateUser {
+
+  my $userid = getlogin();
+
+  return 1 if ($debug);
+  return 1 if ($userid eq "svnlib");	
+
+  print "ABORTING - you must run this script as svnlib!\n";
+  return 0;
+	
+}
+
+#---------------------------------------------------------------------------------
+#
+# Create the a readable date
+#
+#---------------------------------------------------------------------------------
+sub GetDateString {
+  my ($epoch_secs) = @_;
+  my @months = ("jan", "feb", "mar", "apr", "may", "jun",
+		"jul", "aug", "sep", "oct", "nov", "dec");
+
+  my($second, $minute, $hour, $dayofmonth, $mon, $year) = localtime($epoch_secs);
+
+  my $hr  = sprintf("%02d", $hour);
+  my $min = sprintf("%02d", $minute);
+  my $sec = sprintf("%02d", $second);
+  my $day = sprintf("%02d", $dayofmonth);
+
+  my $month = $months[$mon];
+  $year += 1900;
+
+  my $date_string = "$month $day $year ${hr}:${min}:${sec}";
+
+  return($date_string);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CompareXmit2SelfstoreBOM($compName, $useShip, $useTk)
+# Purpose: Compare Bill of Materials of what is about to be transmitted with 
+#          what was last delivered by Selfstore.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CompareXmit2SelfstoreBOM {
+
+my ($compName, $useShip, $useTk) = @_;
+
+  my $rc = 0;
+  my $xmitReposSwitch = "";
+
+  print "Comparing what is about to be transmitted with what was last delivered by Selfstore\n";
+
+  if ($useShip) {
+    $xmitReposSwitch = "-s";
+  }
+  elsif ($useTk) {
+    $xmitReposSwitch = "-t";
+  }
+
+  my $command = "$scriptPath/bomChecker.xmit2ss";
+  $command .= " -c $compName";
+  $command .= " $xmitReposSwitch";
+
+  print "Running $command\n" if ($verbose);
+
+  my @results = `$command`;
+  $rc = $? >> 8;
+
+  #if ($rc > 0) {
+  #  print "Differences were found\n";
+  #  print @results;
+  #  return $OK;
+  #}
+
+  return $rc;
+
+}
+
+
+#=================================================================================

@@ -1,0 +1,646 @@
+
+****************************
+Fri Feb 19 18:05:58 EST 2010
+****************************
+Level: 1002191805
+
+167494: Initial seed of multithreading support for ESS
+1.267  ess/Ess.C  delta  Gregory Schaeffer
+1.107  ess/Ess.h  delta  Gregory Schaeffer
+1.69  ess/EssAsserts.C  delta  Gregory Schaeffer
+1.28  ess/EssAsserts.h  delta  Gregory Schaeffer
+1.31  ess/EssCalc.C  delta  Gregory Schaeffer
+1.17  ess/EssCalc.h  delta  Gregory Schaeffer
+1.45  ess/EssCoupling.C  delta  Gregory Schaeffer
+1.13  ess/EssCoupling.h  delta  Gregory Schaeffer
+1.128  ess/EssInc.C  delta  Gregory Schaeffer
+1.70  ess/EssRLCTreeData.C  delta  Gregory Schaeffer
+1.12  ess/EssTestCI.C  delta  Gregory Schaeffer
+1.13  ess/EssHiddenCI.C  delete  Gregory Schaeffer
+1.11  essuicore/EssCacheMan.C  delta  Gregory Schaeffer
+1.11  essuicore/EssCacheMan.h  delta  Gregory Schaeffer
+1.16  essuicore/EssIOUtils.C  delta  Gregory Schaeffer
+1.49  essuicore/EssSettings.C  delta  Gregory Schaeffer
+1.45  essuicore/EssSettings.h  delta  Gregory Schaeffer
+1.172  essspice/ITVspiceMdl.C  delta  Gregory Schaeffer
+1.60  essspice/ITVspiceModel.h  delta  Gregory Schaeffer
+1.173  essspice/ITVspiceMdl.C  delta  Gregory Schaeffer
+1.61  essspice/ITVspiceModel.h  delta  Gregory Schaeffer
+1.268  ess/Ess.C  delta  Gregory Schaeffer
+1.12.1.38  ess/EssMainMsg.msgcat  delta  Gregory Schaeffer
+1.13  ess/EssTestCI.C  delta  Gregory Schaeffer
+1.11  essrice/EssRice.C  delta  Gregory Schaeffer
+1.23  essrice/EssRiceMgr.C  delta  Gregory Schaeffer
+1.10  essrice/EssRiceMgr.h  delta  Gregory Schaeffer
+1.50  esselmore/EssElmore.C  delta  Gregory Schaeffer
+1.18  esselmore/EssElmore.h  delta  Gregory Schaeffer
+1.17  esselmore/EssElmoreCI.C  delta  Gregory Schaeffer
+1.5  essrc/EssCompressedTree.C  delta  Gregory Schaeffer
+1.92  essrc/IJMrcNode.C  delta  Gregory Schaeffer
+1.173  essrc/IJMrcTree.C  delta  Gregory Schaeffer
+1.78  essrc/IJMrcTree.h  delta  Gregory Schaeffer
+1.105  essrc/IJMrcTreeNode.h  delta  Gregory Schaeffer
+1.69  essrc/IJMrcTreeSeg.C  delta  Gregory Schaeffer
+1.36.3.1  esspdm/EssPdm.C  delta  Gregory Schaeffer
+1.33  esspdm/EssPdm.h  delta  Gregory Schaeffer
+1.39  esspdm/EssPdmCI.C  delta  Gregory Schaeffer
+1.2  esspdm/EssPdmInc.C  delta  Gregory Schaeffer
+1.2  esspdm/EssPdmUtils.C  delta  Gregory Schaeffer
+1.2  esspdm/EssPdmUtils.h  delta  Gregory Schaeffer
+1.12  essrice/EssRice.C  delta  Gregory Schaeffer
+1.24  essrice/EssRiceMgr.C  delta  Gregory Schaeffer
+1.11  essrice/EssRiceMgr.h  delta  Gregory Schaeffer
+1.36.3.2  esspdm/EssPdm.C  delta  Gregory Schaeffer
+1.34  esspdm/EssPdm.h  delta  Gregory Schaeffer
+1.40  esspdm/EssPdmCI.C  delta  Gregory Schaeffer
+1.16.1.1  esspdm/EssPdmMsg.msgcat  delta  Gregory Schaeffer
+1.36.3.3  esspdm/EssPdm.C  delta  Gregory Schaeffer
+1.12  essinc/EssCNetAggressor.C  delta  Gregory Schaeffer
+1.7  essinc/EssCNetAggressor.h  delta  Gregory Schaeffer
+1.33  essinc/EssCacheInv.C  delta  Gregory Schaeffer
+1.7  essinc/EssCacheInv.h  delta  Gregory Schaeffer
+1.13  essinc/EssDeltaList.C  delta  Gregory Schaeffer
+1.14  essinc/EssDeltaList.h  delta  Gregory Schaeffer
+1.8  essinc/EssIncCI.C  delta  Gregory Schaeffer
+1.87.2.22  essinc/EssIncMan.C  delta  Gregory Schaeffer
+1.57  essinc/EssIncMan.h  delta  Gregory Schaeffer
+1.43  essinc/EssNetData.C  delta  Gregory Schaeffer
+1.48  essinc/EssNetData.h  delta  Gregory Schaeffer
+1.32  essinc/EssObj.C  delta  Gregory Schaeffer
+1.39  essinc/EssObj.h  delta  Gregory Schaeffer
+1.96  essinc/EssPinData.C  delta  Gregory Schaeffer
+1.63  essinc/EssPinData.h  delta  Gregory Schaeffer
+1.30  essinc/EssProp.C  delta  Gregory Schaeffer
+1.28  essinc/EssProp.h  delta  Gregory Schaeffer
+1.16  essinc/IEssIncMan.h  delta  Gregory Schaeffer
+1.42  essinc/IEssNetData.h  delta  Gregory Schaeffer
+1.43  essinc/IEssPinData.h  delta  Gregory Schaeffer
+
+****************************
+Fri Feb 19 18:22:48 EST 2010
+****************************
+Level: 1002191822
+
+167697: Updates to multithreading (code merging)
+1.70  ess/EssAsserts.C  delta  Gregory Schaeffer
+1.129  ess/EssInc.C  delta  Gregory Schaeffer
+1.56  ess/EssInc.h  delta  Gregory Schaeffer
+1.14  ess/EssTestCI.C  delta  Gregory Schaeffer
+1.41  esspdm/EssPdmCI.C  delta  Gregory Schaeffer
+
+****************************
+Mon Feb 22 11:39:14 EST 2010
+****************************
+Level: 1002221139
+
+167698: More multithreading changes to make AIX happy
+1.43  essinc/IEssNetData.h  delta  Gregory Schaeffer
+1.32  ess/EssCalc.C  delta  Gregory Schaeffer
+1.18  ess/EssCalc.h  delta  Gregory Schaeffer
+
+****************************
+Mon Feb 22 16:23:23 EST 2010
+****************************
+Level: 1002221623
+
+167742: Add more locks for multithreaded property creation
+1.44  essinc/EssNetData.C  delta  Gregory Schaeffer
+1.97  essinc/EssPinData.C  delta  Gregory Schaeffer
+1.44  essinc/IEssNetData.h  delta  Gregory Schaeffer
+1.44  essinc/IEssPinData.h  delta  Gregory Schaeffer
+
+****************************
+Mon Feb 22 18:30:13 EST 2010
+****************************
+Level: 1002221623
+
+167742: Add more locks for multithreaded property creation
+1.44  essinc/EssNetData.C  delta  Gregory Schaeffer
+1.97  essinc/EssPinData.C  delta  Gregory Schaeffer
+1.44  essinc/IEssNetData.h  delta  Gregory Schaeffer
+1.44  essinc/IEssPinData.h  delta  Gregory Schaeffer
+
+167754: spinlock updates for ESS multithreading
+1.9  essinc/EssIncCI.C  delta  Gregory Schaeffer
+1.45  essinc/EssNetData.C  delta  Gregory Schaeffer
+1.33  essinc/EssObj.C  delta  Gregory Schaeffer
+1.98  essinc/EssPinData.C  delta  Gregory Schaeffer
+
+****************************
+Mon Feb 22 18:55:46 EST 2010
+****************************
+Level: 1002221855
+
+167758: More MT changes to make AIX happy
+1.93  essrc/IJMrcNode.C  delta  Gregory Schaeffer
+1.106  essrc/IJMrcTreeNode.h  delta  Gregory Schaeffer
+
+****************************
+Tue Feb 23 19:16:34 EST 2010
+****************************
+Level: 1002231916
+
+167784: Update to mesh pincap file to include wire cap
+1.36.3.4  esspdm/EssPdm.C  delta  Gregory Schaeffer
+
+167786: ESS spinlock restructuring for multithreading
+1.87.2.23  essinc/EssIncMan.C  delta  Gregory Schaeffer
+1.46  essinc/EssNetData.C  delta  Gregory Schaeffer
+1.49  essinc/EssNetData.h  delta  Gregory Schaeffer
+1.34  essinc/EssObj.C  delta  Gregory Schaeffer
+1.99  essinc/EssPinData.C  delta  Gregory Schaeffer
+1.64  essinc/EssPinData.h  delta  Gregory Schaeffer
+1.45  essinc/IEssNetData.h  delta  Gregory Schaeffer
+1.45  essinc/IEssPinData.h  delta  Gregory Schaeffer
+
+****************************
+Wed Feb 24 11:21:57 EST 2010
+****************************
+Level: 1002241121
+
+167795: More spinlock updates for multithreading
+1.14  essinc/EssDeltaList.C  delta  Gregory Schaeffer
+1.15  essinc/EssDeltaList.h  delta  Gregory Schaeffer
+1.47  essinc/EssNetData.C  delta  Gregory Schaeffer
+1.50  essinc/EssNetData.h  delta  Gregory Schaeffer
+1.35  essinc/EssObj.C  delta  Gregory Schaeffer
+1.40  essinc/EssObj.h  delta  Gregory Schaeffer
+1.100  essinc/EssPinData.C  delta  Gregory Schaeffer
+1.65  essinc/EssPinData.h  delta  Gregory Schaeffer
+
+****************************
+Thu Feb 25 14:15:47 EST 2010
+****************************
+Level: 1002251415
+
+167795: More spinlock updates for multithreading
+1.14  essinc/EssDeltaList.C  delta  Gregory Schaeffer
+1.15  essinc/EssDeltaList.h  delta  Gregory Schaeffer
+1.47  essinc/EssNetData.C  delta  Gregory Schaeffer
+1.50  essinc/EssNetData.h  delta  Gregory Schaeffer
+1.35  essinc/EssObj.C  delta  Gregory Schaeffer
+1.40  essinc/EssObj.h  delta  Gregory Schaeffer
+1.100  essinc/EssPinData.C  delta  Gregory Schaeffer
+1.65  essinc/EssPinData.h  delta  Gregory Schaeffer
+1.15  essinc/EssDeltaList.C  delta  Gregory Schaeffer
+1.16  essinc/EssDeltaList.h  delta  Gregory Schaeffer
+1.48  essinc/EssNetData.C  delta  Gregory Schaeffer
+1.51  essinc/EssNetData.h  delta  Gregory Schaeffer
+1.36  essinc/EssObj.C  delta  Gregory Schaeffer
+1.41  essinc/EssObj.h  delta  Gregory Schaeffer
+1.101  essinc/EssPinData.C  delta  Gregory Schaeffer
+1.66  essinc/EssPinData.h  delta  Gregory Schaeffer
+
+****************************
+Mon Mar  1 16:45:36 EST 2010
+****************************
+Level: 1003011645
+
+167880: Add command to null out registered calculators
+1.195  ess/EssCI.C  delta  Gregory Schaeffer
+
+****************************
+Wed Mar  3 14:38:47 EST 2010
+****************************
+Level: 1003031438
+
+167917: Regression fix from multithreading PDM changes
+1.42  esspdm/EssPdmCI.C  delta  Gregory Schaeffer
+
+167928: support for reducing and deleting spice
+1.196  ess/EssCI.C  delta  Revanta Banerji
+
+****************************
+Wed Mar  3 14:59:37 EST 2010
+****************************
+Level: 1003031459
+
+167930: Add lock for annotated coupling accesses for threaded extracts
+1.49  essinc/EssNetData.C  delta  Gregory Schaeffer
+1.52  essinc/EssNetData.h  delta  Gregory Schaeffer
+1.15  ess/EssTestCI.C  delta  Gregory Schaeffer
+
+****************************
+Fri Mar  5 12:10:24 EST 2010
+****************************
+Level: 1003051210
+
+167971: More multithreading updates to eliminate contention
+1.269  ess/Ess.C  delta  Gregory Schaeffer
+1.61  ess/EssCache.C  delta  Gregory Schaeffer
+1.12  essuicore/EssCacheMan.C  delta  Gregory Schaeffer
+1.12  essuicore/EssCacheMan.h  delta  Gregory Schaeffer
+1.102  essinc/EssPinData.C  delta  Gregory Schaeffer
+
+****************************
+Wed Mar 10 22:00:42 EST 2010
+****************************
+Level: 1003102200
+
+168043: Add tcl command to query sink pi-model assertions
+1.197  ess/EssCI.C  delta  Gregory Schaeffer
+
+****************************
+Sun Mar 14 22:00:41 EDT 2010
+****************************
+Level: 1003142200
+
+168039: Detect pseudo coupling NaNQ multipliers and replace with defts
+1.13  essrc/ESSmsgs.msgcat  delta  Gregory Schaeffer
+1.70  essrc/IJMrcTreeSeg.C  delta  Gregory Schaeffer
+
+168114: Error when spice file does not end with .ends
+1.23  essspice/EssSpiceMsgs.msgcat  delta  Gregory Schaeffer
+1.37.1.8  essspice/ITVspiceRead.C  delta  Gregory Schaeffer
+
+****************************
+Wed Mar 24 10:23:12 EDT 2010
+****************************
+Level: 1003241023
+
+168240: Honor spice-priority parm with RC assertions consistently
+1.270  ess/Ess.C  delta  Gregory Schaeffer
+1.108  ess/Ess.h  delta  Gregory Schaeffer
+1.71  ess/EssAsserts.C  delta  Gregory Schaeffer
+1.62  ess/EssCache.C  delta  Gregory Schaeffer
+
+****************************
+Tue Mar 30 22:00:08 EDT 2010
+****************************
+Level: 1003302200
+
+168385: PDM mesh uncertainty code created dangling boxes
+1.36.3.5  esspdm/EssPdm.C  delta  Gregory Schaeffer
+1.43  esspdm/EssPdmCI.C  delta  Gregory Schaeffer
+1.16.1.2  esspdm/EssPdmMsg.msgcat  delta  Gregory Schaeffer
+
+****************************
+Wed Mar 31 22:00:11 EDT 2010
+****************************
+Level: 1003312200
+
+168424: cidoc changes for reduce net
+1.198  ess/EssCI.C  delta  Revanta Banerji
+
+168446: Spice reader option to merge serial capacitances
+1.108  essspice/ITVspiceCI.C  delta  Gregory Schaeffer
+1.71  essrc/IJMrcTreeSeg.C  delta  Gregory Schaeffer
+1.174  essspice/ITVspiceMdl.C  delta  Gregory Schaeffer
+1.62  essspice/ITVspiceModel.h  delta  Gregory Schaeffer
+
+****************************
+Thu Apr  1 22:00:09 EDT 2010
+****************************
+Level: 1004012200
+
+168459: PDM mesh uncertainty pincap file needs different cap definition
+1.36.3.6  esspdm/EssPdm.C  delta  Gregory Schaeffer
+
+****************************
+Tue Apr  6 22:00:07 EDT 2010
+****************************
+Level: 1004062200
+
+168534: ESS-3060 warning about separate RF pincaps was incorrect
+1.12.1.39  ess/EssMainMsg.msgcat  delta  Gregory Schaeffer
+
+****************************
+Mon Apr 12 22:00:07 EDT 2010
+****************************
+Level: 1004122200
+
+168655: Excess runtime in ESS audit report generation on large hier vim
+1.19  ess/EssAsrtRpt.C  delta  Gregory Schaeffer
+
+****************************
+Thu Apr 22 22:00:08 EDT 2010
+****************************
+Level: 1004222200
+
+168937: missing 'C' seg when passing to rice for nets with inductance
+1.72  essrc/IJMrcTreeSeg.C  delta  Hemlata Gupta
+
+168964: hidden option to ignore special chars
+1.109  essspice/ITVspiceCI.C  delta  Revanta Banerji
+1.104  essspice/EssSpiceWriter.C  delta  Revanta Banerji
+1.47  essspice/EssSpiceWriter.h  delta  Revanta Banerji
+
+****************************
+Sun Apr 25 22:00:12 EDT 2010
+****************************
+Level: 1004252200
+
+169002: Support TLT power net resistances for dtdcap
+1.94  essrc/IJMrcNode.C  delta  Gregory Schaeffer
+
+****************************
+Wed Apr 28 22:00:09 EDT 2010
+****************************
+Level: 1004282200
+
+169137: To support PEP allow cleanup of dummy segments
+1.107  essrc/IJMrcTreeNode.h  delta  Gregory Schaeffer
+1.73  essrc/IJMrcTreeSeg.C  delta  Gregory Schaeffer
+1.71  ess/EssRLCTreeData.C  delta  Gregory Schaeffer
+
+****************************
+Thu Apr 29 22:00:18 EDT 2010
+****************************
+Level: 1004292200
+
+169149: minor changes to replace special char code
+1.105  essspice/EssSpiceWriter.C  delta  Revanta Banerji
+
+****************************
+Mon May  3 22:00:11 EDT 2010
+****************************
+Level: 1005032200
+
+169235: PEP memory reduction by not saving coupling cap PDM properties
+1.36.3.7  esspdm/EssPdm.C  delta  Gregory Schaeffer
+1.35  esspdm/EssPdm.h  delta  Gregory Schaeffer
+
+****************************
+Thu May  6 22:00:13 EDT 2010
+****************************
+Level: 1005062200
+
+169327: Rapids coredumps with dual analysis mode optimization
+1.130  ess/EssInc.C  delta  Gregory Schaeffer
+
+169329: Update ESS audit report to include rule units
+1.20  ess/EssAsrtRpt.C  delta  Gregory Schaeffer
+1.50  essuicore/EssSettings.C  delta  Gregory Schaeffer
+
+****************************
+Wed May 12 22:00:10 EDT 2010
+****************************
+Level: 1005122200
+
+169423: Do not delete spice parasitics when an analysis mode is deleted
+1.87.2.24  essinc/EssIncMan.C  delta  Gregory Schaeffer
+
+****************************
+Sun May 16 22:00:11 EDT 2010
+****************************
+Level: 1005162200
+
+169482: Memory leak in PDM reader with coupling cap table
+1.36.3.8  esspdm/EssPdm.C  delta  Gregory Schaeffer
+
+****************************
+Thu May 20 22:00:13 EDT 2010
+****************************
+Level: 1005202200
+
+169560: Support for mixed gate and TLT level timing
+1.199  ess/EssCI.C  delta  Gregory Schaeffer
+1.271  ess/Ess.C  delta  Gregory Schaeffer
+1.109  ess/Ess.h  delta  Gregory Schaeffer
+1.175  essspice/ITVspiceMdl.C  delta  Gregory Schaeffer
+
+****************************
+Wed Jun  2 22:02:03 EDT 2010
+****************************
+Level: 1006022201
+
+169779: Rewrite Spice and SPEF readers to use new Nutshell file handler
+1.90  essutils/EssUtilsCI.C  delta  Gregory Schaeffer
+1.20  essutils/EssUtilsMsg.msgcat  delta  Gregory Schaeffer
+1.45.1.13  essutils/SPEFModel.C  delta  Gregory Schaeffer
+1.18.1.3  essutils/SPEFModel.h  delta  Gregory Schaeffer
+1.23  essutils/TokenizeSPEF.L  delta  Gregory Schaeffer
+1.24  essspice/EssSpiceMsgs.msgcat  delta  Gregory Schaeffer
+1.37.1.9  essspice/ITVspiceRead.C  delta  Gregory Schaeffer
+1.69  essspice/ITVspiceTok.L  delta  Gregory Schaeffer
+1.63  essspice/ITVspiceModel.h  delta  Gregory Schaeffer
+
+****************************
+Thu Jun  3 22:00:56 EDT 2010
+****************************
+Level: 1006032200
+
+169821: Initial code to support hierarchical pincap annotation for GLSO
+1.36.3.9  esspdm/EssPdm.C  delta  Gregory Schaeffer
+1.36  esspdm/EssPdm.h  delta  Gregory Schaeffer
+1.44  esspdm/EssPdmCI.C  delta  Gregory Schaeffer
+1.16.1.3  esspdm/EssPdmMsg.msgcat  delta  Gregory Schaeffer
+
+169822: GLSO abstraction needs to know mesh net total capacitance
+1.36.3.10  esspdm/EssPdm.C  delta  Gregory Schaeffer
+
+****************************
+Fri Jun  4 10:17:39 EDT 2010
+****************************
+Level: 1006041017
+
+169829: fixes to 169823 four words
+1.36.3.11  esspdm/EssPdm.C  delta  Jeff Piaget
+
+
+****************************
+Wed Jun  9 10:56:10 EDT 2010
+****************************
+
+8  (?)  hardcode component and release
+102  tcl/test_a.tcl  delta  stadtlag@us.ibm.com
+
+9  (?)  hardcode component and release
+103  tcl/test_a.tcl  delta  stadtlag@us.ibm.com
+
+10  (?)  Some new abstract here ...
+104  tcl/test_a.tcl  delta  stadtlag@us.ibm.com
+
+
+
+****************************
+Fri Jun 11 16:05:29 EDT 2010
+****************************
+
+23  (?)  Some new abstract here ...
+106  tcl/test_a.tcl  delta  stadtlag@us.ibm.com
+
+
+
+****************************
+Mon Jun 14 17:16:02 EDT 2010
+****************************
+
+MDCMS????????: Added new really suh-weet feature.
+DB_ID: 28
+107  tcl/test_a.tcl  U  stadtlag@us.ibm.com
+107  tcl/test_b.tcl  U  stadtlag@us.ibm.com
+
+MDCMS????????: Had to fix that really suh-weet feature.
+DB_ID: 29
+108  tcl/test_a.tcl  U  stadtlag@us.ibm.com
+108  xyz/abc.tcl  U  stadtlag@us.ibm.com
+108  tcl/test_b.tcl  U  stadtlag@us.ibm.com
+
+
+
+****************************
+Tue Jun 22 10:28:20 EDT 2010
+****************************
+
+MDCMS????????: Another quality update
+DB_ID: 4
+103  dir/file_u.C  U  stadtlag@us.ibm.com
+103  dir/file_a.C  A  stadtlag@us.ibm.com
+103  dir/file.C  A  stadtlag@us.ibm.com
+103  dir/file_d.C  D  stadtlag@us.ibm.com
+
+
+
+****************************
+Mon Jul 26 17:26:16 EDT 2010
+****************************
+
+MDCMS????????: Another update ...
+DB_ID: 34
+111  dir/file_d.C  D  stadtlag@us.ibm.com
+111  dir/file_u.C  U  stadtlag@us.ibm.com
+111  dir/file_a.C  A  stadtlag@us.ibm.com
+
+MDCMS????????: Another update ...
+and some more text here
+DB_ID: 35
+112  dir/file_d.C  D  stadtlag@us.ibm.com
+112  dir/file_u.C  U  stadtlag@us.ibm.com
+112  dir/file_a.C  A  stadtlag@us.ibm.com
+
+
+
+****************************
+Mon Jul 26 17:45:19 EDT 2010
+****************************
+
+MDCMS????????: Another update ...
+DB_ID: 34
+111  dir/file_d.C  D  stadtlag@us.ibm.com
+111  dir/file_u.C  U  stadtlag@us.ibm.com
+111  dir/file_a.C  A  stadtlag@us.ibm.com
+
+MDCMS????????: Another update ...
+and some more text here
+DB_ID: 35
+112  dir/file_d.C  D  stadtlag@us.ibm.com
+112  dir/file_u.C  U  stadtlag@us.ibm.com
+112  dir/file_a.C  A  stadtlag@us.ibm.com
+
+
+
+****************************
+Mon Jul 26 17:51:25 EDT 2010
+****************************
+
+MDCMS????????: Another update ...
+DB_ID: 34
+111  dir/file_d.C  D  stadtlag@us.ibm.com
+111  dir/file_u.C  U  stadtlag@us.ibm.com
+111  dir/file_a.C  A  stadtlag@us.ibm.com
+
+MDCMS????????: Another update ...
+and some more text here
+DB_ID: 35
+112  dir/file_d.C  D  stadtlag@us.ibm.com
+112  dir/file_u.C  U  stadtlag@us.ibm.com
+112  dir/file_a.C  A  stadtlag@us.ibm.com
+
+
+
+****************************
+Mon Jul 26 17:53:13 EDT 2010
+****************************
+
+MDCMS????????: Another update ...
+and some more text here
+DB_ID: 36
+113  dir/file_d.C  D  stadtlag@us.ibm.com
+113  dir/file_u.C  U  stadtlag@us.ibm.com
+113  dir/file_a.C  A  stadtlag@us.ibm.com
+
+
+
+****************************
+Mon Jul 26 18:04:05 EDT 2010
+****************************
+
+MDCMS????????: Another update ...
+and some more text here
+DB_ID: 37
+114  dir/file_d.C  D  stadtlag@us.ibm.com
+114  dir/file_u.C  U  stadtlag@us.ibm.com
+114  dir/file_a.C  A  stadtlag@us.ibm.com
+
+
+
+****************************
+Thu Aug  5 09:08:55 EDT 2010
+****************************
+
+MDCMS????????: Another update ...
+and some more text here
+DB_ID: 57
+115  dir/file_d.C  D  stadtlag@us.ibm.com
+115  dir/file_u.C  U  stadtlag@us.ibm.com
+115  dir/file_a.C  A  stadtlag@us.ibm.com
+
+
+
+****************************
+Thu Aug  5 17:30:03 EDT 2010
+****************************
+
+MDCMS????????: Another update ...
+and some more text here
+DB_ID: 58
+116  dir/file_d.C  D  stadtlag@us.ibm.com
+116  dir/file_u.C  U  stadtlag@us.ibm.com
+116  dir/file_a.C  A  stadtlag@us.ibm.com
+
+MDCMS????????: Another update ...
+and some more text here
+DB_ID: 59
+117  dir/file_d.C  D  stadtlag@us.ibm.com
+117  dir/file_u.C  U  stadtlag@us.ibm.com
+117  dir/file_a.C  A  stadtlag@us.ibm.com
+
+
+
+****************************
+Mon Aug  9 14:55:39 EDT 2010
+****************************
+
+MDCMS????????: Another update ...
+and some more text here
+DB_ID: 60
+118  dir/file_A.C  A  stadtlag@us.ibm.com
+118  dir/file_D.C  D  stadtlag@us.ibm.com
+118  dir/file_U.C  U  stadtlag@us.ibm.com
+
+
+
+****************************
+Wed Aug 11 09:56:54 EDT 2010
+****************************
+
+MDCMS????????: Another update ... and some more text here
+DB_ID: 61
+119  dir/file_A.C  A  stadtlag@us.ibm.com
+119  dir/file_D.C  D  stadtlag@us.ibm.com
+119  dir/file_U.C  U  stadtlag@us.ibm.com
+
+
+
+****************************
+Wed Aug 11 10:05:01 EDT 2010
+****************************
+
+MDCMS????????: 1234567890 1234567890 1234567890 1234567890 1234567890 and som ...
+DB_ID: 62
+120  dir/file_A.C  A  stadtlag@us.ibm.com
+120  dir/file_D.C  D  stadtlag@us.ibm.com
+120  dir/file_U.C  U  stadtlag@us.ibm.com
+
+

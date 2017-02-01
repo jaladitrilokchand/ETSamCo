@@ -1,0 +1,340 @@
+#!/bin/ksh
+# CM_verifylibs.14 - check to make sure the correct number of files are in the 
+#                    archive
+# Change History:
+# 05/15/98  K. Sylvester - original code
+# 01/25/99  K. Sylvester - enhanced to handle zero-length .o in archive
+#                or bad library altogether.
+# 03/14/03  M. Wheaton begin rewrite
+# 04/14/10  A. Magnan - changed name to CM_verifylibs.14 
+# 06/17/10  A. Magnan - Copied CM_verifylibs.14 to inititialize CM_verifylibs.svn
+#                Added -d parm (DEVMODE) to:
+#                 1) Run builds in test area 
+#                    (/afs/eda/build/svn_test/{component}/{release}
+#                    Set by BUILDDIR variable.
+#                 2) Set DEVMODE to always TRUE until code is tested and rolled out to
+#                    production
+#                    Force builds into EDA BUILD rather than EDA DEV
+# 07/06/10  A. Magnan - Removed DEVMODE always TRUE statement.
+# 07/27/10  A. Magnan - Put BUILDLOG under DEVMODE control and 
+#                appends "devmode" suffix when in DEVMODE.
+# 10/27/10  A. Magnan - Updated BUILDLOG to work correctly with AFS ID hdplib.
+# 08/20/12  G. Stadtlander - Added -l switch to support non build areas like tkb and shipb.
+#                Removed hp and sun platforms.
+# 01/10/13  G. Stadtlander - Updated to support xtinct TKs. 
+
+# to do: 
+#       use cm_read_config (new) to determine path to ar
+
+#set -n
+#set -x
+
+PATH=${PATH}:/afs/eda.fishkill.ibm.com/u/einslib/bin
+PATH=${PATH}:/bin:/etc:/usr/bin
+PATH=${PATH}:/afs/eda.fishkill.ibm.com/@sys/prod/bin
+PATH=${PATH}:/afs/eda.fishkill.ibm.com/@sys/contrib/bin
+PATH=${PATH}:/usr/afsws/bin:/usr/afsws/etc
+export PATH
+
+help()
+{
+cat << \EOF
+# Usage  CM_verifylibs.svn -r <release> -p <platform> -c <component> [ -d -I -N -l level]
+#         -c <component> individual component library
+#         -r <release>  (CMVC release)
+#         -p <platform> rs_aix41|hp_ux102|sun4x_55|sun4x_57|64_rs_aix43 platforms
+#         -d sets up DEVMODE
+#         -l <level> location (default = build) [ build|shipb|tkb|xtinct/tk14.1.x ] 
+#         -N do NOT blowaway the library
+
+EOF
+}
+
+goodbye()
+{
+ [[ -n $ENTIRE ]] && print "\n$SHELL_NAME: ${RELEASE} ending at $(date +"%a %D %T") on $(hostname)\n" >> $LOGFILE >> $BUILDLOG
+ [[ -n $ENTIRE ]] && print "\n$SHELL_NAME: ${RELEASE} ending at $(date +"%a %D %T") on $(hostname)\n" >> $LOGFILE >> $LOGFILE
+ rc="$1"
+ [[ -n $2 ]] && print "$2"
+ exit "${rc:-0}"
+}
+
+# Parse the command line args
+while getopts :dhc:r:p:Nl: OPTION
+ do
+  case "$OPTION" in
+    d) DEVMODE=TRUE;;
+    h) help; goodbye 1;;
+    c) COMPONENT=$OPTARG;;
+    l) LEVEL=$OPTARG;;
+    r) RELEASE=$OPTARG;;
+    p) PLATFORM=$OPTARG;;
+    N) NODELETE=TRUE;;
+    :) help; goodbye 1 "\n*** Option -$OPTARG requires a parameter.";;
+    ?) help; goodbye 1 "\n*** Option -$OPTARG is not recognized.";;
+ esac
+done
+shift $(($OPTIND - 1))
+
+# Validate the LEVEL
+[[ -z $LEVEL ]] && LEVEL="build"
+if [[ $LEVEL = @(build|tkb|shipb) ]]
+then
+  print "Level: $LEVEL"
+elif [[ $LEVEL = *+(xtinct/tk1)* ]]
+then
+  print "Level: $LEVEL"
+else 
+  help
+  goodbye 1 "\n*** $LEVEL is invalid -- must be build, shipb or tkb ***"  
+fi
+
+# Get a token so the script can run
+[[ -z $LOGNAME && -n $USER ]] && LOGNAME=$USER
+[[ -z $USER && -n $LOGNAME ]] && USER=$LOGNAME
+
+# Error Checking for parameters
+[[ -z $RELEASE ]] && { help; goodbye  "\n*** Release required."; exit; }
+[[ -z $PLATFORM ]] && { help goodbye  "\n*** Platform required."; exit; }
+if [[ $RELEASE = "3dnoise.1401" ]]
+then
+  export RELEASE="tdnoise.1401"
+fi 
+
+
+# amd64_linux24
+# TR=/bin/tr; [[ $(sys) = i386_linux2? ]] && TR=/usr/bin/tr
+typeset -l PRODUCT=$(print $RELEASE | cut -f1 -d. )
+LOG_VER=$(print $RELEASE | cut -f2 -d.)
+
+# REL_VER=$(print $LOG_VER | sed -e "s/^0//" -e "s/0/./")
+REL_VER=$(print $RELEASE | cut -f2 -d.)
+[[ $REL_VER = +([0-9])-[0-9]* ]] && RV_EXT=-$(print $REL_VER | cut -d- -f2-) || RV_EXT=
+R_V="$(print $REL_VER | cut -c1,2 | sed 's/^0//').$(print $REL_VER | cut -c3,4 | sed 's/^0//')$RV_EXT"
+
+EINSLIB=/afs/eda.fishkill.ibm.com/u/einslib
+. $EINSLIB/.CM_WebPage
+HDPLIB=/afs/eda/u/hdplib
+
+print PLATFORM: $PLATFORM
+INVALID=
+VALID_PLATS=$(eval print '$'${PRODUCT}${LOG_VER}_PLATS)
+eval [[ $PLATFORM != @($(print $VALID_PLATS | sed 's/ /|/g')) ]] && INVALID=TRUE
+if [[ -n $INVALID ]]
+ then
+  help
+  goodbye 1 "\n*** $PLATFORM is invalid for $RELEASE ***"
+fi
+
+# Please do not split the following line (nor add spaces to the beginning)
+GNU=/afs/eda/tools/gnu/bin;[[ -x $GNU/grep ]] && { GREP=$GNU/grep;EGREP=$GNU/egrep; } || { GREP=/bin/grep;EGREP=/bin/egrep; }
+
+SUFF=; LIBSUFF=
+HOSTNAME=$(print $(hostname) | cut -f1 -d.)
+case $PLATFORM in
+ 64-rs_aix51) SUFF=" -X64"
+	      LIBSUFF="-64";;
+ 64-rs_aix53) SUFF=" -X64"
+	      LIBSUFF="-64";;
+ 64-rs_aix61) SUFF=" -X64"
+	      LIBSUFF="-64";;
+  64-linux40) LIBSUFF="-64";;
+  64-linux50) LIBSUFF="-64";;
+	   *) SYS=$(sys);;
+esac
+
+# print "libsuff: $LIBSUFF"
+
+# Get the hour based on 24-hour time
+# If it is before midnight, use tomorrow's date for the log file
+integer HOUR=$(date +%H)
+if [[ $HOUR -ge 18 ]]
+ then
+  # The normal setting for TZ in Fishkill is EST5EDT (GMT+5 and DST),
+  # telling the system we are 5 hours behind Greenwich, which is the time
+  # it is physically keeping.
+  # Pretend we are in Middle Europe, where the new day begins 6 pm our time.
+  typeset -l DATE=$(TZ=MET-1MEDT date +%b%d )
+  typeset -l MONTH=$(TZ=MET-1MEDT date +%b )
+ else
+  typeset -l DATE=$(date +%b%d )
+  typeset -l MONTH=$(date +%b )
+fi
+
+SHELL_NAME=${0##*/}
+
+if [[ $DEVMODE = TRUE ]]
+then
+  BUILDDIR=/afs/eda.fishkill.ibm.com/${LEVEL}/svn_test/${PRODUCT}/${R_V}
+  if [[ $USER = @(einslib|hdplib) ]]
+  then
+    BUILDLOG=/afs/eda/u/${USER}/logs/${MONTH}/${DATE}.${PRODUCT}.${LOG_VER}.${PLATFORM}.devmode
+  else
+    BUILDLOG=/afs/eda/u/$USER/${DATE}.${PRODUCT}.${LOG_VER}.${PLATFORM}.devmode
+  fi
+else
+  BUILDDIR=/afs/eda.fishkill.ibm.com/${LEVEL}/${PRODUCT}/${R_V}
+  if [[ $USER = @(einslib|hdplib) ]]
+  then
+    BUILDLOG=/afs/eda/u/${USER}/logs/${MONTH}/${DATE}.${PRODUCT}.${LOG_VER}.${PLATFORM}
+  else
+    BUILDLOG=/afs/eda/u/${USER}/${DATE}.${PRODUCT}.${LOG_VER}.${PLATFORM}
+  fi
+fi
+
+LIBDIR=$BUILDDIR/lib${LIBSUFF}
+LOGDIR=$BUILDDIR/build/etc/log/$PLATFORM
+LOGFILE=$LOGDIR/verifylibs
+COMPLOCKDIR=$BUILDDIR/build/etc/complock/$PLATFORM
+COMPLOCK=$COMPLOCKDIR/verifylibs
+MACHLOCKDIR=$BUILDDIR/build/etc/machlock/$PLATFORM
+HOSTNAME=$(print $(hostname) | cut -f1 -d.)
+MACHLOCK=$MACHLOCKDIR/${HOSTNAME}
+[[ ! -d $LOGDIR ]] && mkdir -p $LOGDIR
+[[ ! -d $COMPLOCKDIR ]] && mkdir -p $COMPLOCKDIR
+
+RESULTFILE=$BUILDDIR/build/etc/badlibs.$PLATFORM
+/bin/rm -f $RESULTFILE 2>/dev/null
+
+
+# NEED TO APPEND "BITS=64" if this is a 64bit compile
+[[ -n $(print $PLATFORM | $GREP 64) ]] && export BITS=64 
+
+GET_CONFIG=/afs/eda/u/cmlib/bin/cm_get_config
+AR=$($GET_CONFIG -p $BUILDDIR -t opt -v AR)
+print "AR is set to $AR" >> $LOGFILE
+
+case $PLATFORM in
+     sun4x_5?) PATH="/usr/ccs/bin:${PATH}";;
+            *) :;;
+esac
+export PATH
+
+print "\n$SHELL_NAME: ${RELEASE} starting $(date +"%a %D %T") on $HOSTNAME\n" | tee -a $BUILDLOG  >> $LOGFILE
+
+print ${HOSTNAME} > $COMPLOCK
+
+print REL_VER: $REL_VER
+# Make sure Arch directory is set to correct platform for gnumake 1.1
+if [[ ($PRODUCT = einstimer && $LOG_VER -gt 0302) || $PRODUCT != einstimer ]]
+ then
+   case $PLATFORM in
+        rs_aix4?) ARCH=aix;;
+        rs_aix51) ARCH=aix;;
+        rs_aix53) ARCH=aix;;
+     64-rs_aix43) ARCH=aix64;;
+     64-rs_aix51) [[ $REL_VER < 1001 ]] && ARCH=aix564 || ARCH=aix64;;
+     64-rs_aix53) ARCH=aix64;;
+     64-rs_aix61) ARCH=aix64;;
+        sun4x_5?) ARCH=sun;;
+     64-sun4x_5?) ARCH=sun64;;
+         linux??) ARCH=linux;;
+      64-linux??) ARCH=linux64;;
+   esac
+  else
+   [[ $PLATFORM != linux?? ]] && ARCH=$PLATFORM || ARCH=linux
+fi
+
+cd $BUILDDIR
+if [[ -z $COMPONENT ]]
+ then
+  [[ -n $(print $PLATFORM | $GREP 64) ]] && export BITS=64 
+  COMPS=$($GET_CONFIG -ap $(pwd) -t opt -iv DIRECTORIES)
+ else
+  COMPS=$COMPONENT
+fi
+
+print "List of Comps in verifylibs: $COMPS" >> $LOGFILE
+
+for COMP in $COMPS
+ do
+   [[ $COMP = @(include|private|dll|lib|bin|html*|testcases) ]] && continue
+
+   print "\n*** Processing $BUILDDIR/$COMP...***\n" >> $LOGFILE
+   cd $BUILDDIR/$COMP   
+   # If there are no .C files, don't bother
+   if [[ -n $(/bin/ls $BUILDDIR/$COMP/*.C 2>/dev/null) ]] 
+   then
+    integer SRCWC=$(ls *.[Ccf] Arch-$ARCH/*.[Ccs] 2>/dev/null | wc -w)
+#    [[ $PLATFORM != *hp_ux1?? ]] && FLAG=w || FLAG=
+    MAIN=$($GREP -lw "main()" *.[Cc] | $EGREP -v "subgraph.C|ITVtokExp.C|ITVspiceTok.C|vpplex.C|vrlex.C")
+    [[ -n $MAIN ]] && SRCWC=$(($SRCWC-1))
+    cd $LIBDIR
+
+    LIBTYPES="O g"
+    [[ $PLATFORM = 64-rs_aix53 && $REL_VER = 1201 ]] && LIBTYPES="O g pg"
+    [[ $PLATFORM = 64-linux40 && $REL_VER = 1201 ]] && LIBTYPES="O g pg"
+
+    for TYPE in $LIBTYPES
+     do
+      print "Checking lib${COMP}-${TYPE}.a" >> $LOGFILE
+      if [[ ! -a $LIBDIR/lib${COMP}-${TYPE}.a ]]
+       then
+        print "lib${COMP}-${TYPE}.a does not exist in $LIBDIR. Need to rebuild\n" >> $LOGFILE
+        cd $BUILDDIR/$COMP/Arch-${ARCH}
+        VALUES="*.d"
+        [[ $COMP = itvio ]] && VALUES="*.[dCCh]"
+        [[ $COMP = edaver ]] && VALUES="*.[dCCh]"
+        for DFILE in $(find . -name "$VALUES" -print | $GREP "Arch-${ARCH}")
+         do
+  	  print "rm $DFILE" >> $LOGFILE
+	  /bin/rm -f $DFILE >> $LOGFILE 2>&1
+        done
+
+     #   print "/bin/rm -fr $BUILDDIR/$COMP/Arch-${ARCH}/*" >> $LOGFILE
+     #   /bin/rm -fr $BUILDDIR/$COMP/Arch-${ARCH}/* 2>>$LOGFILE >> $LOGFILE
+        $GREP $COMP $RESULTFILE 2>/dev/null >/dev/null
+        [[ $? != 0 ]] && print "$COMP" >> $RESULTFILE
+      else
+	
+        LIBWC=$($AR ${SUFF} vt lib${COMP}-${TYPE}.a | wc -l) >> $LOGFILE
+        if [[ $COMP = itvrc || $COMP = itvio || $COMP = edaver ]]
+         then
+	  print "Lib count: $LIBWC" >> $LOGFILE
+        fi
+        if [[ $SRCWC -ne $LIBWC ]]
+         then
+          if [[ $COMP != itvlocal ]]
+           then
+            print "There is a discrepancy between $COMP library count and $COMP source count. Deleteing lib${COMP}-${TYPE}.a\n" >> $LOGFILE
+            print "Library count: $LIBWC   Source count: $SRCWC" >> $LOGFILE
+            if [[ -z $NODELETE ]]
+             then
+              print "/bin/rm $LIBDIR/lib${COMP}-${TYPE}.a" >> $LOGFILE
+              /bin/rm $LIBDIR/lib${COMP}-${TYPE}.a >> $LOGFILE 2>&1
+	      #print "/bin/rm $BUILDDIR/$COMP/Arch-${ARCH}/*.[dhCc]" >> $LOGFILE
+	      #/bin/rm $BUILDDIR/$COMP/Arch-${ARCH}/*.[dhCc] 2>>$LOGFILE >> $LOGFILE
+	      print "/bin/rm $BUILDDIR/$COMP/Arch-${ARCH}/*.d" >> $LOGFILE
+	      /bin/rm $BUILDDIR/$COMP/Arch-${ARCH}/*.d >> $LOGFILE 2>&1
+            fi
+            if [[ $COMP = itvio || $COMP = edaver  && -z $NODELETE ]]
+             then
+                print "/bin/rm $BUILDDIR/$COMP/.*${PLATFORM}" >> $LOGFILE
+                /bin/rm $BUILDDIR/$COMP/.*${PLATFORM} >> $LOGFILE 2>&1 
+            fi
+            $GREP $COMP $RESULTFILE 2>/dev/null >/dev/null
+            [[ $? != 0 ]] && print "$COMP" >> $RESULTFILE
+           else
+            if (( $SRCWC - $LIBWC >1 ))
+             then
+              print "There is a discrepancy between $COMP library count and $COMP source count. Deleting lib${COMP}-${TYPE}.a\n" >> $LOGFILE
+              print "Library count: $LIBWC   Source count: $SRCWC" >> $LOGFILE
+	      print "/bin/rm $BUILDDIR/$COMP/Arch-$PLATFORM/*.[d]" >> $LOGFILE
+	      /bin/rm $BUILDDIR/$COMP/Arch-$PLATFORM$/*.[d] >>$LOGFILE 2>&1
+              print "/bin/rm $LIBDIR/lib${COMP}-${TYPE}.a" >> $LOGFILE
+              /bin/rm $LIBDIR/lib${COMP}-${TYPE}.a >> $LOGFILE 2>&1
+              $GREP $COMP $RESULTFILE 2>/dev/null >/dev/null
+              [[ $? != 0 ]] && print "$COMP" >> $RESULTFILE
+            fi
+          fi
+        fi
+      fi
+    done
+  fi
+done
+
+ENTIRE=TRUE
+print "/bin/rm $COMPLOCK $MACHLOCK" >> $LOGFILE
+/bin/rm $COMPLOCK $MACHLOCK 2>/dev/null
+
+goodbye

@@ -1,0 +1,1036 @@
+#!/usr/bin/env perl
+#=============================================================================
+#    FILE: setup_xmit_dirs
+#
+# CREATOR: Art Magnan
+#    DEPT: AZYX
+#
+# OUTPUTS:
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# Create symlinks in the .ship-<platform> directories for the ship or tk 
+# levels.
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 04/15/2011 AM  Initial version
+# 04/22/2011 AM  Added function to determine if a directory is empty.
+#                Updated logic to require that topDir not be empty in order to
+#                create an xmitlink.
+# 05/03/2011 AM  Added functionality to get ".dont_ship" file from reference
+#                release (if it exists) and copy to component/release area
+#                (if it does not already exist).
+# 05/04/2011 AM  Added file log capability.
+# 05/13/2011 AM  Changed all references from btv/edainfra to eda/edainfra for
+#                SVN migration.
+# 08/08/2011 AM  Updated to use the external component definition files. 
+#                Handled by subroutines added to TkCommon Perl module.
+# 08/09/2011 AM  Updated to allow testing of code in developer's sandbox via 
+#                the codePath variable.
+#                Updated program to accept -t <tkVersion> switch; 
+#                eliminated -r <release> switch.
+# 08/26/2011 AM  Updated code to create TCLZ symlinks for specific 
+#                components (special case).
+# 08/29/2011 AM  Updated code to handle tgsupport component (special case).
+#                Updated code to delete existing symlinks in .ship-{plat} dirs.
+# 03/25/2012 EH  Disabled option to use release 13.1 as a reference.
+# 03/25/2012 EH  Updated to use ship level as a reference when tk is specified
+#                as the new xmittal repository.
+# 03/25/2012 EH  Fixed bug that prevented symlinks to files from being copied.
+# 04/09/2012 EH  Updated to use tclz symlink for asicclk.
+# 04/09/2012 EH  Cleaned up comments and formating.
+# 04/30/2012 EH  Updated to use tk as a reference level when processing for
+#                the ship repository.
+# 06/15/2012 EH  Rewrote a substantial portion of this script to address:
+#                MDCMS00121029, MDCMS00121028 and MDCMS00121023.
+# 07/29/2012 EH  Eliminated some nuisance warning messages.
+# 07/31/2012 EH  Fixed bug that prevented all symlinks from being created when
+#                there was no .ship* content in the reference level.
+# 03/25/2013 GS  Updated to support new customtk locations.  Refactored
+#                code for readability and clarity.
+# 02/12/2014 GS  Updated to copy new packaging system files.
+# 06/24/2016 NMC Updated to support new platform p-linux .ship dirs
+#                Updated to create tcl->tclz links for specific comps in plinux .ship
+# 06/29/2016 NMC added wss component for build_tclz process
+# 07/05/2016 NMC added itime comp for build_tclz process
+#                Updated @dirList with additional links to be created depending on the component
+# 31/08/2016 NMC Updated build_tclz process to create tclz links for fg and css components
+#                only for 15.1 release
+# 07/09/2016 NMC Updated to create .ship links for vhdl for 6thsense component
+#=============================================================================
+
+use warnings;
+use strict;
+use Env;
+use Getopt::Std;
+use Getopt::Long;
+use File::Copy;
+use File::Find qw(find);
+use File::Path qw(mkpath);
+
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TKutils;
+use TkCommon;
+
+my $userID = $LOGNAME;
+my $appName = "setup_xmit_dirs";
+
+my $maxRC = 0;
+my $rc = 0;
+
+our @mlData;
+
+my $codePath = "/afs/eda/data";
+
+# Global variables
+my $refLevel = "";
+my @dirList = ();
+my @platList = "";
+my $xmitLoc  = "";
+my $dotShipTgtPath = "";
+my $release = "";
+my $relVer = "";
+my $component = "";
+my $tgtLevel = "";
+my $date_now = "";
+my $time_now = "";
+my $monthName = "";
+my $monthDay = "";
+my $logFile = "";
+my $dotShipDir = "";
+my $dotShipRefPath = "";
+my $topDir = "";
+my $xmitLink = "";
+my $cleanLinks = "";
+my @multilevelData = ();
+my $cmdLineArgs = "";
+my @VALID_LEVELS = ("ship", "tk", "customtk");
+
+# Program variables
+my $help = "";
+my $devMode = "";
+my $toolKit = "";
+my $verbose   = 0;
+my $debug     = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Read the command line arguments
+exit $ERROR if (process_cmd_line() != $OK);
+
+# Set up program parameters
+my $dbType = "";
+my $xmitPrefix = "/afs/eda";
+my $logSuffix = "log";
+my $scriptPath = "${codePath}/edainfra/tools/enablement/prod/bin";
+if ($devMode) {
+  $dbType = "-db DEV";
+  $xmitPrefix .= "/u/svnlib";
+  $logSuffix = "devlog";
+  $scriptPath = "${codePath}/edainfra/tools/enablement/dev/bin";
+}
+
+# Set up the log file
+create_timestamp();
+my $datetime = "$date_now at $time_now";
+my $logDir = "/afs/eda/u/$userID/logs/$monthName";
+`mkdir -p $logDir` if (! -d $logDir);
+$logFile = "/afs/eda/u/$userID/logs/$monthName/";
+$logFile .= "$monthDay.$component.$relVer.$appName.$logSuffix";
+print "logFile: $logFile\n";
+open(LOGFILE, ">$logFile") ||
+  die ("Output file $logFile cannot be opened.\n");
+
+chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+my $afsId = (getpwuid($<)) [0];
+chomp(my $machine = `hostname`);
+print "\n$dateTime $afsId on $machine invoked $appName $cmdLineArgs\n\n";
+print LOGFILE "\n$dateTime $afsId on $machine invoked $appName $cmdLineArgs\n\n";
+
+# Validate that the component is defined in the CM DB
+my $command = "$scriptPath/validateRelComp -r $release -c $component $dbType";
+
+my @results = `$command`;
+$rc = $? >> 8;
+
+if ($rc > 0) {
+  print "ERROR: Component $component is not defined for $release\n";
+  print @results;
+  exit $ERROR;
+}
+
+# Disable buffering of stdout
+$|++;
+
+# Define supported platforms
+@platList = TKutils::GetShipPlatforms($toolKit);
+print "\nPlatforms for $toolKit:\n";
+print $_, "\n" foreach @platList;
+print LOGFILE "\nPlatforms for $toolKit:\n";
+print LOGFILE $_, "\n" foreach @platList;
+
+#64-amd64_linux26_RH6
+#64-ppc64le_linux26_RH7
+
+
+# Define the list of component/release subdirectories that are candidates for
+# symlinks in .ship-<platform> directories.
+CreateDirCandidateList();
+
+# Define target component/release path
+$xmitLoc = "$xmitPrefix/$tgtLevel/$component/$release";
+print         "xmitLoc: $xmitLoc\n";
+print LOGFILE "xmitLoc: $xmitLoc\n";
+#  /afs/eda/customtk/tk15.1.99/css/15.1 (Ex for 15.1.99 and css comp)
+
+
+# Copy system files (.dont_ship, .dont_follow, ...)
+if ($toolKit eq "15.1.0") {#change accordingly when creating 16.1.0 firts toolkit toolkit
+  CopySysFiles("$xmitPrefix/$refLevel/$component/14.1", $xmitLoc);
+}
+else {
+  CopySysFiles("$xmitPrefix/$refLevel/$component/$release", $xmitLoc);
+}
+
+
+#=============================================================================
+# Create symlinks for each platform specific .ship directory
+#=============================================================================
+my $plat = "";
+foreach $plat (sort(@platList)) {
+	
+  $dotShipDir = ".ship-$plat";
+  $dotShipTgtPath = "$xmitLoc/$dotShipDir";
+  $dotShipRefPath ="/afs/eda/$refLevel/$component/$release/$dotShipDir";
+  
+ if ($toolKit eq "15.1.1") { ##change accordingly when creating 16.1.0 toolkit
+    $dotShipRefPath ="/afs/eda/customtk/tk15.1.99/$component/15.1/$dotShipDir";
+  }
+  # Above change: navechan
+  # For new tk 15.1.1 that is being created, the dotShipRefPath would be customtk/.ship path of tk15.1.99 test toolkit.
+  # with this, .ship dirs for 15.1.1 will be  created exactly similar to the test tk15.1.99 toolkit (which is setup by talking to developers)
+  # after creating 15.1.1, we can give that toolkit here as referece for all future toolkits
+  
+  print         "\ndotShipRefPath: $dotShipRefPath\n";
+  print LOGFILE "\ndotShipRefPath: $dotShipRefPath\n";
+  print         "Processing         $dotShipTgtPath\n";
+  print LOGFILE "Processing         $dotShipTgtPath\n";
+
+  # Remove existing symlinks in target .ship-* directory if -cleanlinks
+  # option was specified.
+  clean_symlinks() if ($cleanLinks);
+
+  # Create target .ship-<platform> directory if it does not exist
+  if (! -e $dotShipTgtPath) {
+    $command = "mkdir $dotShipTgtPath";
+    print         "Creating directory $dotShipTgtPath\n";
+    print LOGFILE "Creating directory $dotShipTgtPath\n";
+
+    # Skip command execution if the -k option was specified
+    if (! $debug) {
+      @results = `$command`;
+      $rc = $? >> 8;
+
+      if ($rc > 0) {
+        print "ERROR: Unable to create directory with $command\n";
+        print @results;
+        exit $ERROR;
+      }
+    }
+  }
+
+  # cd to the target .ship-{platform} directory
+  chdir($dotShipTgtPath) || die "ERROR8: Can't cd to $dotShipTgtPath\n";
+
+  # Use reference level component/release content if available.
+  if ( -d $dotShipRefPath)  {
+   print "Reference level Available. Calling ProcessMLWithRef()\n";
+   print LOGFILE "Reference level Available. Calling ProcessMLWithRef\n";
+  
+   # Create symlinks
+    print "Using reference level .. $refLevel\n";
+    print LOGFILE "Using reference level .. $refLevel\n";
+    # Use ProcessMLWithRef() by default if .ship-* directory exists in
+    # reference level.
+    $rc = ProcessMLWithRef();
+    $maxRC = max_rc($rc, $maxRC);
+		
+    # Where appropriate, create tcl symlink to tclz directory
+    $rc = build_tclz_comp($topDir, $xmitLink, $component);
+    $maxRC = max_rc($rc, $maxRC);
+  }
+	
+  # Otherwise use the default directory list (@dirList). This is necessary when
+  #   1. A reference level is not available (e.g., new component)
+  #   2. The .ship-<platform> directory does not exist in the reference level
+  else {
+    print "Reference level not availabe. Calling ProcessSLNoRef()\n";
+    print LOGFILE "Reference level not availabe. Calling ProcessSLNoRef\n";
+    
+   #navechan: First create tcl->tclz links if the comp belong to that list
+   # this will make sure all comps that needs tcl to be linked to tclz are 
+   # created first and normal tcl linking happens later and that skips these links.
+   print "Creating tcl->tclz link if required for this Component...\n";
+   print LOGFILE "Creating tcl->tclz link if required for this Component...\n";
+   
+   print "component: $component\n";
+   print "topDir: $topDir\n";
+   print "xmitLink: $xmitLink\n";   
+   print LOGFILE "component: $component\n";
+   print LOGFILE "topDir: $topDir\n";
+   print LOGFILE "xmitLink: $xmitLink\n";    
+
+    $rc = build_tclz_comp($topDir, $xmitLink, $component);
+    $maxRC = max_rc($rc, $maxRC);
+
+    print "Using default dir list ..\n"; 
+    print LOGFILE "Using default dir list ..\n";
+    $rc = ProcessSLNoRef($plat);
+    $maxRC = max_rc($rc, $maxRC);
+
+    # Where appropriate, create tcl symlink to tclz directory
+    # navechan: moving this to be done before creating other links
+    # $rc = build_tclz_comp($topDir, $xmitLink, $component);
+    # $maxRC = max_rc($rc, $maxRC);
+  }
+}
+
+# Tell user that processing has ended
+print         "\n$appName script has completed. rc = $maxRC\n\n";
+print LOGFILE "\n$appName script has completed. rc = $maxRC\n\n";
+close (LOGFILE);
+
+exit ($maxRC);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : help()
+# Purpose: Prints description and usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub help {
+
+  my $description = "
+This script creates the platform-specific transmittal window for a given
+component in the SHIP, TK or new CUSTOMTK repositories.
+
+SYNTAX:
+  setup_xmit_dirs <-t toolkit> <-c component> <-x ship|tk|customtk>
+                  [-d] [-g] [-i reference_release] [-cleanlinks] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+
+WHERE:
+  toolkit   = Tool Kit version, e.g. 14.1.1
+  component = TK component name, e.g. ess
+  -x        = level where symlinks are to be written: ship|tk|customtk
+  -d        = Development Mode ON
+  -g        = Debug mode ON - will see what would execute.
+  -y          Verbose mode ON.
+  -h          Application help
+  -cleanlinks Remove existing .ship-<platform> directories
+
+NOTES:
+  1. The Tool Kit version, component, and level where symlinks are to
+     be written is required.
+  2. The xmittal repository locations are:
+     For SHIP    : \"afs/eda/ship/<component>/<release>\"
+     For TK      : \"afs/eda/tk/<component>/<release>\"
+     For CUSTOMTK: \"afs/eda/customtk/tk<toolkit>/<component>/<release>\"
+  3. Unless the -cleanlinks option is specified, any existing symlinks 
+     will be left undisturbed.
+  4. Unless the .dont_ship already exists in the target location, the 
+     .dont_ship file in the reference location will be copied to the target 
+     location.\n";
+
+  print $description;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : process_cmd_line()
+# Purpose: Read and verify command line arguments
+# RCs    : none
+#------------------------------------------------------------------------------
+sub process_cmd_line {
+
+  # Capture command line arguments for logging (before GetOptions deletes them)
+  $cmdLineArgs = join(' ', @ARGV);
+
+  # Parse command line arguments
+  GetOptions ('t=s'         => \$toolKit,
+              'c=s'         => \$component,
+              'd'           => \$devMode,
+              'x=s'         => \$tgtLevel,
+              'i=s'         => \$refLevel,
+              'cleanlinks'  => \$cleanLinks,
+              'g'           => \$debug,
+              'y'           => \$verbose,
+              'help|h|?'    => \$help) || return $ERROR;
+
+  # Display application usage if requested
+  if ($help) {
+    help();
+    return $ERROR;
+  }
+
+  # Verify Tool Kit
+  if ($toolKit eq "") {
+    print "ERROR: Toolkit (-t) is a required parameter\n";
+    return $ERROR;
+  }
+  if (TkCommon::check_tkVersion ($toolKit) != 0) {
+    print "ERROR: Tool Kit must in the x.y.z format\n";
+    return $ERROR;
+  }
+  else {
+    # Define release
+    $release = TkCommon::convert_tkVersion($toolKit, "release");
+    $relVer  = TkCommon::convert_tkVersion($toolKit, "selfstore");
+  }
+
+  # Verify component
+  if ($component eq "") {
+    print "ERROR: Component (-c) is a required parameter\n";
+    return $ERROR;
+  }
+
+  # Verify level (ship or tk or customtk)
+  if ($tgtLevel eq "") {
+    print "ERROR: Target Level (-x) is a required parameter\n";
+    return $ERROR;
+  }
+  my @tokens = split(/\//, $tgtLevel);
+  my $loc = $tokens[0];
+  if (! grep(/^$loc$/, @VALID_LEVELS)) {
+    print "ERROR: Valid values for -x are " . join(",", @VALID_LEVELS) . "\n";
+    return $ERROR;
+  }
+
+  # Set the refLevel if not set
+  if ($refLevel eq "") {
+    $refLevel = "ship" if ($tgtLevel eq "tk");
+    $refLevel = "tk" if ($tgtLevel eq "ship");
+    if ($tgtLevel =~ /customtk/) {
+      print "ERROR: for custom ToolKits the refLevel (-i) must be specified\n";
+      return $ERROR;
+    }
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : max_rc()
+# Purpose: Return the rolling maximum return code
+# RCs    : maximum return code
+#------------------------------------------------------------------------------
+sub max_rc {
+
+  my ($rc, $maxrc) = @_;
+
+  $maxrc = $rc if ($rc > $maxrc);
+
+  return ($maxrc);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : isDirEmpty()
+# Purpose: Determine if a directory is empty
+# RCs    : 0 = Not empty
+#          1 = Empty
+#------------------------------------------------------------------------------
+sub isDirEmpty {
+
+  my ($dir) = @_;
+  my $isEmpty = "";
+  my $fileCnt = 0;
+
+  opendir (DIR, "$dir") || die ("Unable to open directory.");
+  my $filename = "";
+  while ($filename = readdir (DIR)) {
+    if (($filename ne ".") && ($filename ne "..")) {
+      $fileCnt++;
+    }
+  }
+	
+  if ($fileCnt > 0) {
+    if ($devMode) {
+      print LOGFILE "Files found.\n";
+    }
+    $isEmpty = 0;
+  }
+  else {
+    if ($devMode) {
+      print LOGFILE "No files found.\n";
+    }
+		$isEmpty = 1;
+  }
+  closedir (DIR);
+
+  return ($isEmpty);
+
+}
+
+
+#------------------------------------------------------------------------------
+# create_timestamp()
+#------------------------------------------------------------------------------
+sub create_timestamp {
+
+  my @months = qw(jan feb mar apr may jun jul aug sep oct nov dec);
+
+  my @tokens = localtime(time);
+  my $min  = $tokens[1];
+  my $hour = $tokens[2];
+  my $mday = $tokens[3];
+  my $mon  = $tokens[4];
+  my $year = $tokens[5];
+
+  $year = $year + 1900;
+
+  my $month = $mon + 1;
+  $monthName = $months[$mon];
+  $monthDay = $monthName . $mday;
+
+  $date_now = $month . "/" . $mday . "/" . $year;
+
+  my $newmin;
+  if ($min < 10) {
+    $newmin = "0" . $min;
+  }
+  else {
+    $newmin = $min;
+  }
+  $time_now = $hour . ":" . $newmin;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Remove symlinks
+#------------------------------------------------------------------------------
+sub clean_symlinks {
+
+  my $rc = 0;
+
+  # Remove the target .ship-<platform> directory
+  $command = "rm -fr $dotShipTgtPath";
+  print         "Running     $command\n";
+  print LOGFILE "Running     $command\n";
+
+  # Skip command execution if the -k option was specified
+  unless ($debug) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to remove $dotShipTgtPath with $command\n";
+      print @results;
+      exit $ERROR;
+    }
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Read symlinks recursively, starting at $srcDir, and store their information
+# in records assigned to mlData using perl "find" call to get_refdir_links.
+#------------------------------------------------------------------------------
+sub read_symlinks {
+  find({wanted => \&get_refdir_links, follow_fast => 1, follow_skip => 2},
+       $dotShipRefPath);
+}
+
+
+#------------------------------------------------------------------------------
+# Read the directory tree to get the record data for the symlinks starting
+# at the $srcDir referred to in the File::Find call from read_symlinks().
+#------------------------------------------------------------------------------
+sub get_refdir_links {
+
+  my $ptrTo = "";
+  my $rec   = {};
+	
+  # Only consider symlinks
+  if (-l) {
+
+    chomp(my $ls_result = `ls -l $_`);
+    $ptrTo = (split (" -> ", $ls_result)) [1];
+
+    # Skip symlinks that are directly below another symlink
+    # (to avoid recursing too deeply)
+    if (-l "$File::Find::dir") {
+      return $OK;
+    }
+
+    if ($verbose) {
+      print "\n\n  As derived from reference location:\n";
+      print     "    symlink name: $_\n";
+      print     "    pointsTo:     $ptrTo\n";
+      print     "    location:     $File::Find::dir\n";
+    }
+
+    $rec->{name} = $_;
+    $rec->{location} = $File::Find::dir;
+    $rec->{pointsTo} = $ptrTo;
+
+    # Add $rec to @multilevelData
+    push (@multilevelData, $rec);
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Use the symlink attributes in @multilevelData to create new symlinks under.
+#------------------------------------------------------------------------------
+sub write_symlinks {
+
+  my $linkAttributes;
+  my $subDir = "";
+
+  # Process the records
+  foreach $linkAttributes (@multilevelData) {
+
+    if ($verbose) {
+      print "\nData from reference location: $dotShipRefPath\n";
+      print "   symlink name: $linkAttributes->{name}\n";
+      print "   location:     $linkAttributes->{location}\n";
+      print "   pointsTo:     $linkAttributes->{pointsTo}\n";
+    }
+
+    # Initially assume that this entry has no subdirectory under .ship*
+    # in the reference location.
+    $subDir = "";
+
+    # When appropriate, handle case where there is a subdirectory under .ship*
+    # in the reference location.
+    unless ($linkAttributes->{location} =~ /$dotShipDir$/) {
+
+      # Parse $subDir directory name from "location"
+      $subDir = (split (/$dotShipDir\//, $linkAttributes->{location})) [1];
+
+      # Prepending "/" to eliminate "//" in constructed path below when 
+      #$subDir does not exist
+      $subDir = "/" . $subDir unless ($subDir eq "");
+      print   "   subDir:       $subDir\n" if ($verbose);
+
+      # Create subDir under $dotShipTgtPath if it does not already exist.
+      # mkpath() will create intermediate directories if they don't already
+      # exist.
+      if (! -d "$dotShipTgtPath$subDir") {
+        print         "Creating directory $dotShipTgtPath$subDir\n";
+        print LOGFILE "Creating directory $dotShipTgtPath$subDir\n";
+        mkpath("$dotShipTgtPath$subDir") || 
+	  die "Cannot create directory $dotShipTgtPath$subDir\n";
+      }
+    }
+
+    # Create symlink only if $subDir exists in $dotShipTgtPath
+    if (-e "$dotShipTgtPath$subDir") {
+
+      # Construct the full path to the symlink
+      $xmitLink = "$dotShipTgtPath$subDir/$linkAttributes->{name}";
+
+      # Check if symlink target exists in target level.
+      #Skip creation of symlink if target is not present.
+      my $linkTarget = "$dotShipTgtPath$subDir" . "/" .
+	"$linkAttributes->{pointsTo}";
+      unless (-e $linkTarget) {
+        print "  Skipping  $xmitLink because symlink target doesn't exist\n";
+        next;
+      }
+
+      # Create the $xmitLink symlink if it does not already exist.
+      if (! -l "$xmitLink") {
+	
+	if (symlink("$linkAttributes->{pointsTo}", "$xmitLink")) {
+          print "  Created symlink $xmitLink -> $linkAttributes->{pointsTo}\n";
+          print LOGFILE "  Created symlink $xmitLink -> ";
+	  print LOGFILE "$linkAttributes->{pointsTo}\n";
+	}
+	else {
+	  print "ERROR Unable to create symlink ";
+	  print "$xmitLink -> $linkAttributes->{pointsTo}\n";
+          return $ERROR;
+	}
+      }
+    }
+    else {
+      print "WARN Unable to find directory $dotShipTgtPath$subDir. ";
+      print "Cannot create $xmitLink symlink derived from reference data.\n";
+      return $ERROR;
+    }
+  }
+
+  # Initialize the array before the next platform is processed
+  @multilevelData = ();
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Create the symlink in .ship-* directory for current component in target level
+# TODO: Update this so it can be used to eliminate redundant code in
+#       write_symlinks().
+#------------------------------------------------------------------------------
+sub build_xmit_window {
+
+  my ($topDir, $xmitLink) = @_;
+
+  chomp(my $curDir = `pwd`);
+  $curDir =~ s/\.fishkill\.ibm\.com//;
+  print "curDir: $curDir\n";
+  print LOGFILE "curDir: $curDir\n";
+  unless ($curDir eq $dotShipTgtPath) {
+    print "ERROR: Current directory $curDir is not $dotShipTgtPath.\n";
+    return $ERROR;
+  }
+
+  # Only create the symlink if the target of the symlink exists.
+  if ( -e $topDir ) {
+
+    # Create the symlink if it does not already exist.
+    if (! -l "$dotShipTgtPath/$xmitLink") {
+
+      if (symlink("$topDir", "$xmitLink")) {
+        print          "  Created symlink  $xmitLink -> $topDir\n";
+        print LOGFILE  "  Created symlink  $xmitLink -> $topDir\n";
+      }
+      else {
+        print   "ERROR Unable to create symlink $xmitLink -> $topDir\n";
+        return $ERROR;
+      }
+    }
+    else {
+      print "  Symlink $dotShipTgtPath/$xmitLink already exists. ";
+      print "It will be left undisturbed.\n";
+    }
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# For the components specified below, the symlink named "tcl" will point to
+# the "tclz" directory.
+#------------------------------------------------------------------------------
+sub build_tclz_comp {
+
+  my ($topDir, $xmitLink, $component) = @_;
+  my $rc = 0;
+
+  # navechan: Get release name from toolkit name
+  #my @tokens = ();
+  #@tokens = split(/\./, $toolKit);
+  #pop(@tokens);
+  #my $rel = join(".", @tokens);
+  #print "\nrelease: $rel";
+  
+  #navechan
+  print "\n Building tclz for release: $release";
+
+  if (($component eq "asicclk") ||
+      ($component eq "booledozer") ||
+      ($component eq "duplos") ||
+      ($component eq "etreetest1") ||
+      ($component eq "gna") ||
+      ($component eq "hdp") ||
+      ($component eq "mar") ||
+      ($component eq "mar2") ||
+      ($component eq "pds") ||
+      ($component eq "rapids") ||
+      ($component eq "sss") ||
+      ($component eq "wss") ||
+      ($component eq "itime") ||
+      ($component eq "theguide")||
+      (($component eq "fg") && ($release eq "15.1"))|| # We need to have tcl -> tclz links only in 15.1 and for fg and css components - navechan
+      (($component eq "css") && ($release eq "15.1"))) 
+  {
+
+    # Define tcl symlink to point to top-level tclz directory
+    $xmitLink = "tcl";
+    $topDir = "../tclz";
+
+    print "  Forcing a new tcl -> tclz symlink (overlaying any existing ";
+    print "tcl -> tcl symlink)\n";
+
+    # Build symlink that forms "transmittal window" between the .ship-{plat}
+    # directory and top-level directories to analyze for transmittal.
+    $rc = build_xmit_window ($topDir, $xmitLink);
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateDirCandidateList()
+# Purpose: Define list of component/release subdirectories that are candidates
+#          for symlinks in .ship-<platform> directories.
+#          This list is only used when there is no .ship-* directory in the
+#          reference level to identify directory candidates.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateDirCandidateList {
+
+  # Define list of component/release subdirectories that are candidates for
+  # symlinks in .ship-<platform> directories.
+  @dirList = ("bin", "dll", "etc", "html", "pixmaps", "tcl", "xml",
+	      "rules", "msg", "abstract", "custom", "scripts", "examples",
+	      "pdf", "perl", "nutscript","tools","configs","params","oaroot"); # included additional candidates from tools (navechan)
+
+  # Component specific additions to $dirList
+  if ($component eq "nutshell") {
+    push(@dirList, ("lib", "pm", "include"));
+  }
+  elsif ( $component eq "alacrite" ) {
+    push(@dirList, ("alac_extras", "local"));
+  }
+  elsif ( $component eq "asicclk" ) {
+    push(@dirList, "clocktree");
+  }
+  elsif ( $component eq "bonntools" ) {
+    push(@dirList, "doc");
+  }
+  elsif (($component eq "casai") || ($component eq "cpc")) {
+    push(@dirList, ("lib", "SYSDEFS", "data", "posters", "profiles",
+		    "scheme", "scheme.contrib", "scheme.elk", "scheme.preelk",
+		    "scheme.usermenus"));
+  }
+  elsif ( $component eq "dcl" ) {
+    push(@dirList, "include");
+  }
+  elsif ( $component eq "DCLrte" ) {
+    push(@dirList, "lib");
+  }
+  elsif ( $component eq "dkbuilder" ) {
+    push(@dirList, "doc test");
+  }
+  elsif ( $component eq "edags" ) {
+    push(@dirList, "lib");
+  }
+  elsif ( $component eq "gna" ) {
+    push(@dirList, "statsweb");
+  }
+  elsif ( $component eq "mar" ) {
+    push(@dirList, "doc");
+  }
+  elsif ( $component eq "mar2" ) {
+    push(@dirList, "doc");
+  }
+  elsif ( $component eq "pwrspice" ) {
+    push(@dirList, ("doc", "lib", "include"));
+  }
+  elsif ( $component eq "tgsupport" ) {
+    push(@dirList, "theguide_support");
+  }
+  elsif ( $component eq "verity" ) {
+    push(@dirList, "lib", "configs");
+  } #navechan: additional comp specific links to be created 
+  elsif ($component eq "vhdllibs" ) {
+   push(@dirList, "README", "README_IBMLIB","README_IEEE","vhdl_87","vhdl_93");
+  }
+  elsif ($component eq "itime" ) {
+    push(@dirList, "parm", "noise");
+  }
+  elsif ($component eq "alsim" ) {
+    push(@dirList, "tech");
+  }
+  elsif ($component eq "EDAdochtml" ) {
+    push(@dirList, "EDAManuals.html");
+  }
+  elsif ($component eq "flexnet" ) {
+    push(@dirList, "doc","i86_lsb", "ppc_u5");
+  }
+  elsif ($component eq "satsyn" ) {
+    push(@dirList, "parms");
+  }
+  elsif ($component eq "leakapi" ) {
+    push(@dirList, "cfg");
+  }
+  elsif ($component eq "6thsense" ) {
+    push(@dirList, "vhdl");
+  }
+ elsif ($component eq "asf") {
+   push(@dirList, "perl")
+ }
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ProcessMLWithRef()
+# Purpose:
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub ProcessMLWithRef {
+
+  # Read symlinks in reference location
+  read_symlinks();
+
+  # Create symlinks in platform-specific directory if a corresponding
+  # subdirectory exists under component/release directory.
+  my $rc = write_symlinks();
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ProcessSLNoRef()
+# Purpose:
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub ProcessSLNoRef {
+
+  my ($plat) = @_;
+
+  print "Using default directory list to determine symlink candidates ";
+  #print "(there is no reference directory available).\n";
+  print LOGFILE "Using default directory list to determine symlink candidates";
+  #print LOGFILE " (there is no reference directory available).\n";
+
+    
+
+  # Iterate through each directory in the default list
+  foreach $xmitLink (sort(@dirList)) {
+    print "xmitLink from dirList: $xmitLink\n";
+    print LOGFILE "xmitLink from dirList: $xmitLink\n";
+    
+    # Add the platform and -64 suffixes where needed
+    if (($xmitLink eq "lib") || ($xmitLink eq "dll") || ($xmitLink eq "bin")) {
+      
+     #navechan previous(having 64- for platform, but dirs in comp do not have this)
+     # Ex: .bin-ppc64le_linux26_RH7 not .bin-64-ppc64le_linux26_RH7
+     # $topDir = "../.$xmitLink-$plat";
+     
+     # strip 64- from plat and construct topDir
+     my $platNo64 = substr($plat, 3);
+     print "platNo64: $platNo64\n";
+     $topDir = "../.$xmitLink-$platNo64";
+      
+      # navechan: This is not requred because 15.1 is by default 64, so not need to specify bin-64
+      #if ( $plat =~ /64/ ) {
+      #  $xmitLink = $xmitLink . "-64";
+      #}
+
+    }
+    else {
+      $topDir = "../$xmitLink";
+    }
+    
+      print "\ntopDir: $topDir\n";
+      print LOGFILE "topDir: $topDir\n";
+      print "xmitLink: $xmitLink\n";
+      print LOGFILE "xmitLink: $xmitLink\n";
+     
+    # Create symlink in target .ship-<platform> directory
+    $rc = build_xmit_window($topDir, $xmitLink);
+    $maxRC = max_rc($rc, $maxRC);
+
+    # navechan: We need links like bin-64->bin, lib-64->lib, dll-64->dll. after creation above platform spec links
+    
+    if ($xmitLink eq "lib"){
+	my $target = "lib";
+	my $linkName = "lib-64";	
+	$rc = build_xmit_window($target, $linkName);
+        $maxRC = max_rc($rc, $maxRC);
+    }elsif ($xmitLink eq "dll"){
+	my $target = "dll";
+	my $linkName = "dll-64";
+	$rc = build_xmit_window($target, $linkName);
+        $maxRC = max_rc($rc, $maxRC);
+    }elsif ($xmitLink eq "bin"){
+	my $target = "bin";
+	my $linkName = "bin-64";
+	$rc = build_xmit_window($target, $linkName);
+        $maxRC = max_rc($rc, $maxRC);
+    }   
+
+  }
+
+  return $maxRC;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CopySysFiles($srcDir, $tgtDir)
+# Purpose: Copy system files from srcDir to tgtDir if they don't already exist 
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CopySysFiles {
+
+  my ($srcDir, $tgtDir) = @_;
+
+  my $noShipFile = ".dont_ship";
+  my @files = ($noShipFile, ".custom_deliver", ".symlink_dont_follow",
+               ".addon", ".special_path");
+
+  foreach my $file (@files) {
+    my $src = "$srcDir/$file";
+    my $tgt = "$tgtDir/$file";
+    if ($file eq $noShipFile) {
+      if (-f $src && ! -f $tgt) {
+        copy($src, $tgt) ||
+          die "Copy failed: $!\nUnable to cope $src to $tgt";
+        print LOGFILE "Copied $src to $tgt\n";
+      }
+      elsif (-f $tgt) {
+        print LOGFILE "WARNING: $src already in tgt location so not copied\n";
+      }
+      else {
+        print LOGFILE "WARNING: $src not found\n";
+      }
+    }
+
+    else {
+      if (-f $src) {
+        copy($src, $tgt) ||
+          die "Copy failed: $!\nUnable to cope $src to $tgt";
+        print LOGFILE "Copied $src to $tgt\n";
+      }
+      else {
+        print LOGFILE "WARNING: $src not found\n";
+      }
+    }
+
+  }
+
+}
+

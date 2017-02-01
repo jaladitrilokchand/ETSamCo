@@ -1,0 +1,600 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: build_icc_pli2
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 12/23/2014 GS  Rewrite of build_icc_pli.
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Copy;
+
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TKutils;
+
+
+# Global variables
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+my $TKBLD_DIR = "/afs/eda/tkbld/tkinstall";
+my $BIN_DIR = "$TKBLD_DIR/scripts";
+my $ICC_SVN_DIR = "$TKBLD_DIR/icc_svn";
+my $MFILES_DIR = "/afs/eda/u/integ/tkpatch/makefiles";
+my $EBIZ_DIR = "/afs/eda/edadist/ebusiness/ASIC";
+my $MTAR_DIR = "/afs/eda/u/integ/maketar";
+my @PLATS = ("aix61_64", "lnx26_64_rh5");
+my $LNX_PLAT = "lin64b_x86";
+my %FILES = ("installPatchLvlTK", $ICC_SVN_DIR,
+             "pet", "",
+             "PET_eda.conf", "",
+             "README.txt", $TKBLD_DIR,
+             "README_<TK>.txt", "",
+             "tk_longdesc_<TK>", $MFILES_DIR,
+             "tk_shortdesc_<TK>", $MFILES_DIR,
+             "tk<TK>.c_file", $MFILES_DIR,
+             "tk<TK>.i_file", $MFILES_DIR,
+             "tk<TK>.p_file", $MFILES_DIR,
+             "tk<TK>.r_file", $MFILES_DIR,
+             "tk<TK>_file", $MFILES_DIR,
+             "platforms_toolkits", $MTAR_DIR);
+
+
+# Program variables
+my $appName = "build_icc_pli2";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dryRun          = 0;
+my $toolKitPatch    = "";
+my $toolKit         = "";
+my $patchLevel      = "";
+my $stageOnly       = 0;
+my $testMode        = 0;
+my $startDir;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+
+# Do the prep work
+if (ParseTkPatch($toolKitPatch, \$toolKit, \$patchLevel) != $OK) {
+  CleanExit("\nUnable to parse Tool Kit Patch .. exitting", $ERROR);
+}
+SetFileLocations($toolKit, $patchLevel, $LNX_PLAT);
+CopyRequiredFiles($toolKit, $patchLevel);
+
+if (VerifySupportFiles($toolKit, $patchLevel) != $OK) {
+  CleanExit("\nUnable to find ALL support files .. exitting", $ERROR);
+}
+
+
+# Create the tar files
+foreach my $plat (@PLATS) {
+  if (GenerateTarFile($toolKit, $patchLevel, $plat) != $OK) {
+    CleanExit("\nUnable to create TAR files .. exitting", $ERROR);
+  }
+}
+
+
+# Update the platforms_toolkits file
+if (UpdatePlatformsFile($toolKit, $patchLevel) != $OK) {
+  CleanExit("\nUnable to update platforms_toolkits file .. exitting", $ERROR);
+}
+
+
+# Stage files to ICC for reading
+if (StageFiles_Read(%FILES) != $OK) {
+  CleanExit("\nUnable to stage read only files to ICC .. exitting", $ERROR);
+}
+
+
+# Stage files to ICC for download
+if (StageFiles_Download(%FILES) != $OK) {
+  CleanExit("\nUnable to stage download file to ICC .. exitting", $ERROR);
+}
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+  print "Return code: $rc\n";
+
+  chdir($startDir) if (defined($startDir));
+
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script creates a tar files of EDA tool kit deliverables for the given
+tool kit patch level.  This tar file and any required supporting files are
+sent to ICC to be added to the EDA Tool Kit web page for ordering by
+external customers.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tkpatch> [-stage] [-test] [-dryrun] [-y] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tkpatch   = Tool Kit patch level (ie, 18.1.8.0, 18.1.8.1 ...)
+  -stage    = Only stage the tar file and supporting files
+  -test     = Run in test environment (nothing goes to ICC)
+  -dryrun   = Run script in dryrun mode (show commands only)
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('t=s'       => \$toolKitPatch,
+	      'stage'     => \$stageOnly,
+              'test'      => \$testMode,
+	      'dryrun'    => \$dryRun,
+	      'y'         => \$verbose,
+	      'help|h|?'  => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $toolKitPatch) {
+    print "ERROR: Tool Kit (-t) is a required parameter\n";
+    return $ERROR;
+  }
+
+  print "\n" if ($dryRun || $testMode || $stageOnly);
+  print "DRY RUN mode ==> ON\n" if ($dryRun);
+  print "TEST mode ==> ON\n" if ($testMode);
+  print "STAGE ONLY mode ==> ON\n" if ($stageOnly);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ParseTkPatch($tkPatch, $tk_ref, $patch_ref)
+# Purpose: Parses the Tool Kit Patch (18.1.8.1) into the TK (18.1.8) and
+#          patch level (1)
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub ParseTkPatch {
+
+  my ($tkPatch, $tkRef, $patchRef) = @_;
+
+  my @tokens = split(/\./, $tkPatch);
+  return $ERROR if (scalar(@tokens) != 4);
+
+  $$patchRef = pop(@tokens);
+  $$tkRef = join(".", @tokens);
+
+  if ($verbose) {
+    print "\nTool Kit ==> $$tkRef\n";
+    print "Patch    ==> $$patchRef\n";
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GenerateTarFile($tk, $patch, $plat, $FILES_ref)
+# Purpose: Executes the script which generates tar files of TK deliverables
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub GenerateTarFile {
+
+  my ($tk, $patch, $plat) = @_;
+
+  # Construct the command
+  print "Generating tar file for $tk $patch $plat ... \n";
+  my $command = "$BIN_DIR/tarUpTk4icc $tk $patch $plat";
+
+  # Run the command and show results
+  my $status = "";
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc != 0) {
+    print "ERROR: unable to create tar file ...\n";
+    print join("\n", @results), "\n";
+    return $ERROR;
+  }
+
+  # Add the tar file to the FILES hash
+  my $tarBall = "tk$tk" . "." . $patch . "_" . $plat . ".tar.gz";
+  $FILES[$tarBall} = $EBIZ_DIR;
+  print " adding $tarBall to files collection\n" if ($verbose);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdatePlatformsFile()
+# Purpose: Updates the platforms_toolkits file
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub UpdatePlatformsFiles {
+
+  my ($tk, $patch) = @_;
+
+  # Create a backup of the platforms file
+  my $dir = $FILES{"platforms_toolkits"};
+  my $path = "$dir/platforms_toolkits";
+  my @contents = ();
+  if (! IcofFile::ReadFileToList($path, \@contents, 0)) {
+    print "ERROR: unable to read platforms_toolkits file ...\n";
+    print "       $path\n";
+    return $ERROR;
+  }
+
+  # Create collections of the files that need to be processed for an
+  # initial tool kit (patch = 0) and other TK versions
+  my @initial = ("tk<TK>_file",
+                 "tk<TK>.r_file",
+                 "tk<TK>.i_file",
+                 "tk<TK>.p_file",
+                 "tk<TK>.c_file");
+  my @others = ("tk<TK>_file");
+  my @fileList = ();
+  if ($patch == 0) {
+    @fileList = @initial;
+  }
+  else {
+    @fileList = @others;
+  }
+
+  my $date = `date +%m/%d/%Y`;
+  chomp($date);
+
+  # Read the platforms file
+  foreach my $plat (@PLATS) {
+
+    foreach my $file (@fileList) {
+      my $line = FormatLine($file, $tk, $patch, $plat, $date);
+
+    }
+
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : StageFiles_Read(%FILES)
+# Purpose: Stages all read only files to ICC
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub StageFiles_Read {
+
+  #my ($tkPatch, $tkRef, $patchRef) = @_;
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : StageFiles_Download(%FILES)
+# Purpose: Stages all downloadable files to ICC
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub StageFiles_Download {
+
+  #my ($tkPatch, $tkRef, $patchRef) = @_;
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetFileLocations($tk, $patch, $linPlat)
+# Purpose: Updates the file locations for this tk patch
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub SetFileLocations {
+
+  my ($tk, $patch, $linPlat) = @_;
+
+  my $location = GetTkbldPlatDir($tk, $patch, $linPlat);
+  my $petDir = "$location/pet/14.1";
+
+  if ($verbose) {
+    print "\nSetting file locations .. \n";
+    print " pet             ==> $petDir\n";
+    print " PET_eda.conf    ==> $petDir\n";
+    print " README_<TK>.txt ==> $location\n";
+  }
+
+  $FILES{"pet"} = $petDir;
+  $FILES{"PET_eda.conf"} = $petDir;
+  $FILES{"README_<TK>.txt"} = $location;
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CopyRequiredFiles($tk, $patch)
+# Purpose: Copies required files for this tk patch
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub CopyRequiredFiles {
+
+  my ($tk, $patch) = @_;
+
+  my $rc = $OK;
+  if ($patch eq "0") {
+    if (CopyFile("installPatchLvlTK", "tk<TK>.i_file", $tk, $patch) != $OK) {
+      $rc = $ERROR;
+    }
+    if (CopyFile("pet", "tk<TK>.p_file", $tk, $patch) != $OK) {
+      $rc = $ERROR;
+    }
+    if (CopyFile("PET_eda.conf", "tk<TK>.c_file", $tk, $patch) != $OK) {
+      $rc = $ERROR;
+    }
+    if (CopyFile("README.txt", "tk<TK>.r_file", $tk, $patch) != $OK) {
+      $rc = $ERROR;
+    }
+  }
+
+  if (CopyFile("README_<TK>.txt", "tk<TK>_file", $tk, $patch) != $OK) {
+    $rc = $ERROR;
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : VerifySupportFiles($tk, $patch)
+# Purpose: Confirms all required support files exist
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub VerifySupportFiles {
+
+  my ($tk, $patch) = @_;
+  my $rc = $OK;
+
+  print "\nVerifying support files exist ...\n";
+
+  my @supportInitial = ("tk_longdesc_<TK>",
+                        "tk_shortdesc_<TK>",
+                        "tk<TK>.c_file",
+                        "tk<TK>.i_file",
+                        "tk<TK>.p_file",
+                        "tk<TK>.r_file");
+  my @supportAll = ("tk<TK>_file");
+
+  # Create the list of files to verify
+  my @fileList = @supportAll;
+  push(@fileList, @supportInitial) if ($patch == 0);
+
+  # Verify files
+  for my $file (@fileList) {
+    my $dir = $FILES{$file};
+    my $newFile = ConvertName($file, $tk, $patch);
+    print " Verifying $dir/$newFile ...\n" if ($verbose);
+    if (! -e "$dir/$newFile") {
+      print "  ERROR: unable to find $dir/$newFile\n";
+      $rc = $ERROR;
+    }
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetTkbldPlatDir($tk, $patch, $plat)
+# Purpose: Constructs the patch to
+#          /afs/eda/tkbld/tkinstall/ptn/<LPLAT>/tk<TK>/tk<TK>.0_<LPLAT>
+# RCs    : path
+#------------------------------------------------------------------------------
+sub GetTkbldPlatDir {
+
+  my ($tk, $patch, $plat) = @_;
+  my $dir = "$TKBLD_DIR/ptn/$plat/tk$tk/tk$tk" . "." . $patch . "_" . $plat;
+
+  return $dir
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ConvertName($name, $tk, $patch)
+# Purpose: Converts a file name like tk<TK>_file to tk18.1.8.1_file
+# RCs    : new file name
+#------------------------------------------------------------------------------
+sub ConvertName {
+
+  my ($name, $tk, $patch) = @_;
+  return $name if ($name !~ /<TK>/);
+
+  my $newTk = $tk;
+  $newTk .= "." . $patch if ($patch != 0);
+  #print "Replacing <TK> with $newTk\n" if ($verbose);
+
+  $name =~ s/<TK>/$newTk/g;
+
+  return $name
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CopyFile($srcFile, $tgtFile, $tk, $patch)
+# Purpose: Copies the srcFile to tgtFile
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub CopyFile {
+
+  my ($srcFile, $tgtFile, $tk, $patch) = @_;
+
+  my $srcDir = $FILES{$srcFile};
+  my $tgtDir = $FILES{$tgtFile};
+
+  $srcFile = ConvertName($srcFile, $tk, $patch);
+  $tgtFile = ConvertName($tgtFile, $tk, $patch);
+
+  my $src = "$srcDir/$srcFile";
+  my $tgt = "$tgtDir/$tgtFile";
+
+  my $rc = $OK;
+
+  print "\nCopying $src\n     to $tgt\n" if ($verbose);
+  if (! $dryRun) {
+    if (! copy($src, $tgt)) {
+      print "ERROR: unable to copy file .. \n";
+      print "       src: $src\n";
+      print "       tgt: $tgt\n";
+      $rc = $ERROR;
+    }
+  }
+  else {
+    print "[DRY RUN] file NOT copied\n";
+  }
+
+  return $rc
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : FormatLine($file, $tk, $patch, $plat, $date)
+# Purpose: Constructs a platforms_toolkits entry for the specified file
+# RCs    : line of text
+#------------------------------------------------------------------------------
+sub FormatLine {
+
+  my ($fileName, $tk, $patch, $plat, $date) = @_;
+
+  # A line of the platforms_toolkits file has the following format
+  #  keyword - TOOLKIT_BASE or TOOLKIT_PATCH
+  #  platform - aix_64 or linux_amd64
+  #  platform_tk - aix564_fix_tk18.1.8 or aix564_fix_tk18.1.8.1
+  #  file - tk18.1.8_file or tk18.1.8.1_file
+  #  menu name - ToolKit 18.1.8 AIX 64b Base Package
+  #  file size - an integer in bytes
+  #  empty
+  #  date - mm/dd/yyyy
+  #  base file ind - Y for tk<TK>_file entry only
+
+  my $keyword = "TOOLKIT_PATCH";
+  $keyword = "TOOLKIT_BASE" if ($fileName eq "tk<TK_file");
+
+  my $platform = GetShortPlatform($plat);
+
+  my $platformTk = GetPlatformTk($plat, $tk, $fileName);
+
+  my $menu = GetMenuName($tk, $plat, $fileName);
+
+  my $size = -s $file;
+
+  my $ind = "";
+  $ind = "Y" if ($fileName eq "tk<TK_file");
+
+  return "$keyword;$platform;$platformTk;$file;$menu;$size;;$date;$ind;";
+
+}

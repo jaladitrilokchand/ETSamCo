@@ -1,0 +1,19 @@
+#!/usr/bin/env tclsh
+
+##################################
+##################################
+
+set REPOS [ lindex $argv 0 ]
+set USER  [lindex $argv 1 ]
+
+puts stderr "Start-Commit >>>> REPOS = $REPOS <<<<"
+
+if { [ llength $argv ] < 3 } {
+   puts stderr "Commit Halted - Backlevel Version of Subversion Client in Use"
+   puts stderr "Number of arguments passed to start-commit: [llength $argv]"
+   puts stderr "Version 1.5+ required for EDA code control infrastructure."
+   exit 1
+}
+
+exit 0
+

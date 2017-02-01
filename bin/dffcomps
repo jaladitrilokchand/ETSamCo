@@ -1,0 +1,80 @@
+#!/usr/bin/env perl
+
+  use strict ;
+  use warnings ;
+  use File::Path qw(mkpath) ;
+
+  my $bin_dir = "/afs/eda/data/edainfra/tools/enablement/prod/bin" ;
+# my $bin_dir = /afs/eda/data/edainfra/tools/enablement/prod/bin ;
+
+
+  my @COMPONENTS1 = (
+      "3dnoise"    ,
+      "asicclk"    ,
+      "asicfep"    ,
+      "asicshare"  ,
+      "buffopt"    ,
+      "cmoschks"   ,
+      "coregen"    ,
+      "cpf"        ,
+      "cplace"     ,
+      "cre"        ,
+      "crunch"     ,
+      "currents"   ,
+      "dcutils"    ,
+      "edags"      ,
+      "edautils"   ,
+      "edif"       ,
+      "einspower"  ,
+      "einstimer"  ,
+      "encparser"  ,
+      "ess"        ,
+      "est"        ,
+      "hdp"        ,
+      "ics"        ,
+      "iospec"     ,
+      "iospecify"  ,
+      "maise"      ,
+      "mdiff"      ,
+      "model"      ,
+      "modelio"    ,
+      "modelutil"  ,
+      "nutshell"   ,
+      "oa"         ,
+      "oabrowse"   ,
+      "paradice"   ,
+      "pcalc"      ,
+      "pss"        ,
+      "rbe"        ,
+      "rbo"        ,
+      "rice"       ,
+      "sopt"       ,
+      "spam"       ,
+      "tools"      ,
+      "treach"     ,
+      "vcplace"    ,
+      "vss"        ,
+      "writehdl"   ,
+      "wizard"     ,
+      "wss"        ,
+      "bbe"    ,
+      "duplos" ,
+      "ete" ,
+      "idme" ,
+      "lts" ,
+      "netcalc" ,
+      "pds" ,
+      "plotutils"    ,
+      "sss"    ,
+      "tdecomp"     ,
+      "tla"      ) ;
+
+  my $out = "" ;
+  my $outrc = 0 ;
+  my $component = "" ;
+
+  foreach $component ( @COMPONENTS1 ) {
+    print "processing $component \n" ;
+    system("$bin_dir/diffcomp /data/tsg/SVN/$component/14.1 /afs/eda/build/$component/14.1 > /afs/eda/data/edainfra/diffs2/$component.diff.txt") ;
+  }
+

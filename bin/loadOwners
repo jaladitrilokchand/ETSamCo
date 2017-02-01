@@ -1,0 +1,335 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: loadOwners
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 02/08/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/13/2012 GS  Initial coding
+# =============================================================================
+
+use warnings;
+use strict;
+use File::stat;
+use Time::localtime;
+use Sys::Hostname;
+use Cwd;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use File::Copy;
+
+# Program name
+my $appName = "loadOwners";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $toolKit    = "";
+my $component  = "";
+my $help       = "";
+my $verbose    = 0;
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+# Set the location and name of createFuncUpdate application
+my $SVN = "/afs/eda/tools/bin/svn";
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $GET_COMP = "$BIN/getComponents -q ";
+my $UPDATE_COMP = "$BIN/updateComponent";
+my $SHOW_COMP = "$BIN/showComponent";
+my $LOG_DIR = "/afs/eda/data/edainfra/checks/devWcs";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# Define the current directory
+#
+my $startDir = $ENV{"PWD"};
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    #printSyntax();
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+#
+# Define custom perl libs path and modules depending on the
+# application mode.
+#
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use IcofFile;
+
+
+#
+# Query the database for components in this Tool Kit
+#
+my $command;
+my @results;
+my @components = ();
+if ($component) {
+  push(@components, $component);
+}
+else {
+  $command = $GET_COMP . " -t $toolKit -q";
+  @results = `$command`;
+  @components = split(/,/, $results[0]);
+}
+
+
+#
+# For each component determine the build working copy revision and the
+# latest revision in build from the ETREE database
+#
+@tokens = split(/\./, $toolKit);
+pop @tokens;
+my $release = join(".", @tokens);
+
+my %owners;
+foreach $entry (@components) {
+
+  chomp($entry);
+  print "Checking $entry ...\n";
+
+  my $buildDir = "/afs/eda/build/$entry/$release";
+  my $ownerFile = "$buildDir/.owner";
+  my $ownerFileFound = 1;
+
+  # Read .owner file
+  my $line;
+  my @ownersFile = ();
+  if (-f $ownerFile) {
+
+    open FH,"<$ownerFile";
+    my @lines = <FH>;
+    close FH;
+
+    foreach $line (@lines) {
+      chomp $line;
+      next if ($line !~ /owner/);
+      print " .owner ==> $line\n";
+      @tokens = split(/ +/, $line);
+      my $name = pop(@tokens);
+      push(@ownersFile, $name);
+    }
+
+  }
+  else {
+    print " No .owner file found ...\n";
+    $ownerFileFound = 0;
+  }
+
+  # Read database file
+  my @ownersDb = ();
+  $command = "$SHOW_COMP -r $release -c $entry";
+  @results = `$command`;
+  foreach $line (@results) {
+    chomp $line;
+    next if ($line !~ /LEAD/);
+    print " db ==> $line\n";
+    @tokens = split(/ +/, $line);
+    my $name = pop(@tokens);
+    push(@ownersDb, $name);
+    if (exists($owners{$name})) {
+      my $comps = $owners{$name} . " " . $entry;
+      $owners{$name} = $comps;
+    }
+    else {
+      $owners{$name} = $entry;
+    }
+  }
+
+  # Adds
+  foreach $line (@ownersFile) {
+    if ((scalar(@ownersDb) < 1) || (! grep(/$line/, @ownersDb))) {
+      $command = "$UPDATE_COMP -t $toolKit -c $entry -l $line";
+      system($command);
+      print " - Added $line to $entry\n";
+    }
+  }
+
+  # Deletes - only if .owner file found
+  if ($ownerFileFound) {
+    foreach $line (@ownersDb) {
+      if ((scalar(@ownersFile) < 1) || (! grep(/$line/, @ownersFile))) {
+	$command = "$UPDATE_COMP -t $toolKit -c $entry -l $line -remove";
+	system($command);
+	print " - Removed $line from $entry\n";
+      }
+    }
+  }
+
+}
+
+# Display the owners and components
+print "\n\n";
+print "Components Owners and components they own\n";
+print "------------------------------------------\n";
+foreach $entry (sort(keys(%owners))) {
+  print "$entry --> $owners{$entry}\n";
+}
+print "\n";
+
+print "Components Owners addresses\n";
+print "----------------------------\n";
+print join(",", (sort(keys(%owners)))) . "\n\n";
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Loads Component Owner (Team Lead) data from the
+/afs/eda/build/COMP/14.1/.owner files to ETREE database.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  -t Tool Kit [14.1.0, 14.1.1 ...].
+  -c Component (run check for a single component [no mail sent])
+  -h Application help (optional)
+  -y Verbose mode (optional)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tool_kit|t=s'    => \$toolKit,
+              'comp|c=s'        => \$component,
+              'verbose|y'       => \$verbose,
+              'help|h|?'        => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the obsolete file.
+  my $msg = "";
+  if (! $toolKit) {
+    $msg = "ERROR: tool_kit (-t) is a required parameter\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+

@@ -1,0 +1,1821 @@
+#!/bin/ksh
+#set -v
+#set -n
+#
+#   svnAdvance:
+#
+#   A script for advancing build trees in Tool Kit 14.1
+#   Supports component tree sequences:
+#     build->dev->prod
+#     shipb->ship
+#
+#- Change Log -----------------------------------------------------------------
+# 06/03/10 GFS  Copied from CM_advance and updated to work without CMVC.
+#                - Removed call to pd_level_complete and support for -L
+#                - Reworked checking the release name against CMVC to check
+#                  against the CM database
+#                - Added support for -t (test_mode) so changes can be tested.
+# 02/08/11 AM   Updated for new event logging. Added function, logEvent, to
+#               manage advance events
+#                 ADVANCE_START
+#                 ADVANCED_TO_DEV
+#                 ADVANCED_TO_PROD
+#                 ADVANCED_TO_SHIPB
+#                 ADVANCED_TO_SHIP
+#                 ADVANCED_TO_TKB
+#                 ADVANCED_TO_TK
+#                 ADVANCE_FAIL
+# 02/08/11 AM   Updated to prevent advances beyond PROD until the 14.1 STAGING work
+#               is rolled out.
+#               Changed "update" path from 12.1 to 14.1.
+#               Added unique LOGFILE suffix if in TEST_MODE.
+# 02/11/11 AM   Fixed problem in RELEASE variable - needed to use $REV_VER instead of
+#               $R_V in constructing the RELEASE name for use in call to CM_BuildStatus.
+#               Added APP_RC variable to give this script an RC status; added function
+#               get_maxrc
+# 05/13/11 AM   Changed all references to btv/edainfra to eda/edainfra for SVN migration.
+# 05/19/11 AM   Updated to pick up Mark Lasher's Linux version of "update" program.
+#               Set up DBSWITCH parms explicitly DEV and PROD CM DB on greenjiffy machine.
+# 05/31/11 AM   Turned on SHIPB => SHIP advance capability.
+#               Filtered .svn directories.
+#               Enabled BuildStatus Web page updates only for select components.
+#               Removed old code references to pre-14.1 components (e.g. AMD, TLT, etc)
+#               Create directories at next levels (Build -> Dev, Dev -> Prod) if do not exist.
+# 06/01/11 AM   Added temporary workaround to explicitly define TKMINOR (last part of TK version)
+#               until we set the stagename to PREVIEW at AGTS milestone.
+#               Added check for TKMINOR value returned from CM DB query.
+#               Updated stagenames to Development, Preview, and Production and requested
+#               that CM DB adopt the same names (GS completed).
+# 06/06/11 AM   Added component-specific OTHLIST for pwrspice (R. Kimmel request).
+# 09/08/11 AM   Fixed oa subdir issue under oa/14.1 where the oa subdir was not being advanced.
+#               This may be due to the way oaroot was implemented in the past (sed to remove
+#               from OTHLIST) and was not updated to handle how it is implemented now (as symlinks).
+# 10/17/11 AM   Updated to work with the PROD lock implemented by prodLockMgr (.lock_prodLockMgr)
+# 11/04/11 AM   Updated for special directory processing for components EDAdochtml, vhdllibs
+# 11/07/11 AM   Updated to not advance 32-bit structures to EDA SHIP or TK from EDA SHIPB or TKB,
+#               respectively.
+# 12/13/11 AM   Updated to allow top level files on certain components to advance.
+# 12/15/11 AM   Updated for special top level file advances in aces/14.1, nil/14.1
+# 12/22/11 EH   Updated for special top level file advances in license/14.1
+# 12/22/11 GS   Updated PROJ_NAME to NOT automatically be lowercase. Needed to process RunTimLibs
+# 02/27/12 EH   Updated to advance theguide/14.1/xml to ship and tk
+# 02/27/12 EH   Updated to advance gna/14.1/statsweb and gna/14.1/xml to ship and tk
+# 03/05/12 EH   Updated to advance mar2/14.1/tools to ship and tk
+# 03/20/12 EH   Updated to advance verity/14.1/.lib-aix64 and verity/14.1/.lib-linux64 to ship and tk
+# 03/20/12 EH   Updated to advance texsim/14.1/.lib-aix64 and texsim/14.1/.lib-linux64 to ship and tk
+# 03/20/12 EH   Removed erroneous vhdllibs/14.1/html_87 and vhdllibs/14.1/html_93 entries
+# 03/20/12 EH   Updated to advance vhdllibs/14.1/vhdl_87 and vhdllibs/14.1/vhdl_93 to ship and tk
+# 03/20/12 EH   Updated to advance mar/14.1/qt and mar2/14.1/qt to ship and tk
+# 03/20/12 EH   Removed $TKVERSION and use of depricated svnLog -t switch
+# 03/20/12 EH   Updated new_nextlev_dirs to append to requiredDirArray instead of overlaying it.
+# 03/20/12 EH   Updated to advance tgsupport/14.1/theguide_support to ship and tk
+# 03/20/12 EH   Updated to create oa/14.1/oaroot directory for advances to ship and tk
+# 03/23/12 EH   Enabled advances from tkb to tk
+# 03/24/12 EH   For advances to ship and tk, create any $OTHLIST directories 
+#               that are missing in the destination.
+# 03/24/12 EH   Updated to exit if validation of release and component fail
+# 03/24/12 EH   Updated to exit if attempt to svnLog ADVANCE_START fails
+# 03/26/12 EH   Fixed bug that inserted new line character in LBD_DIRS for some components
+# 04/02/12 EH   Updated to advance dcl/14.1/.lib-aix64 and dcl/14.1/.lib-linux64 to ship and tk
+#               as requested in MDCMS00118751.
+# 04/02/12 EH   Fixed "not a valid level" message when advancing tkb->tk and 
+#               src/dest levels are set by the current working directory (MDCMS00119005).
+# 04/03/12 EH   Updated to replace symlinks with files when advancing the tcl 
+#               directory in the tcl component to ship or tk (MDCMS00119044).
+# 04/04/12 EH   Updated to advance hidden directories and files under oa/14.1/oaroot/
+#               when advancing to tk or ship (MDCMS00119139).
+# 04/05/12 EH   Updated to advance alsim/14.1/tech to ship and tk (MDCMS00119197).
+# 04/06/12 EH   Updated to advance 6thsense/14.1/configs to ship and tk (MDCMS00119316).
+# 04/06/12 EH   Updated to advance hidden directories and files under cpc/14.1/html/
+#               when advancing to tk or ship (MDCMS00119317).
+# 04/06/12 EH   Updated to advance PET.conf PET_eda.conf and pet files located 
+#               under pet/14.1/ for all levels (MDCMS00119318).
+# 04/07/12 EH   Updated to advance pet symlinks in top most directory without
+#               converting to files.
+# 04/09/12 EH   Updated to advance flexnet/14.1/i86_lsb and flexnet/14.1/ppc_u5
+#               to ship and tk (MDCMS00119369).
+# 04/09/12 EH   Updated to advance nutshell/14.1/pm and nutshell/14.1/perl/*/Make*
+#               to ship and tk (MDCMS00119370).
+# 04/09/12 EH   Updated to advance pwrspice/14.1/doc and pwrspice/14.1/examples
+#               to ship and tk (MDCMS00119371).
+# 04/09/12 EH   Updated to advance verity/14.1/etc/.dadb-* to ship and tk
+#               (MDCMS00119373).
+# 04/23/12 EH   Updated to advance mar/14.1/doc to ship and tk (MDCMS00119519).
+# 04/23/12 EH   Updated to advance nutshell/14.1/.bin-aix to ship and tk (MDCMS00119524).
+# 04/23/12 EH   Added option to disable svnLog updates to CM DB for testing.
+# 04/26/12 EH   Updated to advance license/14.1/.bin-aix and 
+#               license/14.1/.bin-linux to ship and tk (MDCMS00119884).
+# 04/26/12 EH   Updated to advance oa/14.1/Linux64 to ship and tk (MDCMS00119823).
+# 04/29/12 EH   Restrict use of option to disable svnLog updates (-z) to svnlib AFS
+#               ID only.
+# 04/29/12 EH   Added exception for dadb/14.1/include directory to not convert
+#               symlinks to real files (MDCMS00120559).
+# 05/10/12 EH   Updated to advance leakapi/14.1/cfg to ship and tk (MDCMS00121116).
+# 05/21/12 EH   Updated to advance pwrspice/14.1/include to ship and tk (MDCMS00121958).
+# 06/19/12 EH   Updated to advance mar/14.1/Version and added entry for mar2 to advance 
+#               the same files as mar. These changes are for advances to all levels except 
+#               ship and tk. (MDCMS00124355).
+# 08/08/12 EH   Fixed parsing of $RELEASE that was removing underscore from $PROJ_NAME
+#               (component). This was breaking the new oa_2243 and mar2_2243 components. 
+# 08/09/12 EH   Updated to advance 6thsense/14.1/.lib-aix64 and 
+#               6thsense/14.1/.lib-linux64 to ship and tk to fix an issue discovered  
+#               during AGTS.
+# 08/13/12 EH   Updated to create oa_2243/14.1/oaroot directory for advances to ship 
+#               and tk. Also updated to advance hidden directories and files under 
+#               oa_2243/14.1/oaroot/. This is in response to MDCMS00127417.
+# 08/13/12 EH   Updated to create and advance mar2_2243/14.1/tools directory and 
+#               mar2_2243/14.1/qt directory to ship and tk. Also updated to advance 
+#               the .cvs_tag, Makefile.gen and Version files to all levels except ship 
+#               and tk.
+# 08/13/12 EH   Corrected change history above for files advanced to mar* to read "all
+#               levels except ship and tk".
+# 12/14/12 EH   Added exception for bonntools/14.1/include and bonntools/14.1/private
+#               directories to not convert symlinks to real files (MDCMS00134347).
+# 12/16/12 EH   Updated to advance itime/14.1/parm directory to ship and tk 
+#               (MDCMS00131884).
+# 12/16/12 EH   Updated to advance hidden files under alsim/14.1/perl in ship and tk 
+#               (MDCMS00124800).
+# 12/17/12 EH   Updated to advance RunTimLibs/14.1/.lib-aix64 directory  (MDCMS00134969).
+# 12/17/12 EH   Updated to fix bug where .bin* symlink names containing -g suffix caused 
+#               svnAdvance to fail. The checking has been updated to only check the file 
+#               that is pointed to by the symlink (MDCMS00135214).
+# 01/24/13 EH   Updated to advance satsyn/14.1/parms directory  (MDCMS00136853).
+# 01/28/13 EH   Added call to updateTkSrc to copy updates to /afs/eda/tk_src when
+#               appropriate (MDCMS00123067).
+# 01/30/13 JVI  Updated to advance flexnet/14.1/doc directory  (MDCMS00137232).
+# 04/23/13 GFS  Added support for new customtkb and customtk levels.
+# 05/22/13 EH   Updated to advance 14.1/share directory to ship and tk for mar, mar2 and
+#               mar2_2243 components (MDCMS00144559).
+# 06/06/13 GFS  Made additional updates to support custom TKs.
+# 01/20/14 GFS  Updated sopt so .lib*64 are now advanced
+# 01/27/14 GFS  Fixed bug in constructing the log file name.
+# 03/24/14 JWC  Added to advance itime/14.1/noise directory
+# 04/02/14 GFS  Updated to log advance history in .update_history file
+#----------------------------------------------------------------------------------------
+# TEST INFORMATION
+# ----------------
+# Run export CMDEBUG=TRUE on the command line to enter debug mode
+# Run this script with -t to use test directories.
+#
+# Suggest you test using both CMDEBUG and -t
+#
+#-----------------------------------------------------------------------------
+
+###
+### Explain Variables (listed alphabetically)
+###
+
+# APP_NAME       : Name of this application
+# APP_RC         : Overall retun code from this script
+# ASKDIRS        : ASK if the {src&dst}DIRectorieS are correct...
+# CLEV           : Current LEVel (loop on "SRC","DEV")
+# CMDEBUG        : ConfigManagment DEBUG flag. (should we print -- debug messages?)
+# CMSET_X        : are we tracing the script? (carry the "set -x" into functions)
+# CURDIR_PRODSRC : is the CURrent DIRectory on the $PRODSRC list.
+# CURLEV         : CURrent LEVel (used in testing SCR/DST validity)
+# DIR            : DIRectory (loop through '$LBD_DIRS $OTHER_DIRS') (fullpath)
+# DIRNAME        : base DIRectory NAME (from '$DIR')
+# DSTDIR         : DeSTination DIRectory {'/afs/eda/$DSTLEVEL/$PROJ_NAME/$R_V'}
+# DSTLEVEL       : what is the DeSTination LEVEL (dev,prod,ship, customtk/tk14.1.x)
+# DSTNUM         : DeSTination level (NUMeric: 1,2,3,4 = build,dev,prod,ship)
+# ERRORBLURB     : the ERROR BLURB to send if there were any errors...
+# ERRORFILE      : ERROR messages are stored in the FILE for emailing...
+# ERRORS         : were there any ERRORS?
+# FLAGS          : commandline option FLAGS for /afs/eda/build/tools/1.1/bin/update
+# LBD_DIRS       : Lib & Bin & Dll DIRestorieS to promote ( '\n' delimited)
+# LEVTYPE        : current LEVel 'TYPE' is: {source|destination}
+# LOGFILE        : promote LOGFILE ('/afs/eda/u/hdplib/<mmmdd>.$PROJ_NAME.$REL_VER.${SRCLEVEL}_to_${DSTLEVEL}${LOG_SUFFIX}')
+# LOG_SUFFIX     : ".devmode" if in TEST_MODE; otherwise blank.
+# MAIL_LIST      : the LIST of people to send info/warning eMAIL to
+# MSG            : the email MeSsaGe to be sent
+# NEWPLATS       : space seperated list of gnu(NEW)PLATformS to be advanced.
+# ODIR           : Other DIRectory (loop through '$OTHLIST')
+# OTH_SKIP_ME    : "OTHer directories" to be SKIPped ( | delimited)
+# OTHER_DIRS     : OTHER DIRECTORIES to promote {OTHLIST} ( '\n' delimited)
+# OTHLIST        : "OTHer" directories LIST (space delimited)
+# OVR_PRODSRC    : OVeRride autogenerated $PRODSRC
+# PLATFORMS      : _only_ advance bin/dll/lib files for these PLATFORMS
+# PRODSRC        : promote toPROD these SouRCe directories ( space delimited)
+# PROJ_NAME      : PROJect NAME (left part of '$RELEASE')
+# RELEASE        : cmvc-style RELEASE name (e.g. hdp.0602, model.0300, etc.)
+# REL_VER        : RELease_VERsion number {rrvv} (right part of '$RELEASE')
+# R_V            : the "common build" Release.Version number {r.v} (0602 => 6.2)
+# SCRIPT         : program name (according to the 'shell')
+# SEND_MAIL      : used by 'promote_email' to tell if we should SEND eMAIL
+# SKIPPING       : are 'we' trying to SKIP(P) a level while advancING
+# SRCDIR         : SouRCe DIRectory {'/afs/eda/$SRCLEVEL/$PROJ_NAME/$R_V'}
+# SRCLEVEL       : what is the SouRCe LEVEL (build,dev,prod, customtkb/14.1.x)
+# SRCNUM         : SouRCe level (NUMeric: 1,2,3,4 = build,dev,prod,ship)
+# SVN_RC         : Return code from CM DB API calls.
+# SVN_VALID      : Path to SVN validateRelComp script.
+# TEST_DIR       : Test sub-directory (svn_test)
+# TEST_MODE      : If true use test directories and test code where possible,
+#                  also disables updating build status pages.
+# TMPNUM         : TeMPorary NUMber used to compute distance between src&dstlevel
+# UPDATE         : UPDATE timestamp file {'$DSTDIR/.update'}
+# VERB           : the action VERB used in the email message
+
+###
+### Define functions
+###
+
+APP_NAME=svnAdvance
+TEST_DIR=svn_test
+
+help ()
+ {
+  cat <<-EOHELP
+
+  Usage: $APP_NAME [-s <srclevel>] [-d <dstlevel] [-r <release>] [-P <dirlist>] [-t]
+           -s  SouRCe LEVEL
+           -d  DeSTination LEVEL
+           -r  RELEASE (name.####)
+           -P  override the auto generated source code dirs to prod list
+
+           (Src, Dest, Release info are determined from PWD if not
+            provided on the command line...)
+
+  Function: to promote (using "bt14"/bin/update) a buildtree
+              (build -> dev, dev -> prod, shipb -> ship and 
+               customtkb/tkx.y.z -> customtk/tkx.y.z)
+
+
+  NOTE: Following switches for ENABLEMENT TEAM use only:
+           -t  TEST_MODE=on (uses /afs/eda/<level>/svn_test/<component>/<version>; default is off)
+
+EOHELP
+  [[ -n $1 ]] && print -- "$1\n"
+  exit 1
+  #          -p  PLATFORMS (skip lib-dll-bin of other platforms)
+ }
+
+promote_email ()
+ {
+  $CMSET_X
+
+  # Do we send email?
+  SEND_MAIL=
+
+  # Are we advancing a subset of all platforms?
+  [[ -n $NEWPLATS ]] && PLTS=" ($(print -- $NEWPLATS))" || unset PLTS
+
+  case $1 in
+    START) MSG="${PROJ_NAME}/${R_V}${PLTS} is being updated to '$DSTLEVEL' at $(date +"%a %D %H:%M"), access at risk."
+           VERB=started
+           case $DSTLEVEL in
+             dev|\
+             prod) SEND_MAIL=TRUE
+                   ;;
+           esac
+           ;;
+     DONE) case $DSTLEVEL in
+             dev|\
+             prod) MSG="${PROJ_NAME}/${R_V}${PLTS} has been updated to '$DSTLEVEL' at $(date +"%a %D %H:%M")."
+                   VERB=finished
+                   SEND_MAIL=TRUE
+                   ;;
+             ship*|\
+             tk*|\
+             customtk/*) MSG="${DSTLEVEL} was updated for ${PROJ_NAME}/${R_V}${PLTS}, at $(date +"%a %D %H:%M")"
+                   VERB=updated
+                   SEND_MAIL=TRUE
+                   ;;
+           esac
+           ;;
+  esac
+
+  if [[ -n $ERRORS ]]
+  then
+    cat $ERRORFILE | mail -s "Errors in advance for $DSTLEVEL ${PROJ_NAME}/${R_V}${PLTS}" $CMTEAM $LOGNAME
+    MSG="$MSG\n$ERRORBLURB"
+  fi
+
+  if [[ -n $COMPDIR_ERRORS ]]
+  then
+    print -- "\n$COMPDIR_ERRORS\n" | mail -s "Possible errors for $DSTLEVEL ${PROJ_NAME}/${R_V}${PLTS}" $CMTEAM $LOGNAME
+  fi
+
+  [[ -n $NO_ADV_EMAIL ]] && MAIL_LIST="$LOGNAME"
+
+  print -- "$MSG" | tee -a $LOGFILE
+  if [[ -n $SEND_MAIL ]]
+  then
+    print -- "$MSG" | mail -s "$DSTLEVEL $VERB for ${PROJ_NAME}/${R_V}${PLTS}" $MAIL_LIST
+    print -- "\nNotified: $MAIL_LIST" >> $LOGFILE
+  fi
+ }
+
+dst_to_src ()
+ {
+  $CMSET_X
+  typeset DST=$1
+  typeset LVL
+  for LVL in "No previous level" build dev prod shipb ship tkb tk customtkb customtk "No such level"
+   do
+    [[ $DST = $LVL ]] && break
+    PREVLEVEL="$LVL"
+   done
+  print -- "$PREVLEVEL"
+ }
+
+setSourceToolKit () 
+{
+  SRC_TK=""
+  if [[ $SRCLEVEL == @(build|dev|prod) ]]
+  then
+    SRC_TK="${R_V}.build"
+  else
+    
+    stage=""
+    if [[ $SRCLEVEL == "shipb" ]]
+    then
+      stage="preview"
+    elif [[ $SRCLEVEL == "tkb" ]]
+    then
+      stage="production"
+
+    else
+      stage=$SRCLEVEL
+    fi
+    CMD="$SVN_BIN/getToolKits -r $R_V -q -s ${stage}"
+    print ">> RUNNING .. $CMD\n"
+    SRC_TK=$($CMD)
+
+
+  fi
+
+  print "SRC_TK: $SRC_TK\n"
+
+}
+
+
+logEvent ()
+{
+  #
+  # Purpose: Log events in the ETREE CM DB.
+  #
+  eventName=$1
+  eventMsg=$2
+  cmdbCmd=""
+  logrc=0
+
+  # Disable svnLog update of CM DB if -z on command line
+  if [[ -n $NO_SVN_LOG ]]
+  then
+    print "Option -z has disabled logging of $eventName in CM DB\n" | tee -a $LOGFILE
+    return 0
+  fi
+  
+  if [[ -n $CMDEBUG || -n $TEST_MODE ]]
+  then
+    dbSwitch="-db DEV"
+  else
+    dbSwitch="-db PROD"
+  fi
+
+  setSourceToolKit
+
+  baseCmd="$SVN_BIN/svnLog -t $SRC_TK -c $PROJ_NAME -l $SRCLEVEL "
+  eventCmd="-e $eventName -m \"$eventMsg\" $dbSwitch"
+  cmdbCmd="${baseCmd}${eventCmd}"
+
+  print "$(date): $cmdbCmd" >> $LOGFILE
+  $cmdbCmd 2>&1 >> $LOGFILE
+  logrc=$?
+  if (( logrc != 0 ))
+  then
+    # Error detected
+    print "ERROR: Event, $eventName, was not logged in CM DB.\n" | tee -a $LOGFILE
+  else
+    print "INFO: Event, $eventName, was logged in CM DB successfully.\n" | tee -a $LOGFILE
+  fi
+  return $logrc
+}
+
+get_maxrc ()
+{
+  if [[ $2 > $1 ]]
+  then
+    $1=$2
+  fi
+}
+
+make_nextlev_dirs ()
+{
+  LEV1=$SRCLEVEL
+  LEV2=$DSTLEVEL
+  hdrCnt=0
+  print "Checking for new target subdirectories to create." >> $LOGFILE
+  for DIR in $(\ls -l | grep ^d | egrep -v "html|include|nutscript|perl|private|tcl|testcases" | awk '{print $NF}')
+  do
+    if [[ $SRCLEVEL = customtk* ]]
+    then
+      NEW_DIR="$(pwd | sed s/customtkb/customtk/)/$DIR"
+    else
+      NEW_DIR="$(pwd | sed s/$LEV1/$LEV2/)/$DIR"
+    fi
+    if [[ ! -d $NEW_DIR ]]
+    then
+      if (( hdrCnt < 1 ))
+      then
+        print "\nCreating dirs" >> $LOGFILE
+        print "based on: $(pwd)"  >> $LOGFILE
+        print "      in: $(pwd | sed s/$LEV1/$LEV2/)"  >> $LOGFILE
+      fi
+      (( hdrCnt = hdrCnt + 1 ))
+      mkdir $NEW_DIR
+      print "Making $DIR in $LEV2" >> $LOGFILE
+    fi
+  done
+}
+
+new_nextlev_dirs ()
+{
+  for requiredDir in "$@"
+  do
+    
+    # Construct full path to required directory in destination
+    if [[ $SRCLEVEL = customtk* ]]
+    then
+      tgtDir="$(pwd | sed s/customtkb/customtk/)/$requiredDir"
+    else
+      tgtDir="$(pwd | sed s/$SRCLEVEL/$DSTLEVEL/)/$requiredDir"
+    fi
+
+    # Create the directory if it exists in the source and does not exist in the
+    # destination.  
+    if [[ -d $requiredDir && ! -d $tgtDir ]]
+    then
+      print "Creating directory $tgtDir" >> $LOGFILE
+      mkdir $tgtDir
+    fi
+  done
+}
+
+create_missing_dirs ()
+{
+  for requiredDir in $OTHLIST
+  do
+
+    # Construct full path to required directory in destination
+    if [[ $SRCLEVEL = customtk* ]]
+    then
+      tgtDir="$(pwd | sed s/customtkb/customtk/)/$requiredDir"
+    else 
+      tgtDir="$(pwd | sed s/$SRCLEVEL/$DSTLEVEL/)/$requiredDir"
+    fi
+
+
+    # Create the directory if:
+    # 1. It exists in the source location
+    # 2. It does not exist in the destination
+    if [[ -d $requiredDir && ! -d $tgtDir ]]
+    then
+      print "Creating directory $tgtDir" >> $LOGFILE
+      mkdir $tgtDir
+    fi
+  done
+}
+
+
+###
+### MAIN PROGRAM
+###
+APP_RC=0
+
+###
+### Parse args
+###
+
+unset SRCLEVEL DSTLEVEL RELEASE PLATFORMS OVR_PRODSRC TOUCH_WEBPAGE
+unset TEST_MODE NO_SVN_LOG
+
+while getopts :s:d:r:p:P:htzLD OPTION
+ do
+  case "$OPTION" in
+   s) SRCLEVEL=$OPTARG;;
+   d) DSTLEVEL=$OPTARG;;
+   r) RELEASE=$OPTARG;;
+   p) PLATFORMS=$OPTARG;;
+   P) OVR_PRODSRC="$OPTARG";;
+   h) help;;
+   t) TEST_MODE=TRUE;;
+   z) NO_SVN_LOG=TRUE;;
+   D) CMDEBUG="-noop";;
+   :) help "*** Option -$OPTARG requires a paramter.";;
+   ?) help "*** Option -$OPTARG is not recognized.";;
+  esac
+done
+shift $(($OPTIND - 1))
+
+if [[ -n $CMDEBUG ]]
+then
+  read REPLY?"Turn on 'set -x' up to CM_common_nbt? "
+  [[ $REPLY = [Yy]* ]] && set -x
+fi
+
+# Only allow svnlib to use -z option
+if [[ $NO_SVN_LOG = TRUE && $LOGNAME != svnlib ]] 
+then
+  #unset NO_SVN_LOG
+  print "Only AFS ID svnlib is permitted to use -z option"
+  exit 8
+fi
+
+###
+### Check Parameters
+###
+unset ERROR SKIPPING ASKDIRS SVN_BIN
+typeset -i SRCNUM=0 DSTNUM=0
+
+# Check/set {SRC|DST}LEVEL
+for CLEV in SRC DST
+do
+  CURLEV="$(print -- $(eval print -- '$'${CLEV}LEVEL))"
+
+  if [[ -z $CURLEV ]]
+  then
+    # Since {SRC&|DST}LEVEL was not set on the command line,
+    # ask if the automatically determined one(s) is(are) correct
+    ASKDIRS=TRUE
+
+    case $CLEV in
+     SRC) SRCLEVEL=$(pwd | cut -d/ -f4)
+          # If customtkb then determine the TK name from 
+          # /afs/eda/customtkb/tk14.1.0)
+          if [[ $SRCLEVEL  == custom@(tkb|tk) ]]
+	  then
+	      TK2=$(pwd | cut -d/ -f5)
+	      SRCLEVEL="$SRCLEVEL/$TK2"
+	  fi
+          CURLEV=$SRCLEVEL
+          ;;
+     DST) # SRCLVL = SRCLEVEL & strip off any _xxx
+          SRCLVL=$(print $SRCLEVEL | sed -e "s/_amd//" -e "s/_tlt//" -e "s/_mar//")
+          [[ -n $CMDEBUG ]] && print "[D] SRCLEVEL: $SRCLEVEL"
+          [[ -n $CMDEBUG ]] && print "[D] SRCLVL: $SRCLVL"
+          # if customtk then determine the TK name from 
+          # /afs/eda/customtk/tk14.1.0) and set SRCLVL to customtkb so we 
+          # don't need a check for each customtkb/<tk> entry
+          if [[ $SRCLEVEL  == custom@(tkb|tk)/* ]]
+	  then
+	      TK2=$(pwd | cut -d/ -f5)
+	      SRCLVL=$(print $SRCLEVEL | cut -d/ -f1)
+	  fi
+          case $SRCLVL in
+            build) DSTLEVEL=dev;;
+              dev) DSTLEVEL=prod;;
+            shipb) DSTLEVEL=ship;;
+              tkb) DSTLEVEL=tk;;
+        customtkb) DSTLEVEL="customtk/$TK2";;
+          esac
+          CURLEV=$DSTLEVEL
+          ;;
+    esac
+  fi
+  
+  if [[ $CLEV = "DST" ]]
+  then
+    # DSTLVL = DSTLEVEL & strip off any _xxx
+    DSTLVL=$(print $DSTLEVEL | sed -e "s/_amd//" -e "s/_tlt//" -e "s/_mar//")
+    [[ -n $CMDEBUG ]] && print "[D] DSTLEVEL: $DSTLEVEL"
+    [[ -n $CMDEBUG ]] && print "[D] DSTLVL: $DSTLVL"
+  fi
+
+  [[ -n $CMDEBUG ]] && print "[D] ${CLEV}-CURLEV: $CURLEV"
+
+  # if customtk then set CURLEV to customtkb or customtk
+  # so we don't need a check for each customtkb/<tk> entry
+  if [[ $SRCLEVEL  == custom@(tkb|tk)/* ]]
+  then
+      CURLEV=$(print $CURLEV | cut -d/ -f1)
+  fi
+
+  case $CURLEV in
+   build) eval ${CLEV}NUM=1
+          ;;
+     dev) eval ${CLEV}NUM=2
+          ;;
+    prod) eval ${CLEV}NUM=3
+          [[ $CLEV = SRC ]] && help ">>> Error: Cannot advance beyond prod in Development stage..."
+          ;;
+    shipb) eval ${CLEV}NUM=4
+           ;;
+     ship) [[ $CLEV = SRC && $DSTLEVEL != tk ]] && help ">>> Error: Advance from ship in Preview stage not allowed..."
+           [[ -d $(pwd | sed s/prod/shipb/) ]] && eval ${CLEV}NUM=5 || eval ${CLEV}NUM=4
+           ;;
+      tkb) eval ${CLEV}NUM=6
+           ;;
+       tk) [[ $CLEV = SRC ]] && help ">>> Error: Cannot advance beyond tk in Production stage..."
+           eval ${CLEV}NUM=7
+           ;;
+customtkb) eval ${CLEV}NUM=8
+           ;;
+ customtk) [[ $CLEV = SRC ]] && help ">>> Error: Cannot advance beyond customtk in Custom Tool Kit stage..."
+           eval ${CLEV}NUM=9
+           ;;
+        *) help ">>> Error: \"$CURLEV\" not a valid level (build|dev|prod|shipb|ship|tkb|tk|customtkb|customtk)"
+           ;;
+  esac
+done  # for CLEV
+
+if [[ $SRCNUM = $DSTNUM ]]
+then
+  help ">>> Error: Source & Destination are the same, $SRCLEVEL -> $DSTLEVEL"
+elif [[ $SRCNUM -gt $DSTNUM ]] 
+then
+  help ">>> Error: Cannot 'advance' backwards, $SRCLEVEL -> $DSTLEVEL"
+elif [[ $(typeset -i TMPNUM="$SRCNUM + 1"; print -- $TMPNUM) != $DSTNUM ]] 
+then
+  SKIPPING=TRUE
+  ASKDIRS=TRUE
+fi
+
+# If location is customtkb then verify TK versions match
+if [[ $SRCLEVEL  == custom@(tkb|tk)/* ]]
+then
+    SRCTK=$(print $SRCLEVEL | cut -d/ -f2)
+    DSTTK=$(print $DSTLEVEL | cut -d/ -f2)
+    if [[ $SRCTK != $DSTTK ]]
+    then
+	help ">>> Error: source and destination Tool Kit versions do not match, $SRCLEVEL -> $DSTLEVEL"
+    fi
+fi
+
+
+#
+# Check/set $RELEASE
+#
+if [[ -z $RELEASE ]]
+then
+  if [[ -n $TEST_MODE || $SRCLEVEL  == custom@(tkb|tk)/* ]]
+  then
+    PROJ_NAME=$(pwd | cut -d/ -f6)
+    R_V=$(pwd | cut -d/ -f7)
+  else
+    PROJ_NAME=$(pwd | cut -d/ -f5)
+    R_V=$(pwd | cut -d/ -f6)
+  fi
+
+  [[ $R_V != +([0-9]).+([0-9]) ]] && help "\n*** v.r automagic error! $R_V"
+
+  # Convert from R_V to REL_VER format
+  REL_VER=$(print -- $R_V | awk -F. '{printf("%02d%02d",$1,$2)}')
+  RELEASE=$PROJ_NAME.$REL_VER
+else
+  if [[ $RELEASE = *-+([0-9]).+([0-9]) ]]
+  then
+    # comp-v.r
+    #PROJ_NAME=$(print $RELEASE | cut -f1 -d- | tr [:upper:] [:lower:] | sed s/_//)
+    PROJ_NAME=$(print $RELEASE | cut -f1 -d- | sed s/_//)
+    REL_VER=$(print $RELEASE | cut -f2 -d-)
+    R_V=$REL_VER
+  else
+    # comp.vvrr
+    #PROJ_NAME=$(print $RELEASE | cut -f1 -d. | tr [:upper:] [:lower:] | sed s/_//)
+    #PROJ_NAME=$(print $RELEASE | cut -f1 -d. | sed s/_//)
+    PROJ_NAME=$(print $RELEASE | cut -f1 -d.)           # fix for oa_2243 component
+    #REL_VER=$(print $RELEASE | cut -f2 -d.)
+    REL_VER=$(print $RELEASE | cut -f2 -d. | sed s/_//) # fix for oa_2243 component
+    R_V="$(print $REL_VER | cut -c1,2 | sed 's/^0//').$(print $REL_VER | cut -c3,4 | sed 's/^0//')"
+  fi
+fi
+
+
+#
+# Validate the release and component
+#
+if [[ -z $TEST_MODE ]]
+then
+  SVN_BIN="/afs/eda/data/edainfra/tools/enablement/prod/bin"
+  LOG_SUFFIX=""
+else
+  SVN_BIN="/afs/eda/data/edainfra/tools/enablement/dev/bin"
+  LOG_SUFFIX=".devmode"
+fi
+
+SVN_CMD="$SVN_BIN/validateRelComp -r $R_V -c $PROJ_NAME > /dev/null"
+print "Running $SVN_CMD ..."
+$SVN_CMD
+SVN_RC=$?
+
+if (( $SVN_RC > 0 ))
+then
+  help "\n*** Release and/or component are not valid\
+        \n*** Return code: $SVN_RC\
+        \n*** Release: $R_V\
+        \n*** Component: $PROJ_NAME\n"
+    exit 5
+else
+  print "Release ($RELEASE) is valid ..."
+fi
+
+
+# Allow this code to run on Linux and AIX platforms
+BT_R_V=14.1
+  
+if [[ $(/bin/uname -a | awk '{print $1}') != AIX ]]
+then
+  BTOOLS="/afs/eda/u/stadtlag/public/update/13.1/bin"
+else
+  BTOOLS="/afs/eda/prod/tools/$BT_R_V/bin"
+fi
+
+[[ -n $CMDEBUG ]] && print -- "BTOOLS: $BTOOLS"
+[[ ! -d $BTOOLS ]] && help "\n'$BTOOLS' does not appear to be a valid directory."
+UPDATE_PGM=$BTOOLS/update
+
+# Started using rsync for the pet component
+RSYNC_CMD=/usr/bin/rsync
+
+# Check "PLATFORMS" (if given)
+#  PLATFORMS must contain both version (GNUversion & Target_Arch)
+#  if it doesn't then add the missing one. (add both for all then 'sort -u')
+unset NEWPLATS
+if [[ -n $PLATFORMS ]]
+then
+  # a <tab> seperated list of both 'TARGET_ARCH' & 'GNU' platform versions
+  BOTHPLATVERS=$(cat <<EOBPV
+        rs_aix53    aix
+        64-rs_aix53   aix64
+        64-rs_aix61   aix64
+        amd64_linux26   linux
+        i386_linux26    linux
+        64-amd64_linux26  linux64
+        64-amd64_linux26_RH5  linux64
+        64-ppc64le_linux26_RH7 plinux64
+EOBPV
+)
+
+  NEWPLATS=$(
+    for PLAT in $(print -- $PLATFORMS | sed 's/|/ /g')
+     do
+      # Get both versions of the given PLAT and replace the <tab> with a '\n'
+      #
+      TMPPLAT=$(print -- "$BOTHPLATVERS" | grep " $PLAT" | sed 's/  /\\n/g')
+      if [[ -z $TMPPLAT ]]
+       then
+        print -- "BADPLAT=$PLAT"
+        exit              # exits from subshell:   NEWPLATS=$(<subshell>)
+      fi
+      print -- "$TMPPLAT"
+     done | sort -u
+   )
+  [[ $NEWPLATS = *BADPLAT* ]] && help ">>> Error \"$PLATFORMS\" is/contains an invalid platform$([[ $PLATFORMS = *+(\\|)* ]] && print -- ' ("'$(print -- "$NEWPLATS" | grep BADPLAT | awk -F= '{print $NF}')'")').\n\nValid platforms are:\n$BOTHPLATVERS"
+
+  # strip off & replace "\n"s with '|'s
+  #  prepend '[nlb]-' to avoid confusing '64-rs_aix43' & 'rs_aix43'
+  #  append '$' to avoid confusing 'aix' & 'aix64'
+  PLATFORMS='[nlb]-'$(print -- $NEWPLATS | sed 's/ /$|[nlb]-/g')$
+  [[ -n $CMDEBUG ]] && print -- "PLATFORMS = "$PLATFORMS
+
+  unset BOTHPLATVERS
+fi
+
+
+###
+### Set some Variables
+###
+
+# Get CoMmon Non-BuildTree related variables
+LEVEL=$SRCLEVEL
+. /afs/eda.fishkill.ibm.com/u/hdplib/bin/CM_common_nbt
+
+# AFS checks added so jody can do hdplib stuff and also do edif stuff without logs going to the wrong place...
+#
+AFSID=$(/usr/afsws/bin/tokens | grep afs@eda.fishkill | cut -d")" -f1 | cut -d" " -f4)
+[[ -z $AFSID ]] && AFSNAME=NOTOKEN || AFSNAME=$(grep $AFSID /etc/passwd | cut -d: -f1)
+[[ $LOGNAME != @(amagnan|hdplib) && $AFSNAME != hdplib ]] && HDPLIB=$(grep ^$LOGNAME: /etc/passwd | cut -f6 -d:)
+
+# Construct the log dir and file 
+[[ ! -d $HDPLIB/logs/$MONTH ]] && mkdir -p $HDPLIB/logs/$MONTH
+mySrcLevel=$SRCLEVEL
+myDstLevel=$DSTLEVEL
+if [[ $mySrcLevel = customtk* ]]
+then
+  mySrcLevel=$(print -- "${SRCLEVEL}" | sed 's/\//\_/g')
+fi
+if [[ $myDstLevel = customtk* ]]
+then
+  myDstLevel=$(print -- "${DSTLEVEL}" | sed 's/\//\_/g')
+fi
+LOGFILE=$HDPLIB/logs/$MONTH/$DATE.$PROJ_NAME.$REL_VER.${mySrcLevel}_to_${myDstLevel}${LOG_SUFFIX}
+
+COMPDIR_ERRORS=
+ERRORS=
+ERRORBLURB="There were 'update' Errors...\n (see logfile: $LOGFILE)\n"
+ERRORFILE=/tmp/CMa.error.$$
+rm -fr $ERRORFILE
+
+# Set up mailing lists
+CMTEAM="$($HDPLIBBIN/CM_parsealias CMTeam)"
+MAIL_LIST="$($HDPLIBBIN/CM_parsealias ${PROJ_NAME}_adv)"
+[[ $DSTLEVEL = dev ]] && MAIL_LIST="$($HDPLIBBIN/CM_parsealias ${PROJ_NAME}_advdev)"
+[[ -z $MAIL_LIST ]] && MAIL_LIST="$CMTEAM"
+[[ $PROJ_NAME != @(spam|ess|cre|cmoschks) ]] && MAIL_LIST="$MAIL_LIST $BARBSTER"
+[[ $MAIL_LIST != *@($LOGNAME)* ]] && MAIL_LIST="$MAIL_LIST $LOGNAME"
+
+###
+### Set/Check {SRC|DST} directories
+###
+if [[ -n $TEST_MODE ]]
+then
+  SRCDIR=/afs/eda/$SRCLEVEL/$TEST_DIR/$PROJ_NAME/$R_V
+  DSTDIR=/afs/eda/$DSTLEVEL/$TEST_DIR/$PROJ_NAME/$R_V
+  DBSWITCH="-db GTEST"
+else
+  SRCDIR=/afs/eda/$SRCLEVEL/$PROJ_NAME/$R_V
+  DSTDIR=/afs/eda/$DSTLEVEL/$PROJ_NAME/$R_V
+  DBSWITCH="-db PROD"
+fi
+
+UPDATE=$DSTDIR/.update
+
+$(cd $SRCDIR 2>/dev/null) || help ">>> Error: Cannot access source directory \"$SRCDIR\" ..."
+$(cd $DSTDIR 2>/dev/null) || help ">>> Error: Cannot access destination directory \"$DSTDIR\" ..."
+
+#
+# Check for lock on PROD component tree - exit with message if found.
+#
+PRODLOCK=$DSTDIR/.lock_prodLockMgr
+if [[ $DSTLEVEL = "prod" && -f $PRODLOCK ]]
+then
+  print "\n[WARN]: There is a release lock on this component in EDA PROD."
+  print "        No advance to EDA PROD can be performed with this lock in place."
+  print "        Please contact the EDA 14.1 Release Mgr for assistance...exiting.\n"
+  exit 4
+fi
+
+# Make sure DSTDIR is a real directory
+STOPLEVEL=$DSTLEVEL
+if [[ $STOPLEVEL  == custom@(tkb|tk)/* ]]
+then
+    STOPLEVEL=$(print $STOPLEVEL | cut -d/ -f1)
+fi
+LINKTEST="$DSTDIR"
+until [[ $(basename $LINKTEST) = "$STOPLEVEL" ]]
+do
+  [[ -L $LINKTEST ]] && help ">>> Error: \"$LINKTEST\" is a symlink!"
+  LINKTEST=$(dirname $LINKTEST)
+done
+
+# Ask if the automatically determined {src/dst}dirs are correct
+if [[ -n $ASKDIRS ]]
+then
+  if [[ -n $SKIPPING ]]
+  then
+    print -- "\n******************************************************************"
+    print -- "*** Skipping a level . . . Is this really what you want to do? ***"
+    print -- "******************************************************************"
+  else
+    print -- "\nAre the following Directories correct?"
+  fi
+  print -- "\nSource Directory: $SRCDIR"
+  print -- "Destination Directory:  $DSTDIR"
+  print -- "\n('[Nn]*' = no, '*' = yes)?? \c"
+  read REPLY
+  if [[ $REPLY = [Nn]* ]]
+  then
+    help "Please choose the correct directories either via\n  'cd <srcdir>' or 'command line options'."
+  fi
+fi
+
+###
+### Exit with an error if there are any:
+###   bin symlinks that point to a file that contains a "-g"
+###   dll symlinks that point to a file that contains "-g.dll"
+###
+unset MINUS_G
+for TYPE in bin dll
+do
+  for DIR in $(\ls -ldA $SRCDIR/.${TYPE}* 2>/dev/null | grep ^d | awk '{print $NF}')
+  do
+    case $TYPE in
+      #bin) if [[ -n $(\ls -log $DIR/* 2>/dev/null | grep -- "->" | grep -v nutshell | grep -- "-g") ]]
+      bin) if [[ -n $(\ls -log $DIR/* 2>/dev/null | grep -- "->" | grep -v nutshell | awk '{print $9}' | grep -- "-g") ]]
+            then
+             [[ -z $MINUS_G ]] && { print; MINUS_G=TRUE; }
+             \ls -log $DIR/* 2>/dev/null | grep -- "->" | grep -v nutshell | grep -- "-g"
+           fi;;
+      dll) if [[ -n $(\ls -log $DIR/*.dll 2>/dev/null | grep -- "->" | grep -v "../.dll" | grep -- "-g.dll") ]]
+            then
+             [[ -z $MINUS_G ]] && { print; MINUS_G=TRUE; }
+             \ls -log $DIR/*.dll 2>/dev/null | grep -- "->" | grep -v "../.dll" | grep -- "-g.dll"
+           fi;;
+    esac
+  done
+done
+
+if [[ -n $MINUS_G ]]
+then
+  print "\n>>> Error: One or more bin|dll symlinks is pointing to a debug (-g) version.\n>>> Cannot advance!"
+  exit 7
+fi
+
+###
+### Check for and Get LockFile.
+###
+ADVLOCK_SRC=$SRCDIR/.svnAdvance_lock
+ADVLOCK_DST=$DSTDIR/.svnAdvance_lock
+
+clear_lock_exit()
+ {
+  for ADVLOCK in $ADVLOCK_SRC $ADVLOCK_DST
+  do
+    if [[ -n $ADVLOCK ]]
+    then
+      [[ -n $(grep "$HOST $PID" $ADVLOCK 2>/dev/null) ]] && /bin/rm -f $ADVLOCK
+    fi
+  done
+  exit $1
+ }
+
+trap clear_lock_exit ABRT HUP INT QUIT TERM KILL  # KILL can not be caught
+
+for LOCKDIR in DST SRC
+do
+  unset GOTLOCK
+  ADVLOCK=$(eval_var ADVLOCK_$LOCKDIR)
+
+  while [[ -z $GOTLOCK ]]
+  do    
+    /usr/afsws/bin/fs flush $(eval_var ${LOCKDIR}DIR)
+    if [[ -a $ADVLOCK ]]
+    then
+      case $LOCKDIR in
+       DST) print -- "\n$RELEASE, $SRCLEVEL or $DSTLEVEL, is already being Advanced by \"$(cat $ADVLOCK)\"\n"
+            ;;
+       SRC) if [[ $SRCLEVEL = build ]]
+            then
+              print -- "\n>>> ERROR!! $ADVLOCK already exists in build . . . \n contents=\"$(cat $ADVLOCK)\"\n"
+            else
+              print -- "\n>>> Conflict!!  $RELEASE, $(dst_to_src $SRCLEVEL) -> $SRCLEVEL, is being Advanced by \"$(cat $ADVLOCK)\"\n"
+            fi
+            ;;
+      esac
+      clear_lock_exit 201
+    fi
+    print -- "$HOST $PID" > $ADVLOCK
+    sleep 1
+    [[ $(cat $ADVLOCK) = "$HOST $PID" ]] && GOTLOCK=TRUE
+  done
+done
+
+# &/ # Work around for notepad++ highlighting
+
+###
+### Actual work begins here
+###
+
+#
+# Update the CM database that promote is starting
+#
+logEvent "ADVANCE_START" "Advance starting"
+SVN_RC=$?
+print "logEvent RC: $SVN_RC" >> $LOGFILE
+if [[ $SVN_RC > 0 ]]
+then
+  print "Attempt to log ADVANCE_START in CM DB failed. Exiting."
+  print "Attempt to log ADVANCE_START in CM DB failed. Exiting." >> $LOGFILE
+  exit 8
+fi
+
+print -- "\n\n**************************************************************" >> $LOGFILE
+print -- "* $SCRIPT starting at $(date +'%a %D %T') on $(hostname | cut -d. -f1) *" >> $LOGFILE
+print -- "**************************************************************\n" >> $LOGFILE
+
+# Mark web page and send promote warning email
+if [[ -z CMDEBUG && -z $TEST_MODE ]]
+then
+  # Touch web page for components that use the BuildStatus web page flow.
+  unset TOUCH_WEBPAGE
+  CBLIST="model modelio modelutil hdp mdiff dcutils cplace vcplace"
+  EINSLIST="einstimer edautils ess tdnoise cre rice spam vss"
+  PROJLIST="$CBLIST $EINSLIST"
+  for PNAME in $PROJLIST
+  do
+    if [[ $PNAME = $PROJ_NAME ]]
+    then
+      TOUCH_WEBPAGE=TRUE
+      break
+    fi
+  done
+  [[ -n $TOUCH_WEBPAGE ]] && $HDPLIBBIN/CM_BuildStatus -r$RELEASE -l$DSTLEVEL -p_ALL_ -a
+  promote_email START
+fi
+
+# Print some debug info
+if [[ -n $CMDEBUG || -n $TEST_MODE ]]
+ then
+  print -- "\nPromoting from \"$SRCLEVEL\" to \"$DSTLEVEL\" for \"$RELEASE\"" | tee -a $LOGFILE
+  print -- "  SRCDIR=$SRCDIR\n  DSTDIR=$DSTDIR\n" | tee -a $LOGFILE
+fi
+
+#------------------------------------------------------------------------------
+# Create lists of directories to advance
+#------------------------------------------------------------------------------
+cd $SRCDIR
+
+# For advances to dev or prod: Create top level directories in DSTDIR if
+# they do not already match what exists in SRCDIR.
+case $DSTLEVEL in
+  dev|\
+  prod) make_nextlev_dirs $SRCLEVEL $DSTLEVEL
+        ;;
+esac
+
+# Identify lib, bin and dll top level component directories in the top level 
+# component directory to be advanced and write them to $LBD_DIRS
+LBD_DIRS=$(/bin/ls -ld $SRCDIR/.* | egrep 'lib-|bin-|dll-' | grep '^d' | awk '{print $NF}')
+
+# The einsgen component (dropped from 14.1?) has rules directory that uses @sys
+[[ $PROJ_NAME = einsgen ]] && LBD_DIRS="$LBD_DIRS $(/bin/ls -ld $SRCDIR/.* | egrep 'rules-' | grep '^d' | awk '{print $NF}')"
+
+# Limit to directories associated with platforms that may have been previously specified
+[[ -n $PLATFORMS ]] && LBD_DIRS=$(print -- "$LBD_DIRS" | egrep "$PLATFORMS")
+
+# Identify other top level component directories to be advanced (excluding the 
+# lib, bin and dll directories saved in $LBD_DIRS) and write them to $OTHLIST
+OTHLIST="etc include html msg pdf perl pixmaps rules tcl tclz .policy"
+[[ $PROJ_NAME = 6thsense ]] && OTHLIST="$OTHLIST configs"
+[[ $PROJ_NAME = alacrite ]] && OTHLIST="$OTHLIST skill"
+[[ $PROJ_NAME = alsim ]] && OTHLIST="$OTHLIST tech"
+[[ $PROJ_NAME = asicclk ]] && OTHLIST="$OTHLIST clocktree"
+[[ $PROJ_NAME = asicfep ]] && OTHLIST="$OTHLIST tcl.html tg_tcl"
+[[ $PROJ_NAME = bonntools ]] && OTHLIST="$OTHLIST doc"
+[[ $PROJ_NAME = @(casai|cpc) ]] && OTHLIST="$OTHLIST data posters profiles scheme scheme.contrib scheme.elk scheme.preelk scheme.usermenus cpc_batch"
+[[ $PROJ_NAME = ciwapp ]] && OTHLIST="$OTHLIST posters profiles"
+[[ $PROJ_NAME = clocktree ]] && OTHLIST="$OTHLIST wirecodes SCORPION_BUFFER"
+[[ $PROJ_NAME = cmoschks ]] && OTHLIST="$OTHLIST examples selfstore"
+[[ $PROJ_NAME = dkbuilder ]] && OTHLIST="$OTHLIST doc scripts test"
+[[ $PROJ_NAME = edautils ]] && OTHLIST="$OTHLIST scripts"
+[[ $PROJ_NAME = einstimer ]] && OTHLIST="$OTHLIST abstract custom"
+[[ $PROJ_NAME = flexnet ]] && OTHLIST="$OTHLIST i86_lsb ppc_u5 doc"
+[[ $PROJ_NAME = gna ]] && OTHLIST="$OTHLIST statsweb xml"
+[[ $PROJ_NAME = itime ]] && OTHLIST="$OTHLIST parm noise"
+[[ $PROJ_NAME = leakapi ]] && OTHLIST="$OTHLIST cfg"
+[[ $PROJ_NAME = license ]] && OTHLIST="$OTHLIST .bin-aix .bin-linux"
+[[ $PROJ_NAME = mar ]] && OTHLIST="$OTHLIST .catena doc qt share tools"
+[[ $PROJ_NAME = mar2 ]] && OTHLIST="$OTHLIST qt share tools"
+[[ $PROJ_NAME = mar2_2243 ]] && OTHLIST="$OTHLIST qt share tools"
+[[ $PROJ_NAME = nutshell ]] && OTHLIST="$OTHLIST .bin-aix pm"
+[[ $PROJ_NAME = syscmodels ]] && OTHLIST="$OTHLIST docs"
+[[ $PROJ_NAME = nil ]] && OTHLIST="$OTHLIST BIN"
+[[ $PROJ_NAME = oa ]] && OTHLIST="$OTHLIST oaroot Linux64"
+[[ $PROJ_NAME = oa_2243 ]] && OTHLIST="$OTHLIST oaroot"
+[[ $PROJ_NAME = pwrspice ]] && OTHLIST="$OTHLIST doc examples rules scripts src tests"
+[[ $PROJ_NAME = satsyn ]] && OTHLIST="$OTHLIST parms"
+[[ $PROJ_NAME = tgsupport ]] && OTHLIST="$OTHLIST theguide_support"
+[[ $PROJ_NAME = theguide ]] && OTHLIST="$OTHLIST xml"
+[[ $PROJ_NAME = vhdllibs ]] && OTHLIST="$OTHLIST vhdl_87 vhdl_93"
+
+[[ -n $CMDEBUG ]] && print "[D] OTHLIST: $OTHLIST"
+
+# Define list of component top level directories to not advance ($OTH_SKIP_ME).
+#   This only gets used for advances to dev or prod.
+#   It does not affect .svn entries in component subdirectories.
+#
+# An attempt is also made to exclude .svn directories by adding a 
+# -wexclude .svn entry in the FLAGS variable that is passed to the update
+# command. But, .svn is only added to FLAGS for the following top level
+# directories: tcl|tclz|scripts|oaslibs|tools
+OTH_SKIP_ME="EXTRACT|LOGS|TarFiles|beam_data|.svn"
+
+PRODSRC=
+OTHSHIP=
+
+case $DSTLEVEL in
+  ship|\
+    tk|\
+ customtk/*) [[ $PROJ_NAME != @(model|modelutil|pwrspice) ]] && OTHLIST=$(print -- $OTHLIST | sed 's/include //')
+
+        # Do not advance .lib-* directories
+        LBD_DIRS=$(print -- "$LBD_DIRS" | grep -v ".lib-")
+
+        # Only advance 64-bit directories
+        LBD_DIRS=$(print -- "$LBD_DIRS" | egrep '.bin-aix64|.bin-linux64|.bin-plinux64|.dll-aix64|.dll-linux64|.dll-plinux64')
+
+        # For edags or pwrspice, advance lib directories
+        [[ $PROJ_NAME = @(edags|pwrspice) ]] && LBD_DIRS="$LBD_DIRS $(/bin/ls -ld $SRCDIR/.* | grep 'lib-' | grep '^d' | awk '{print $NF}')"
+
+        # For sopt, dcl, RunTimLibs, texsim, verity and 6thsense, advance lib-64 directories
+        [[ $PROJ_NAME = @(sopt|dcl|RunTimLibs|texsim|verity|6thsense) ]] && LBD_DIRS="$LBD_DIRS $(/bin/ls -ld $SRCDIR/.* |grep '^d' |egrep '.lib-aix64|.lib-linux64|.lib-plinux64' |awk '{print $NF}')"
+        [[ -n $CMDEBUG ]] && print "[D] LBD_DIRS: $LBD_DIRS"
+    
+        # For mar, remove .catena from $OTHLIST to disable advancing to ship and tk
+        [[ $PROJ_NAME = mar ]] && OTHLIST=$(print $OTHLIST | sed "s/.catena//")
+        [[ -n $OVR_PRODSRC ]] && OTHSHIP="$OVR_PRODSRC"
+        [[ -n $OTHSHIP ]] && OTHLIST="$OTHLIST $OTHSHIP"
+    
+        # For advances to ship or tk: Some components require specific top level 
+        # directories to exist in the destination location that match directories 
+        # in the source location. The directories are specified here.
+    
+        # Initialize the array to hold directory names in this situation
+        set -A requiredDirArray
+    
+        # Specify component unique directory requirements below
+        [[ $PROJ_NAME = 6thsense ]] && set -A requiredDirArray "${requiredDirArray[@]}" configs
+        [[ $PROJ_NAME = alsim ]] && set -A requiredDirArray "${requiredDirArray[@]}" tech
+        [[ $PROJ_NAME = flexnet ]] && set -A requiredDirArray "${requiredDirArray[@]}" i86_lsb ppc_u5 doc
+        [[ $PROJ_NAME = gna ]] && set -A requiredDirArray "${requiredDirArray[@]}" statsweb xml
+        [[ $PROJ_NAME = itime ]] && set -A requiredDirArray "${requiredDirArray[@]}" parm
+        [[ $PROJ_NAME = leakapi ]] && set -A requiredDirArray "${requiredDirArray[@]}" cfg
+        [[ $PROJ_NAME = license ]] && set -A requiredDirArray "${requiredDirArray[@]}" .bin-aix .bin-linux
+        [[ $PROJ_NAME = mar ]] && set -A requiredDirArray "${requiredDirArray[@]}" doc qt share tools
+        [[ $PROJ_NAME = mar2 ]] && set -A requiredDirArray "${requiredDirArray[@]}" qt share tools
+        [[ $PROJ_NAME = mar2_2243 ]] && set -A requiredDirArray "${requiredDirArray[@]}" qt share tools
+        [[ $PROJ_NAME = nutshell ]] && set -A requiredDirArray "${requiredDirArray[@]}" .bin-aix pm
+        [[ $PROJ_NAME = oa ]] && set -A requiredDirArray "${requiredDirArray[@]}" oaroot Linux64
+        [[ $PROJ_NAME = oa_2243 ]] && set -A requiredDirArray "${requiredDirArray[@]}" oaroot
+        [[ $PROJ_NAME = pwrspice ]] && set -A requiredDirArray "${requiredDirArray[@]}" doc examples
+        [[ $PROJ_NAME = satsyn ]] && set -A requiredDirArray "${requiredDirArray[@]}" parms
+        [[ $PROJ_NAME = tgsupport ]] && set -A requiredDirArray "${requiredDirArray[@]}" theguide_support
+        [[ $PROJ_NAME = theguide ]] && set -A requiredDirArray "${requiredDirArray[@]}" xml
+        [[ $PROJ_NAME = vhdllibs ]] && set -A requiredDirArray "${requiredDirArray[@]}" vhdl_87 vhdl_93
+
+        # Create required directories in destination if they do not already exist
+        new_nextlev_dirs ${requiredDirArray[*]}
+
+        # Now, create any $OTHLIST directories that are missing in the destination 
+        # location provided that they exist in the source location.
+        #
+        # Note that setup_dirs is run when component AFS volume is initialized
+        # and it includes the creation of the following directories:
+        #   html, include, nutscript, perl, private, tcl and testcases.
+        create_missing_dirs
+        ;;
+  prod) PRODSRC="_ALL_"
+        [[ -n $OVR_PRODSRC ]] && PRODSRC="$OVR_PRODSRC"
+        [[ $PRODSRC = _ALL_ ]] && OTHLIST=$(/bin/ls -dl * | grep ^d | awk '{print $NF}' | egrep -v "$OTH_SKIP_ME|^build$")
+    
+        # Remove oaroot from $OTHLIST for oa component when advancing to prod
+        if [[ $PROJ_NAME = oa && $DSTLEVEL = prod ]]
+         then
+          # Commented out 09/08/11 - fixes the oa subdir issue under the oa component.
+          #OTHLIST="$(print $OTHLIST | sed 's/ oaroot//')"
+          [[ -n $CMDEBUG ]] && print "[D] OTHLIST: $OTHLIST"
+        fi
+    
+        [[ -n $PRODSRC ]] && OTHLIST="$OTHLIST $PRODSRC"
+        ;;
+   dev) cd $SRCDIR
+        OTHLIST=$(/bin/ls -dl * | grep '^drw' | awk '{print $NF}' | egrep -v "$OTH_SKIP_ME")
+        OTHLIST="$OTHLIST .policy"
+        ;;
+esac
+
+OTHER_DIRS=
+for ODIR in $OTHLIST
+do
+  OTHER_DIRS=$(print -- "$OTHER_DIRS\n $SRCDIR/$ODIR")
+done
+
+# Remove (don't advance) the build-process info-log-script directory (build)
+OTHER_DIRS=$(print -- "$OTHER_DIRS" | grep -v "build$")
+
+if [[ -n $CMDEBUG || -n $TEST_MODE ]]
+ then
+  print -- "\nDirectories to process:" | tee -a $LOGFILE
+  print -- "$LBD_DIRS" | tee -a $LOGFILE
+  print -- "$OTHER_DIRS" | tee -a $LOGFILE
+  #clear_lock_exit 222
+fi
+
+# Ensure pointers to nutsh are correct
+print -- "\n>>> Ensure pointers in $DSTDIR to nutsh are correct\n" >> $LOGFILE
+\ls -Ald $SRCDIR/.b* | grep ^d | awk '{print $NF}' |
+while read BINDIR
+do
+  [[ -n $CMDEBUG ]] && print -- "BINDIR = "$BINDIR
+  if [[ -n $(\ls -Alog $BINDIR 2>/dev/null | grep -- "->" | grep nutsh) ]]
+  then
+    \ls -Alog $BINDIR 2>/dev/null | grep -- "->" | grep nutsh |
+    while read NUTLINK
+    do
+      [[ -n $CMDEBUG ]] && print -- "NUTLINK = "$NUTLINK
+      print -- "$NUTLINK" | read a b c d e f LINK g POINT
+      [[ -n $CMDEBUG ]] && print -- "LINK = "$LINK
+      [[ -n $CMDEBUG ]] && print -- "POINT = "$POINT
+      RELATIVE="../../.."
+      [[ $DSTDIR = */dev/* ]] && RELATIVE="../../../../prod"
+      BINDIR=$(basename $BINDIR)
+      NUTVER=$(print ${NUTLINK#*nutshell/} | cut -f1 -d\/)
+      NUTNAME=$(print $NUTLINK | awk -F/ '{print $NF}')
+      if [[ $(\ls -l $DSTDIR/$BINDIR/$LINK 2>/dev/null | awk '{print $NF}') != $RELATIVE/nutshell/$NUTVER/$BINDIR/$NUTNAME ]]
+      then
+        print "FIXED: $(\ls -log $DSTDIR/$BINDIR/$LINK 2>/dev/null | awk '{print $(NF-2),$(NF-1),$NF}')" >> $LOGFILE
+        print "ln -sf $RELATIVE/nutshell/$NUTVER/$BINDIR/$NUTNAME $DSTDIR/$BINDIR/$LINK" >> $LOGFILE
+        ln -sf $RELATIVE/nutshell/$NUTVER/$BINDIR/$NUTNAME $DSTDIR/$BINDIR/$LINK
+      fi
+    done
+  fi
+done
+
+# Write to /afs/eda/common/httpd/current/docs/prodlist (skip if in test mode)
+if [[ -z $TEST_MODE ]]
+then
+  if [[ $SRCLEVEL = dev && $DSTLEVEL = prod ]]
+  then
+    print "/afs/eda/u/cmlib/bin/get_lh_delta -r $RELEASE" >> $LOGFILE
+    /afs/eda/u/cmlib/bin/get_lh_delta -r $RELEASE
+  fi
+else
+  print "Skipping call to get_lh_delta (in test mode)" >> $LOGFILE
+fi
+
+#------------------------------------------------------------------------------
+# Run the update command for each of the directories listed in $LBD_DIRS and
+# $OTHER_DIRS
+#------------------------------------------------------------------------------
+for DIR in $LBD_DIRS $OTHER_DIRS
+do
+  DIRNAME=$(basename $DIR)
+
+  # Check source locaton for directory
+  # This is necessary because OTHLIST is hardcoded.
+  if [[ ! -d $SRCDIR/$DIRNAME ]]
+  then
+    [[ $DIRNAME != _ALL_ ]] && print -- "\n... non-existent $SRCDIR/$DIRNAME, skipping...\n" >> $LOGFILE
+    continue
+  fi
+
+  # Check destination location for the current directory.
+  # If the directory does not exist in the destination location, no attempt is
+  # made to create the directory. It is skipped.
+  if [[ ! -d $DSTDIR/$DIRNAME ]]
+  then
+    ERRORS=TRUE
+    print -- "\n### Error: Can't find $DSTDIR/$DIRNAME, skipping...\n" | tee -a $LOGFILE >> $ERRORFILE
+  else
+    cd $DIR
+    print -- "\n### $(pwd) @ $(date +"%D %H:%M") ###\n" >> $LOGFILE
+
+    # Determine if the current directory is in $PRODSRC
+    #  (only matters if going to prod)
+    CURDIR_PRODSRC=
+    if [[ $PRODSRC = _ALL_ ]]
+    then
+      CURDIR_PRODSRC=$DIRNAME
+    else
+      [[ -n $PRODSRC ]] && CURDIR_PRODSRC=$(print -- $DIRNAME | egrep -w "$(print -- $PRODSRC | sed 's/ /|/g')")
+    fi
+
+    #---------------------------------------------------------------------------
+    # Define update command -wexclude and -rexclude arguments in $FLAG.
+    #
+    # The FLAGS variable must end with the '-rexclude' clause
+    #
+    #  rexclude is a form of RegExp
+    #  In RegExp:
+    #      . = <any character>, * = 0+ of preceding character
+    #      "Arch-.*" = "Arch-" followed by {any|no}thing...
+    #      whereas "Arch-*" = "Arch" followed by 0 or more "-" characters
+    #  In a regexp use "Arch-" (as "Arch-" "Arch-.*" "Arch-*" all match "Arch-<anything>")
+    #
+    # Do not promote "dot-files" nor the contents of the Arch-<Plat> dirs
+    #  or "core" files
+    #
+    #              FLAGS="-wexclude .*,core,.*~,*~ -rexclude Arch-.*" changed on 15Mar2001
+    # "tcl" line:  FLAGS="-wexclude core,.*~,*~ -rexclude Arch-.*"    changed on 15Mar2001
+    #              Removed "*" & ".*" from regexp (-rexclude) lines           on 08Aug2001
+    #---------------------------------------------------------------------------
+
+    # Hidden directories and files under the oaroot directory need to be advanced
+    # to ship and tk for the oa component. So, .* cannot be part of the -wexclude
+    # option for this case.
+    # As of 4/9/2012 these oaroot hidden directories do not appear in build, dev or prod.
+    #if [[ $DSTLEVEL = @(ship|tk) && $PROJ_NAME = oa && $DIRNAME = oaroot ]]
+    if [[ $DSTLEVEL = @(ship|tk|customtk/*) && $PROJ_NAME = @(oa|oa_2243) && $DIRNAME = oaroot ]]
+      then
+        FLAGS="-wexclude core,.*~,*~,*.pcv,.__afs*,.svn*,.OldFiles -rexclude Arch-"
+
+      # Hidden directories and files under the html directory need to be advanced
+      # for the cpc component. So, .* cannot be part of the -wexclude option for
+      # this case.
+      elif [[ $PROJ_NAME = cpc && $DIRNAME = html ]]
+      then
+        FLAGS="-wexclude core,.*~,*~,*.pcv,.__afs*,.svn*,.OldFiles -rexclude Arch-"
+
+      # Hidden directories and files under the perl directory need to be advanced
+      # for the nutshell and alsim components. So, .* cannot be part of the -wexclude
+      # option for this case.
+      #elif [[ $PROJ_NAME = nutshell && $DIRNAME = perl ]]
+      elif [[ $PROJ_NAME = @(nutshell|alsim) && $DIRNAME = perl ]]
+      then
+        FLAGS="-wexclude core,.*~,*~,*.pcv,.__afs*,.svn*,.OldFiles -rexclude Arch-"
+      
+      # Hidden directories and files under the etc directory need to be advanced
+      # for the verity component. So, .* cannot be part of the -wexclude option for
+      # this case.
+      elif [[ $PROJ_NAME = verity && $DIRNAME = etc ]]
+      then
+        FLAGS="-wexclude core,.*~,*~,*.pcv,.__afs*,.svn*,.OldFiles -rexclude Arch-"
+
+      # Since the exclude arguments defined here include .*, it will also
+      # prevent .svn directories from being advanced.
+      elif [[ $DIRNAME != @(tcl|tclz|scripts|oaslibs|tools) ]]
+      then
+        FLAGS="-wexclude .*,core,.*~,*~,*.pcv,.__afs* -rexclude Arch-"
+
+      # This outcome does not exclude .* because tcl, tclz, scripts,... contain
+      # valid dot-files. So, .svn* has to be added.
+      else
+        FLAGS="-wexclude core,.*~,*~,.svn* -rexclude Arch-"
+    fi
+
+    # Add ^Make,/Make to $FLAGS under some circumstances to prevent files and 
+    # directories that start with Make from advancing.
+    # One special case is the perl directory in the nutshell component which 
+    # requires that MakeMaker and Maketext subdirectories be advanced.
+    #[[ $DSTLEVEL = @(ship|tk) || ( $DSTLEVEL = @(prod|shipb|tkb) && -z $CURDIR_PRODSRC ) ]] && FLAGS="$FLAGS,^Make,/Make"  # old line
+    [[ ( $DSTLEVEL = @(ship|tk|customtk/*) && ( $PROJ_NAME != nutshell || $DIRNAME != perl ) || ( $DSTLEVEL = @(prod|shipb|tkb|customtkb/*) && -z $CURDIR_PRODSRC )) ]] && FLAGS="$FLAGS,^Make,/Make"
+    
+    # When advancing to ship or tk for the tcl directory in the tcl component, 
+    # apply the -mkreal option to replace symlinks with files from the source
+    # level that the symlinks refer to.
+    [[ $DSTLEVEL = @(ship|tk|customtk/*) && $PROJ_NAME = tcl && $DIRNAME = tcl ]] && FLAGS="-mkreal $FLAGS"
+    
+    case $DIRNAME in
+     custom*|\
+     include*|\
+     private) # Convert symlinks to real files
+              [[ $PROJ_NAME != dadb && $PROJ_NAME != bonntools ]] && FLAGS="-mkreal $FLAGS"
+              ;;
+      .lib-*) # For advances to ship or tk, add -g,_pure_,-pg to $FLAGS
+          [[ $DSTLVL = @(ship|tk|customtk/*) ]] && FLAGS="$FLAGS,-g,_pure_,-pg"
+              ;;
+      .bin-*|\
+      .dll-*) # Don't advance ".*.dll"s, temp or loadmap files
+              # Make a backup copy of DLLs when advancing to prod or ship
+              # Don't advance debug libs to ship
+              LMT_BAK="$(( print -- $(/bin/ls -lLd $DIR/* \
+                                     | awk '{print $5}' \
+                                     | sort -nu \
+                                     | tail -1\
+                                  )'/(1000*1000)' \
+                            | bc \
+                            | awk -F. '{print ($1+5)}' \
+                         ) 2>/dev/null \
+                        )"
+              [[ $LMT_BAK != +([0-9]) ]] && LMT_BAK=100
+              FLAGS="-exe_bak -limit_bak $LMT_BAK $FLAGS,.*loadmap"
+
+              # For xrouter component, do not keep backup executables except for aix64
+              [[ $PROJ_NAME = xrouter && $DIR != *aix64 ]] && FLAGS="$FLAGS,.*loadmap"
+
+              # Don't advance *.dll or ldll* files
+              FLAGS=$(print -- "$FLAGS" | sed 's/-wexclude /-wexclude ldll*,.*.dll,/')
+      
+              # For advances to ship or tk, add -g,_pure_,-pg to $FLAGS
+              [[ $DSTLVL = @(ship|tk|customtk/*) ]] && FLAGS="$FLAGS,-g,_pure_,-pg"
+      
+              # Add nutsh links in .bin-* directories to $FLAGS
+              [[ $DIRNAME = .bin-* && -n $(/bin/ls -Al | grep '^l' | grep nutsh) ]] && FLAGS="$FLAGS,$(print -- $(/bin/ls -Al | grep '^l' | grep nutsh | awk '{print "^"$(NF-2)"$"}') | sed 's/ /,/g')"
+
+              # Cleanup old backup dlls. If a dll is renamed or deleted the .name.dll is never deleted.
+              [[ $DIRNAME = .dll-* ]] && { /bin/rm $DSTDIR/$DIRNAME/.*.dll >/dev/null 2>&1; }
+              ;;
+           *) # Otherwise, if a e*.??00 release, add -mkreal to $FLAGS
+              [[ $RELEASE = e*.??00 ]] && FLAGS="-mkreal $FLAGS"
+              ;;
+    esac
+  
+    # For dev or $PRODSRC = _ALL_, remove Arch entries and -rexclude stuff from $FLAGS
+    # This means that Arch-* will be advanced to dev and prod.
+    if [[ $DSTLEVEL = dev || $PRODSRC = _ALL_ ]]
+    then
+      FLAGS="$(print -- "$FLAGS" \
+                | sed -e 's/Arch-[^,]*,*//' \
+                      -e 's/ ,/ /' \
+                      -e 's/-rexclude *$//'
+              )"
+    fi
+
+    # Write an entry to the logfile reporting how the update command is about 
+    # to be called.
+    print -- ">>> $UPDATE_PGM -rmdest -stats $CMDEBUG $FLAGS $DIR $DSTDIR/$DIRNAME" >> $LOGFILE
+    print -- ">>>  CMDEBUG: $CMDEBUG" >> $LOGFILE
+    print -- ">>>  FLAGS  : $FLAGS" >> $LOGFILE
+    print -- ">>>  DIR    : $DIR" >> $LOGFILE
+    print -- ">>>  DSTDIR : $DSTDIR/$DIRNAME" >> $LOGFILE
+
+    #---------------------------------------------------------------------------
+    # Clean up the stderr output from the update command. Otherwise, the
+    # stderr output will appear in the middle of the line where the error
+    # occured (ie: "<filename>... <error msg> copied").
+    #
+    # By putting the "2>&1" before the ">>" stdout and stderr are separated.
+    #
+    # Since ">>" and "tee" both go to the same file, the ">>" gets processed
+    # first and the error text now appears at the end, instead of in the middle
+    # of the output.
+    #
+    # Since they have been separated they can be directed into the ERRORFILE
+    # and CURERROR variable.
+    #
+    # The CURERROR variable is required because the output from tee overrides 
+    # the error status from the update command.
+    #---------------------------------------------------------------------------
+  
+    # Invoke the update command
+    CURERROR="$($UPDATE_PGM -rmdest -stats $CMDEBUG $FLAGS $DIR $DSTDIR/$DIRNAME 2>&1 >> $LOGFILE | tee -a $LOGFILE | tee -a $ERRORFILE)"
+  
+    # Handle errors from the update command
+    if [[ -n $CURERROR ]]
+    then
+      ERRORS=TRUE
+      print -- ">>> Error in: $DIR ??\n...$CURERROR..."
+    fi
+    CURERROR=
+    rm -f $DIR/core $DSTDIR/$DIRNAME/core 2>/dev/null
+
+    COMPERROR=$($HDPLIBBIN/CM_compdir $DIR $DSTDIR/$DIRNAME)
+
+    LINKERRORS=
+    NUTSH_LIST="$(cd $DIR ; /bin/ls -Al | grep 'nutsh' | grep ' -> ' | awk '{print $(NF-2)}')"
+    EGREP_LIST=" $(print -- $NUTSH_LIST | sed 's/ /$| /g')$"
+    if [[ $DIR = */.bin-*  && "$EGREP_LIST" != " $" ]]
+    then
+      COMPERROR=$(print -- "$COMPERROR" | egrep -v "$EGREP_LIST")
+      LINKERRORS=$(for NUTSH_LINK in $NUTSH_LIST
+                    do
+                     /bin/ls -l $DIR/$NUTSH_LINK $DSTDIR/$DIRNAME/$NUTSH_LINK | grep ' -> /afs/eda' | awk '{print $(NF-2),$(NF-1),$NF}'
+                     print
+                    done 2>/dev/null
+                  )
+
+      # Remove any double blank lines
+      COMPERROR=$(print -- "$COMPERROR" | awk '{if(NF != 0){print;L=0}else if(L==0){print;L+=1}}')
+    fi
+  
+    HEADER="\n\n... From:  $DIR... To:    $DSTDIR  ...\n\n"
+  
+    # Handle link errors
+    if [[ -n $LINKERRORS ]]
+    then
+      LINKERRORS="\n>>> Symlink Mismatch Errors\n\n$LINKERRORS\n"
+    
+      # If Ken wants this condition to cause a Real error, uncomment the following line of code:
+      #[[ $DSTLEVEL != dev ]] && { ERRORS=TRUE; print -- "\n$LINKERRORS\n" >> $ERRORFILE; LINKERRORS=; }
+    
+      # An alternative is to send a email (this would allow for a higher ERROR without breaking the advance).
+      #print -- "\n$LINKERRORS\n" | /bin/mail -s "Symlink Mismatch Errors" $CMTEAM $LOGNAME
+    fi
+  
+    # Handle comp errors
+    if [[ -n $COMPERROR ]]
+    then
+      COMPERROR="\n>>> Possible Errors\n\n$COMPERROR\n"
+    fi
+    if [[ -n "${LINKERRORS}${COMPERROR}" ]]
+    then
+      COMPDIR_ERRORS="${COMPDIR_ERRORS}${HEADER}${LINKERRORS}${COMPERROR}"
+      print -- "${HEADER}${LINKERRORS}${COMPERROR}" | tee -a $LOGFILE
+    fi
+  fi
+done # for DIR in $LBD_DIRS $OTHER_DIRS
+ 
+#------------------------------------------------------------------------------
+# Identify files in top level component directory to be advanced and add them 
+# to $UPFILE_LIST
+#------------------------------------------------------------------------------
+cd $SRCDIR
+
+if [[ $DSTLEVEL != @(ship|tk|customtk/*) ]]
+then
+  UPFILE_LIST="Make.config* Makefile.bin Makefile.shared* TAGS *.includes .[a-z]*.html Changelog.html .gcov.tar.bz2 .prebuild .postbuild"
+  case $PROJ_NAME in
+    aces) UPFILE_LIST="$UPFILE_LIST Make.rules.* Makefile.asxaces.bin"
+        ;;
+    ciwapp|casai|cpc) UPFILE_LIST="$UPFILE_LIST SYSDEFS"
+        ;;
+    EDAdochtml) UPFILE_LIST="$UPFILE_LIST EDAManuals.html"
+        ;;
+    hdp|model|modelutil) UPFILE_LIST="$UPFILE_LIST $(cd $SRCDIR;\ls $(\ls -dl1 .bin-* 2>&1 | grep -v '^l' | awk '{print $NF"/*.sh "$NF"/run[Sx]*"}') 2>/dev/null )"
+        ;;
+    license) UPFILE_LIST="$UPFILE_LIST .promote"
+        ;;
+    mar) UPFILE_LIST="$UPFILE_LIST .cvs_tag Makefile.gen Version"
+        ;;
+    mar2) UPFILE_LIST="$UPFILE_LIST .cvs_tag Makefile.gen Version"
+        ;;
+    mar2_2243) UPFILE_LIST="$UPFILE_LIST .cvs_tag Makefile.gen Version"
+        ;;
+    nil) UPFILE_LIST="$UPFILE_LIST build.xml"
+        ;;
+    pet) UPFILE_LIST="$UPFILE_LIST pet PET.conf PET_eda.conf"
+        ;;
+    vhdllibs) UPFILE_LIST="$UPFILE_LIST README README_IBMLIB README_IEEE"
+        ;;
+  esac
+else
+  case $PROJ_NAME in
+    ciwapp|casai|cpc) UPFILE_LIST="SYSDEFS"
+        ;;
+    EDAdochtml) UPFILE_LIST="EDAManuals.html"
+        ;;
+    mar|mar2|mar2_2243) UPFILE_LIST=".cvs_tag Version"
+        ;;
+    pet) UPFILE_LIST="pet PET.conf PET_eda.conf"
+        ;;
+    vhdllibs) UPFILE_LIST="README README_IBMLIB README_IEEE"
+        ;;
+  esac
+fi
+
+UPFILE_LIST="LEVELHIST $UPFILE_LIST"
+
+#-------------------------------------------------------------------------------
+# Run the update or rsync command for files in $UPFILE_LIST that are located in the top
+# most component directory (e.g., <component>/14.1/)
+#-------------------------------------------------------------------------------
+if [[ $PROJ_NAME != pet ]]
+then
+
+  # Use update cmd for components other than pet.
+  # Note that -rmdest option is not used here, but it is used earlier in svnAdvance.
+  # This means that files removed from the source will not get deleted from the destination.
+  for UPFILE in $UPFILE_LIST
+  do
+    if [[ -r $SRCDIR/$UPFILE ]]
+    then
+      print -- ">>> $UPDATE_PGM -stats $CMDEBUG -mkreal $SRCDIR/$UPFILE $DSTDIR/$(dirname $UPFILE)" >> $LOGFILE
+      CURERROR="$($UPDATE_PGM -stats $CMDEBUG -mkreal $SRCDIR/$UPFILE $DSTDIR/$(dirname $UPFILE) 2>&1 >> $LOGFILE | tee -a $LOGFILE | tee -a $ERRORFILE)"
+      [[ -n $CURERROR ]] && ERRORS=TRUE ; CURERROR=
+    else
+      print -- "$UPFILE could not be read; copy skipped." >> $LOGFILE
+    fi
+  done
+
+else
+
+  # Use rsync for pet.
+  # rsync is used here because the update command will not copy a symlink from the
+  # top level directory without converting it to a real file (even with -mkreal omitted).
+  for UPFILE in $UPFILE_LIST
+  do
+    if [[ -r $SRCDIR/$UPFILE ]]
+    then
+      print -- ">>> $RSYNC_CMD -ltv $SRCDIR/$UPFILE $DSTDIR/$(dirname $UPFILE)" >> $LOGFILE
+      CURERROR="$($RSYNC_CMD -ltv $SRCDIR/$UPFILE $DSTDIR/$(dirname $UPFILE) 2>&1 >> $LOGFILE | tee -a $LOGFILE | tee -a $ERRORFILE)"
+      [[ -n $CURERROR ]] && ERRORS=TRUE ; CURERROR=
+    else
+      print -- "$UPFILE could not be read; copy skipped." >> $LOGFILE
+    fi
+  done
+fi
+
+# For advances to destinations other than ship or tk
+if [[ $DSTLEVEL != @(ship|tk|customtk/*) ]]
+then
+ 
+  # In some make files and a site_startup.tcl file, replace references to the
+  # source level directory with a reference to the destination level directory
+  cd $DSTDIR    # Need to be in the destination directory
+  for CONFIG in $(grep -l "/$SRCLEVEL" Make.config Make.config.pcr */Make.config */*/Make.config Makefile.bin tcl/site_startup.tcl .bin-sun/*-q 2>/dev/null)
+   do
+    CONFIG_DIR=$(dirname $CONFIG)
+    CONFIG_FILE=$(basename $CONFIG)
+    cd $DSTDIR/$CONFIG_DIR
+    sed "s|/afs/eda/$SRCLEVEL|/afs/eda/$DSTLEVEL|" $CONFIG_FILE > $CONFIG_FILE.sed
+    if [[ -a $CONFIG_FILE.sed ]]
+     then
+      if [[ $(diff $CONFIG_FILE $CONFIG_FILE.sed >/dev/null 2>/dev/null; print $?) != 0 ]]
+       then
+        print -- ">>> Changed \"/afs/eda/$SRCLEVEL\" to \"/afs/eda/$DSTLEVEL\" in $DSTDIR/$CONFIG" >> $LOGFILE
+        mv $CONFIG_FILE.sed $CONFIG_FILE
+        touch -r $SRCDIR/$CONFIG $CONFIG_FILE
+       else
+        rm $CONFIG_FILE.sed
+      fi
+    fi
+   done
+
+   # Replace additoinal references to the source level directory with a 
+   # reference to the destination level directory.
+   # einstimer and ess have a "ET_AREA" variable.
+   if [[ $PROJ_NAME = @(ess|einstimer) ]]
+   then
+     CONFIG=Make.config
+     CONFIG_FILE=$DSTDIR/$CONFIG
+     sed "/ET_AREA[   ]*=/s/$SRCLEVEL/$DSTLEVEL/" $CONFIG_FILE > $CONFIG_FILE.sed
+     if [[ -a $CONFIG_FILE.sed ]]
+     then
+       if [[ $(diff $CONFIG_FILE $CONFIG_FILE.sed >/dev/null 2>/dev/null; print $?) != 0 ]]
+        then
+         print -- ">>> Changed (ET_AREA) \"$SRCLEVEL\" to \"$DSTLEVEL\" in $CONFIG_FILE" >> $LOGFILE
+         mv $CONFIG_FILE.sed $CONFIG_FILE
+         touch -r $SRCDIR/$CONFIG $CONFIG_FILE
+        else
+         rm $CONFIG_FILE.sed
+       fi
+     fi
+   fi
+fi
+
+# Remove all *.d files from DSTDIR
+print "\nClean out the Arch dirs in $DSTDIR" >> $LOGFILE
+if [[ $DSTLEVEL != dev ]]
+then
+  print "find $DSTDIR -name \"*.d\" -exec rm {} \;" >> $LOGFILE
+  find $DSTDIR -name "*.d" -exec rm {} \;
+ else
+  print "... skipped when DSTLEVEL = $DSTLEVEL" >> $LOGFILE
+fi
+print "" >> $LOGFILE
+
+# .CM.post-cma
+if [[ -z $TEST_MODE ]]
+then
+  [[ -a $HDPLIB/.CM.post-cma ]] && . $HDPLIB/.CM.post-cma   # $HDPLIB = ~hdplib|~einslib|$HOME
+  [[ -a $SRCDIR/.CM.post-cma ]] && . $SRCDIR/.CM.post-cma
+fi
+
+
+# Blowaway?, Dev-to-Prod, touch_update_time, email
+# Do the following if we are not in debug mode.
+if [[ -z $CMDEBUG ]]
+then
+
+  # Check to see if we need to touch "blowaway" files in other releases...
+  # Also check for <PROJ>_TOP != prod and fix... (Make.config)
+  if [[ $DSTLEVEL = prod ]]
+  then
+    # Why do it this crazy way?  so it is generic...
+    FALSE_ALARM=
+    BLOW_LEVEL=build
+    BLOW_PLAT_LIST_00="rs_aix43 64-rs_aix43 sun4x_57 64-sun4x_57 hp_ux102 64-hp_ux110 i386_linux22"
+    BLOW_PLAT_LIST_01="rs_aix43 64-rs_aix43 64-rs_aix51 sun4x_57 64-sun4x_57 hp_ux110 64-hp_ux110 i386_linux24"
+    case $RELEASE in
+
+      # MUST do the following:  fs sa /afs/eda/build/hdp/7.1/build/etc einslib write
+      #einstimer.*) case $REL_VER in
+      #              0701) BLOW_RELS="hdp.$REL_VER";;
+      #                 *) FALSE_ALARM=TRUE;;
+      #             esac
+      #             # If no include files have been advanced then no need for a blowaway...
+      #             #
+      #             [[ -z $(find $BUILDDIR/include -type f -newer $BUILDDIR/.update) ]] && FALSE_ALARM=TRUE
+      #             ;;
+      model.*) unset BLOW_RELS
+               for BLOW_REL in einstimer ess cre spam edautils hdp
+                do
+                 [[ $BLOW_REL = ess && $REL_VER = 0301 ]] && continue
+                 BLOW_RV=$REL_VER
+                 [[ $BLOW_REL != @(cre|spam) && $REL_VER = 0301 ]] && BLOW_RV=0701
+                 BLOW_RELS="$BLOW_RELS $BLOW_REL.$BLOW_RV"
+               done
+               ;;
+      modelutil.*) unset BLOW_RELS
+                   for BLOW_REL in hdp
+                    do
+                     BLOW_RELS="$BLOW_RELS $BLOW_REL.$REL_VER"
+                   done
+                   ;;
+      #hdp.0701) BLOW_RELS="modeltest.0301"
+      #          BLOW_PLAT_LIST="$BLOW_PLAT_LIST_00"
+      #          ;;
+              *) FALSE_ALARM=TRUE
+                 ;;
+    esac
+
+    if [[ -z $FALSE_ALARM ]]
+    then
+      for BLOW_REL in $BLOW_RELS
+       do
+        BLOW_COMP=$(print -- $BLOW_REL | cut -d. -f1)
+        BLOW_RELVER=$(print -- $BLOW_REL | cut -d. -f2)
+        BLOW_RV="$(print -- $BLOW_RELVER | cut -c1,2 | sed 's/^0//').$(print -- $BLOW_RELVER | cut -c3,4 | sed 's/^0//')"
+        BLOW_DIR=$(print -- $DSTDIR/build/etc | sed -e "s/$DSTLEVEL/$BLOW_LEVEL/" \
+                                                 -e "s/$R_V/$BLOW_RV/" \
+                                                 -e "s/$PROJ_NAME/$BLOW_COMP/")
+        print -- "Touching blowaway files for \"$BLOW_COMP/$BLOW_RV\"" | tee -a $LOGFILE
+        for BLOW_PLAT in $BLOW_PLAT_LIST
+         do
+          print -- "$RELEASE to prod..." >> $BLOW_DIR/blowaway.$BLOW_PLAT
+         done
+        ls -l $BLOW_DIR/blowaway.*
+
+        # For model, force a build of hdp/chipplace
+        if [[ $PROJ_NAME = @(model|modelutil) && $BLOW_COMP = @(hdp|chipplace) ]]
+         then
+          print -- "Touching forcebuild file for \"$BLOW_COMP/$BLOW_RV\"" | tee -a $LOGFILE
+          print -- "$RELEASE to prod..." >> $BLOW_DIR/forcebuild
+          ls -l $BLOW_DIR/forcebuild*
+        fi
+      done
+    fi
+
+    # Switch from using dependancies in DEV to PROD
+    DEV_COMPS="$(grep '_TOP[  ]*=[  ]*$(DEV)' $DSTDIR/Make.config | egrep -v '^[  ]*#|NIAGARA' | awk -F/ '{print $2}')"
+    if [[ -n $DEV_COMPS ]]
+     then
+      UC_DSTLEVEL=$(UpCase $DSTLEVEL)
+      UC_SRCLEVEL=$(UpCase $SRCLEVEL)
+      for CUR_LEVEL in prod ######## dev build
+       do
+        MAKECONFIG=/afs/eda/$CUR_LEVEL/$PROJ_NAME/$R_V/Make.config
+        [[ ! -w $MAKECONFIG ]] && continue
+        TMPMAKECONFIG=$MAKECONFIG.tmp
+        for UC_DEV_COMP in $(UpCase $DEV_COMPS)
+         do
+          sed -e "/^[#  ]*${UC_DEV_COMP}_TOP[   ]*=/s!^#*!#!" \
+              -e "/^[#  ]*${UC_DEV_COMP}_TOP.*$UC_DSTLEVEL/s!^#*!!" \
+            < $MAKECONFIG \
+            > $TMPMAKECONFIG \
+            || { print -- "\n>>> Error: SRCLEVEL to DSTLEVEL _TOP sed failed ($SRCLEVEL to $DSTLEVEL) . . . \n"; continue; }
+          mv $TMPMAKECONFIG $MAKECONFIG \
+           || { print -- "\n>>> Error: sed-tempfile mv #1 failed . . . "; continue; }
+         done
+       done
+    fi  ## if -n $DEV_COMPS
+  fi  ## $DSTLEVEL = prod
+
+  # Mark the last update time
+  print -- "$RELEASE $(date +"%D %H:%M")" advance > $UPDATE
+  cat $UPDATE >> ${UPDATE}_history
+
+  # Put update time on web page
+  MSG="$DSTDIR updated at $(date +%H:%M)"
+  [[ -n $ERRORS ]] && MSG="$(print -- $MSG | sed 's!ted at !ted (w/errors) at !')"
+  print -- "\n$MSG\n"
+
+  if [[ -z $TEST_MODE ]]
+  then
+    if [[ -n $ERRORS ]]
+    then
+      print -- "\n$(cat $ERRORFILE)\n"
+      [[ -n $TOUCH_WEBPAGE ]] && $HDPLIBBIN/CM_BuildStatus -r$RELEASE -l$DSTLEVEL -p_ALL_ -c "FF0000" -A "$MSG"
+    else
+      [[ -n $TOUCH_WEBPAGE ]] && $HDPLIBBIN/CM_BuildStatus -r$RELEASE -l$DSTLEVEL -p_ALL_ -A
+    fi
+  else
+    print "BuildStatus web page not updated (test mode) ..."
+  fi
+
+  # Send email that processing has completed
+  if [[ -z $TEST_MODE ]]
+  then
+    promote_email DONE
+  else
+    print "Promote email not sent (test mode) ..."
+  fi
+fi
+
+# Update CM database that advance is complete
+if [[ -n $ERRORS ]]
+then
+  SVN_EVENT="ADVANCE_FAIL"
+  APP_RC=8
+else
+  if [[ $DSTLEVEL = customtk* ]]
+  then
+    SVN_EVENT="ADVANCED_TO_CUSTOMTK"
+  else
+    SVN_EVENT="ADVANCED_TO_$DSTLEVEL"
+  fi
+fi
+
+logEvent "$SVN_EVENT" "Advance complete"
+SVN_RC=$?
+if [[ $SVN_RC > 0 ]]
+then
+  print "Attempt to log $SVN_EVENT in CM DB failed."
+  print "Attempt to log $SVN_EVENT in CM DB failed." >> $LOGFILE
+fi
+
+# Update the tk_src repository if this is an advance to tk and this is one of
+# components that is maintained in tk_src.
+#
+#   Update script is started in background to avoid lengthy delays in the
+#   completion of svnAdvance.
+#
+#   Nohup is used to enable the update script to continue running in background
+#   even if the current shell is exited.
+if [[ $DSTLEVEL = tk && $PROJ_NAME = @(edautils|einstimer|vss) ]]
+  then
+    updateTkSrcCmd="${SVN_BIN}/updateTkSrc -c $PROJ_NAME -r 14.1"
+    updateTkSrcLog="$HDPLIB/logs/${MONTH}/updateTkSrc_$PROJ_NAME_$(date +%C%y%m%d\_%H%M%S).nohup"
+    print "$(date +%C%y-%m-%d\ %H:%M:%S) $updateTkSrcCmd" >> $LOGFILE
+    nohup $updateTkSrcCmd > updateTkSrcLog &
+    updateTkSrcRc=$?
+  if (( updateTkSrcRc != 0 ))
+  then
+  
+    # Error detected
+    print "ERROR: Attempt to start $updateTkSrcCmd failed.\n" | tee -a $LOGFILE
+  else
+    print "INFO: $updateTkSrcCmd was started.\n" | tee -a $LOGFILE
+  fi
+fi
+
+
+get_maxrc $APP_RC $SVN_RC
+
+print "logEvent RC: $SVN_RC\n" >> $LOGFILE
+print "$SCRIPT RC: $APP_RC" >> $LOGFILE
+print -- "\n\nGoodbye...$(date)" >> $LOGFILE
+
+rm -f $ERRORFILE
+clear_lock_exit $APP_RC

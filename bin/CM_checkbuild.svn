@@ -1,0 +1,1322 @@
+#!/usr/bin/perl
+#
+# Script to extract error messages from the build logs and generally check the build
+#
+#### Modified for use in the CMVC-based release 14.1 build flow by Art Magnan.
+#
+# 04/16/10 AM  Changed location of logs for HDPLIB to proper location
+#              which is ~hdplib/logs/{month}
+#              Updated %errortype for Linux platform to exclude "MSG_"
+#
+### Modified for use in the SVN-based release 14.1 build flow by Art Magnan.
+#
+# 06/22/10 AM  Copied ~cmlib/bin/CM_checkbuild.14 to initialize this script.
+#              Changed base directory to always be EDA BUILD.
+#              Added stub to update build status in CM DB via modifyFuncUpdate API.
+#              Changed existing $builddir variable to $etcdir.
+#              Added parm $opt_d to put flow into development mode and test 
+#              environment.
+#                1) Redefines BUILDDIR based on $opt_d
+#                2) Does NOT update Build Status web page.
+#              Handled references to EDA CMVC:
+#                1) Commented out CMVC variable declarations.
+#                2) For now, commented out function calls to get_track_owners and 
+#                   send_mail since they rely on access to EDA CMVC. In future, will
+#                   need info from CM DB (future phase) to perform get_track_owners
+#                   and send_email functionality. Also, opt_r section calls CMVC.
+# 06/28/10 AM  Added function, get_svn_revID, to get the SVN revision number for 
+#              current build WC. Added calls to modifyFuncUpdate routine to update
+#              the CM DB with build status.
+# 07/07/10 AM  Updated svnclib definition in DEVMODE to point at the 
+#              enablement/dev/bin directory.
+# 07/09/10 AM  Removed revID parm from modifyFuncUpdate API call definition.
+#              Added modifyFuncUpdate API calls to all error condition sections of
+#              code.
+# 07/14/10 AM  Added "-db DEV" switch to all CM DB API calls that need to reference
+#              the CM DEV DB,
+#              i.e. calls in DEVMODE.
+# 07/15/10 AM  Removed function and function call to get_svn_revID - no longer 
+#              needed.
+# 07/27/10 AM  Put BUILDLOG under DEVMODE control and appends "devmode" suffix when
+#              in DEVMODE.
+# 08/11/10 AM  For modelutil component, updated %errortype for both platforms to
+#              exclude "IDMPerror", for Linux platform to exclude "yyerror", and AIX
+#              platform to exclude "PDLError".
+# 10/22/10 AM  For model, updated %errortype for AIX platform to exclude "failed" 
+#              if "(W)" in same line.
+# 10/27/10 AM  For modelutil, updated %errortype for AIX platform to exclude
+#              "yyerror". Updated to bypass verifylibs reporting for components
+#              model and modelutil. These do not meet the defined use of the
+#              verifylibs function since do not have 1:1 correspondence between
+#              libraries and subcomponents.
+# 02/08/11 AM  Updated for new event logging through the svnLog API.
+#              Wrote function, logEvent, to manage build result events: 
+#              BUILD_SUCCESS, BUILD_FAIL
+# 02/09/11 AM  Activated -t switch to get the toolkit version, $tkversion, for use 
+#              by the logEvent function.
+# 04/05/11 GS  Reformated code and comments. Removed sun/hp os.  Removed some
+#              commented code.  For Linux updated %errortype to exclude Werror.
+# 05/13/11 AM  Changed all references to btv/edainfra to eda/edainfra for SVN migration.
+# 10/05/12 GS  Commented out steps to get email addresses from CMVC.
+#====================================================================================
+use Getopt::Std;
+
+getopts('l:r:p:t:dfMNCR');
+
+# -l: <level>
+# -r: <release>
+# -p: <platform>
+# -t: <tkversion>   e.g. 14.1.n
+# -d: puts in dev mode, runs in test environment (build/svn_test)
+# -f: check for flexelint only
+# -M: send mail to developers
+# -N: do not send mail to developers DISABLED
+
+# -C: check compile only
+# -R: check regression only
+
+# ----------------------------------------------------------------------
+# VARIABLE DEFINITIONS
+# ----------------------------------------------------------------------
+# base directory
+$basedir = "/afs/eda/build";
+
+# set column width for regression output
+$colwidth = 132;
+
+#source of regression owners:
+$procfile = "/afs/eda/u/einslib/html/process.html";
+
+# SVN related
+$svn = "/afs/eda/tools/bin/svn";
+
+if ($opt_d) {
+  # AFS path for SVN script execution
+  $svnclib = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+} else {
+  # AFS path for SVN script execution
+  $svnclib = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+}
+
+$cm_buildstatus = "/afs/eda/u/hdplib/bin/CM_BuildStatus";
+$days = "Mon|Tue|Wed|Thu|Fri|Sat|Sun";
+
+# ----------------------------------------------------------------------
+# FUNCTION DEFINITIONS
+# ----------------------------------------------------------------------
+sub goodbye {
+  print "$0 -r <release> -p <platform> [ -dfNCR ]\n";
+  print "\t -r: <release>\n";
+  print "\t -p: <platform>\n";
+  print "\t -t: <tkversion>\n";
+  print "\t -d: put in dev mode, run is test environment (build/svn_test)\n";
+  print "\t -f: check for flexelint only\n";
+  print "\t -N: do not send mail to developers\n";
+  print "\t -C: check compile only\n";
+  print "\t -R: check regression only\n\n";
+  die;
+}
+
+sub map_suites {
+  local $/ = "</tr>";
+  open(PROCFILE, "<$procfile") or die "cannot open $procfile\n";
+
+  foreach $line (<PROCFILE>) {
+
+    # Valerie would like her notification turned off
+    next if ( $line =~ /lehner/ );
+
+    if ( $line =~ /<tr>\s*<td>([^\*]+)\*?<\/td>\s*<td>(.+)<\/td>\s*<td>(.+)<\/td>\s*<\/tr>/) {
+      $regsuite = $1;
+      @regids = split(/,/, $3);
+      $regmap{$regsuite} = [@regids];
+    }
+
+  }
+}
+
+sub get_track_owners {
+  # get the tracks that are in integrate for the current release
+  # an retrieve the owners' names so you can email them
+  #     $release = "einstimer.0801";
+		
+		
+  @results = `$report -view trackview -family $family -where "state = 'integrate' AND releaseName = '$opt_r'" -raw`;
+
+  foreach $cmvcline (@results) {
+    ($release, $track, undef, undef, ,undef, undef, $userid, $username) = split(/\|/, $cmvcline);
+				
+    $userline = `$report -view Users -family eda -where "login = '$userid'" -raw`;
+				# print "$userline\n";
+    (undef, undef, undef, $email) = split(/\|/, $userline);
+    $recipients{$email} = "true";
+    print BUILDLOG "track:$email\n";
+  }
+}				# get_track_owners
+
+sub send_email {
+  my ($status) = @_;
+		
+  foreach $ename (sort(keys(%recipients))) {
+				# backquote the @ so perl can manage it
+    $ename =~ s/\@/\\\@/;
+				
+    `/usr/bin/mailx -s "$status for $opt_r on $opt_p" $ename << EOF
+
+You have recieved this email either because you own a track associated
+with this build, or because you are the owner of a regression suite
+that had diffs.  Please refer to the following web page for more
+information:
+
+http://$edaurl$etcdir/reglist/cmperr.$opt_p.html
+
+Thanks,
+Matthew Wheaton
+EOF`;
+
+  }
+}
+
+sub logEvent {
+  #
+  # Purpose: Log events in the ETREE CM DB.
+  #
+  my ($eventName, $eventMsg) = @_;
+  $logCmd = "";
+  $logRC = 0;
+		
+  if ($opt_d) {
+    $dbSwitch = "-db DEV";
+  } else {
+    $dbSwitch = "-db PROD";
+  }
+		
+  $baseCmd  = "$svnclib/svnLog -t $tkversion -c $product -l build -p \"$opt_p\" ";
+  $eventCmd = "-e $eventName -m \"$eventMsg\" $dbSwitch";
+  $logCmd  = $baseCmd . $eventCmd;
+		
+  print BUILDLOG "($cyadate): $logCmd";
+  `$logCmd`;
+  $logRC = $? >> 8;
+  if ( $logRC != 0 ) {
+				# Error detected
+    print BUILDLOG "\nERROR: Event, $eventName, was not logged in CM DB (rc=$logRC).\n";
+  } else { 
+    print BUILDLOG "\nINFO: Event, $eventName, was logged in CM DB successfully.\n";
+  }
+  return ($logRC);
+}
+
+# ----------------------------------------------------------------------
+# COMMAND LINE PROCESSING ...ERROR CHECKING TOO
+# ----------------------------------------------------------------------
+# check the command line arguments
+if (!$opt_r) {
+  print "You must specify a release with the -r flag\n\n";
+  goodbye;
+}
+if (!$opt_p) {
+  print "You must specify a platform with the -p flag\n\n";
+  goodbye;
+}
+if (!$opt_t) {
+  print "You must specify a specific release version (14.1.n) with the -t flag\n\n";
+  goodbye;
+}
+
+# optional options
+# program behavior: if C or R are set,      do compile or regression checking respectively
+#                   if C and R are set,     do both
+#                   if C and R are not set, do both
+if (!$opt_C && !$opt_R) {
+  $opt_R = "true";$opt_C = "true";
+} 
+# print "optC: $opt_C ... optR: $opt_R \n";
+
+# ----------------------------------------------------------------------
+# DERIVED VALUES
+# ----------------------------------------------------------------------
+# process the release
+($p, $maj, $min) = $opt_r =~ /(\w+)\.(\d{2})(\d{2})/;
+$product = lc $p;
+$zf_version = "$maj$min";
+$dot_version = "$maj.$min";
+$dot_version =~ s/0?(\d+)/$1/g;
+$tkversion = $opt_t;
+
+# define the platform based subdir
+if ($opt_p =~ /rs_aix4?/) {
+  $platdir = "AIX";
+}
+if ($opt_p =~ /rs_aix51/) {
+  $platdir = "AIX";
+}
+if ($opt_p =~ /rs_aix53/) {
+  $platdir = "AIX";
+}
+if ($opt_p =~ /64-rs_aix43/) {
+  $platdir = "AIX64";
+}
+if ($opt_p =~ /64-rs_aix51/) {
+  $platdir = "AIX64";
+}
+if ($opt_p =~ /64-rs_aix53/) {
+  $platdir = "AIX64";
+}
+if ($opt_p =~ /64-rs_aix61/) {
+  $platdir = "AIX64";
+}
+if ($opt_p =~ /linux/) {
+  $platdir = "Linux";
+}
+if ($opt_p =~ /64-linux/) {
+  $platdir = "Linux64";
+}
+
+# print "opt_p: $opt_p\n";
+# print "plat_dir: $platdir\n";
+# print "tkversion: $tkversion\n";
+# exit;
+
+# Get the hour based on 24-hour time
+# If it is before midnight, use tomorrow's date for the log file
+$hour = `date +%H`;
+if ($hour >= 18) {
+  # The normal setting for TZ in Fishkill is EST5EDT (GMT+5 and DST),
+  # telling the system we are 5 hours behind Greenwich, which is the time
+  # it is physically keeping.
+  # Pretend we are in Middle Europe, where the new day begins 6 pm our time.
+  $date = lc(`TZ=MET-1MEDT date +%b%d `);
+  $mon = lc(`TZ=MET-1MEDT date +%b `);
+} else {
+  $date = lc(`date +%b%d`);
+  $mon = lc(`date +%b `);
+}
+
+chomp $date;
+chomp $mon;
+
+# don't do the date adjustment for the timestamp on the cya file
+$cyadate = `date`;
+
+# get the user's id 
+$user = $ENV{LOGNAME} or $user = $ENV{USERNAME};
+
+if ($opt_d) {
+  $builddir = "$basedir/svn_test/$product/$dot_version";
+  $etcdir = "$basedir/svn_test/$product/$dot_version/build/etc";
+  if ($user eq "einslib" || $user eq "hdplib") {
+    $buildlog = "/afs/eda/u/$user/logs/$mon/$date.$opt_r.$opt_p.devmode";
+  } else {
+    $buildlog = "/afs/eda/u/$user/$date.$opt_r.$opt_p.devmode";
+  }
+} else {
+  $builddir = "$basedir/$product/$dot_version";
+  $etcdir = "$basedir/$product/$dot_version/build/etc";
+		
+  if ($user eq "einslib" || $user eq "hdplib") {
+    $buildlog = "/afs/eda/u/$user/logs/$mon/$date.$opt_r.$opt_p";
+  } else {
+    $buildlog = "/afs/eda/u/$user/$date.$opt_r.$opt_p";
+  }
+}
+$logdir = "$etcdir/log/$opt_p";
+
+if ($opt_l) {
+  $comperr = "$etcdir/cmperr.$opt_p.$opt_l.html";
+  $resultsdir = "/afs/eda/project/$product/regression/$zf_version/results/$user/$opt_l/$platdir";
+} else {
+  $opt_l = "build";
+  $comperr = "$etcdir/cmperr.$opt_p.html";
+  $resultsdir = "/afs/eda/project/$product/regression/$zf_version/results/$user/$platdir";
+}
+# need to modify the cmperr file path if cre, echk, ess, or einstimer
+# ess removed 3/4/2010 mcw
+if ($product =~ /cre|echk|einstimer|ess|spam|tdnoise/) {
+  $comperr =~ s|build/etc/|build/etc/reglist/|;
+}
+
+$build_resultsdir = "/afs/eda/project/$product/regression/$zf_version/results/$user/build/$platdir";
+# replace the old with the new if the new exists
+if (-d $build_resultsdir && $opt_l eq "build") {
+  $resultsdir = $build_resultsdir;
+}
+# print "resultsdir: $resultsdir\n";
+
+$edaurl = "w3.eda.ibm.com";
+$testfile = "$logdir/builddlls";
+
+
+open(BUILDLOG, ">>$buildlog") or die "cannot open $buildlog\n";
+open(OUTPUT, ">$comperr") or die "cannot open $comperr\n";
+
+# ----------------------------------------------------------------------
+# code to export the difflist for future cgi-bin processing
+# ----------------------------------------------------------------------
+if (!-d "$etcdir/reglist") {
+  mkdir "$etcdir/reglist", 0777;
+}
+$diff_file = "$etcdir/reglist/$opt_p.reglist";
+open(DIFFILE, ">$diff_file") or die "cannot open $diff_file\n";
+
+# ----------------------------------------------------------------------
+
+# BoilerPlate
+print OUTPUT "<html>\n";
+print OUTPUT `date +" %a %D %T"`;
+print OUTPUT "<br>\n";
+
+print OUTPUT "<br>\n";
+# print OUTPUT "<h3><a href=\"http://$edaurl/afs/eda/u/hdplib/html/$product.html\">Back to $product</a></h3><br>\n";
+
+print OUTPUT "<br>\n";
+print OUTPUT "The extracted files can be found in:<br>\n";
+print OUTPUT "<a href=\"http://$edaurl$etcdir/extracted.files.curr.html\">$builddir/extracted.files.curr.html</a><br>\n";
+
+print OUTPUT "<br>\n";
+print OUTPUT "Logfiles can be found in:<br>\n";
+print OUTPUT "<a href=\"http://$edaurl$logdir/\">$logdir/</a><br><br>\n";
+#print OUTPUT "<a href=\"file://$logdir\">$logdir</a><br><br>\n";
+
+#----------------------------------------------------------------------
+#  COMPILE & LINK RESULTS
+#----------------------------------------------------------------------
+
+if ($opt_C) {
+  # linux is delivering nasty multiline error messages that don't have the
+  # decency to put an honest word like 'Error' in them, so we opt for
+  # special processing
+		
+		
+  if ($opt_p =~ /linux/) {
+    $errortype{Error}{match} = 'Error|ERROR|error|\(E\)';
+    $errortype{Error}{exclude} = 'errorHelper|MSG_|IDMPerror|yyerror|Werror';
+    @errors = sort(keys(%errortype));
+
+    local $/ = "g++";
+				
+    chdir $logdir;
+    foreach $file (<*>) {
+      if ($file =~/([^.]+)\.\d+/) {
+	$rebuild{$1}++;
+      }
+    }
+    if (%rebuild) {
+      print OUTPUT "Rebuild Attempts:<br>\n";
+						
+      foreach $comp (sort(keys(%rebuild))) {
+	$buildcount = $rebuild{$comp} + 1;
+	print OUTPUT "$comp build was attempted $buildcount times.<br>\n";
+      }
+      print OUTPUT "<br>\n";
+    }
+				
+    foreach $file (<*>) {
+
+      print "File: $file\n";
+						
+      if ($file =~ /\.error/) {
+	next;
+      }
+      if ($file =~ /\.e$/) {
+	next;
+      }
+						
+      if ($file =~ /verifylibs|builddlls|testcases|regression/) {
+	next;
+      }
+      if ($file =~/([^.]+)\.(\d+|orig)/) {
+	next;
+      }
+						
+      print "Reading file: $file\n";
+						
+      open(READFILE, "<$file") or die "cannot open $file\n";
+      $count = 0;
+      foreach $line (<READFILE>) {
+						
+	foreach $errname (@errors) {
+	  if ($errortype{$errname}{exclude}) {
+	    if ($line =~ /$errortype{$errname}{match}/ &&
+		$line !~ /$errortype{$errname}{exclude}/) {
+	      #now put the 'g++' back at the beginning where it belongs
+	      $line =~ s/^(.+)\n(.*)g\+\+$/\g\+\+$1/s;
+	      # and take off the trailing guck
+	      $line =~ s/^(g\+\+(.+)ignored\)\n)(.*)/$1/s;
+	      push( @{$errorlist{$errname}}, $file . ":\n" . $line . "\n\n");
+
+	      print "Line: $line\n";
+	      print "ERROR type: $errortype{$errname}{match}\n";
+
+	      $rebuildlist{$file} = "true";
+	    }
+	  } else {
+	    if ($line =~ /$errortype{$errname}{match}/) {
+	      #now put the 'g++' back at the beginning where it belongs
+	      $line =~ s/^(.+)$/\g\+\+$1/s;	
+	      # and take off the trailing guck
+	      $line =~ s/^(g\+\+(.+)ignored\)\n)(.*)/$1/s;
+	      push( @{$errorlist{$errname}}, $file . ":\n" . $line . "\n\n");
+	      $rebuildlist{$file} = "true";
+	    }
+	  }
+	}
+      }
+    }
+				
+  } else {			# not linux
+				
+    # define error types and what to pattern match
+    # match types are the pattern match you are looking for
+    # exclude types are a filter on lines that already matched
+    %errortype  = (
+		   severe  => { match => '\(S\)',
+				exclude => 'regression|ITVparseExp.h'
+			      },
+											 
+		   'cannot create'  => { match => 'Cannot create'
+				       },
+											 
+		   error   => { match => 'Error|ERROR|error|\(E\)',
+				exclude => 'future|notification|Highest|message|regression|generated|\#@error|-error-|lastErrorSeverity|ErrorDialog|error_struct|aperror|closing cpp|absError|deltaError|awe_Error|ErrorTable|ErrorMsg|MSG_|IDMPerror|PDLError|yyerror'
+			      },
+		   failed  => { match => "Failed|multiply|failed",
+				exclude => "(W)"
+			      },
+		   include => { match => "includes: error",
+				exclude => 'closing cpp'
+			      },
+		   memory  => { match => "out of memory"
+			      },
+		   bus     => { match => "Bus Error"
+			      },
+		   space   => { match => " space "
+			      },
+		   no_rule => { match => "No rule"
+			      },
+		   'not exist' => { match => "not exist|Cannot find",
+				    exclude => '\(W\)'
+				  },
+		   notfound => { match => "not found",
+				 exclude => "\(future\)"
+			       },
+		   run     => { match => '\[_run\]',
+				#  exclude => ""
+			      },
+											 
+		  );
+				
+    # get keys once, then iterate over the array
+    # no, no no, set the order you iterate over potential errors ???
+    # @errors = ("severe", "error", "failed", "include", "memory", "bus", "space", "no_rule", "not_exist", "notfound", "run");
+				
+				
+    #if you need to do a platform specific search, uncomment section and put it to work
+				
+    #     if ($opt_p = "i386_linux22")
+    #       {
+    # 	$errortype{error}{match} = '\(E\)';
+    # 	$errortype{error}{exclude} = "<exclude>";
+    #	push (@errors, error);
+    #       }
+				
+    @errors = sort(keys(%errortype));
+				
+    print BUILDLOG "errortypes:  @errors \n";
+    chdir $logdir;
+				
+    # iterate over files to determine if there are rebuilds
+    foreach $file (<*>) {
+      if ($file =~/([^.]+)\.\d+/) {
+	$rebuild{$1}++;
+      }
+    }
+    if (%rebuild) {
+      print OUTPUT "Rebuild Attempts:<br>\n";
+						
+      foreach $comp (sort(keys(%rebuild))) {
+	$buildcount = $rebuild{$comp} + 1;
+	print OUTPUT "$comp build was attempted $buildcount times.<br>\n";
+      }
+      print OUTPUT "<br>\n";
+    }
+				
+    # now look through the logfiles in earnest
+    foreach $file (<*>) {
+      if ($file =~ /\.error/) {
+	next;
+      }
+      if ($file =~ /\.e$/) {
+	next;
+      }
+						
+      #these files are handled later
+      if ($file =~ /verifylibs|builddlls|regression|testcases/) {
+	next;
+      }
+      # now skip files that involve previous attempts to build
+      # re_builds will now create *.orig files
+      if ($file =~/([^.]+)\.(\d+|orig)/) {
+	next;
+      }
+      if ($opt_d) {
+	print "checking $file...\n";
+      }
+						
+      open(READFILE, "<$file") or die "cannot open $file\n";
+      $count = 0;
+      foreach $line (<READFILE>) {
+	$count++;
+								
+	foreach $errname (@errors) {
+	  # if an exclude value is set, use the more complex conditional, otherwise just check for matches
+	  if ($errortype{$errname}{exclude}) {
+	    if ($line =~ /$errortype{$errname}{match}/ && $line !~ /$errortype{$errname}{exclude}/) {
+	      push( @{$errorlist{$errname}}, $file . "($count)" . ":" . $line);
+	      $rebuildlist{$file} = "true";
+	    }
+	  } else {
+	    if ($line =~ /$errortype{$errname}{match}/) {
+	      push( @{$errorlist{$errname}}, $file . "($count)" . ":" . $line);
+	      $rebuildlist{$file} = "true";
+														
+	    }
+	  }
+	}
+      }
+    }
+  }				# else not linux
+		
+  if (%errorlist) {
+    print OUTPUT "There were build errors...<br>\n";
+  } else {
+    print OUTPUT "Clean compile<br>\n";
+  }
+		
+  foreach $errname (@errors) {
+    if (@{$errorlist{$errname}}) {
+      print OUTPUT "List of $errname problems:<br><br>\n";
+      print OUTPUT "<font size=-1>\n";
+      print OUTPUT "<xmp>\n";
+      print OUTPUT " @{$errorlist{$errname}}";
+      print OUTPUT "</xmp>\n";
+      print OUTPUT "</font>\n";
+    }
+  }
+		
+  if (%rebuildlist) {
+    print OUTPUT "rebuild list: ";
+    foreach $key (sort(keys(%rebuildlist))) {
+      if ($key =~ /links/) {
+	next;
+      }
+						
+      print OUTPUT "$key ";
+    }
+    print OUTPUT  "\n<br><br>\n";
+  }
+		
+  # Examine the verifylibs file.
+  # Exclude components that do not run CM_verifylibs.svn.
+		
+  if ($product ne "model" and $product ne "modelutil") {
+    %Verrortype  = (
+		    discrepancy  => { match => 'discrepancy'},
+		    'cannot create'  => { match => 'Cannot create'
+					},
+		    'file not found' => { match => 'does not exist'}
+		   );
+				
+    @Verrors = sort(keys(%Verrortype));
+				
+    if (-e "verifylibs") {
+      open(READFILE, "<verifylibs") or die "cannot open verifylibs\n";
+    }
+    if ($opt_d) {
+      print "checking verifylibs...\n";
+    }
+    $count = 0;
+    foreach $line (<READFILE>) {
+      $count++;
+      foreach $errname (@Verrors) {
+	if ($Verrortype{$errname}{exclude}) {
+	  if ($line =~ /$Verrortype{$errname}{match}/ && $line !~ /$Verrortype{$errname}{exclude}/) {
+	    push( @{$Verrorlist{$errname}}, "verifylibs($count)" . ":" . $line);
+	  }
+	} else {
+	  if ($line =~ /$Verrortype{$errname}{match}/) {
+	    push( @{$Verrorlist{$errname}}, "verifylibs($count)" . ":" . $line);
+	  }
+	}
+      }
+    }
+				
+				
+    if (%Verrorlist) {
+      print OUTPUT "Verifylibs found incomplete libraries...<br>\n";
+    } else {
+      print OUTPUT "Verifylibs reports libraries are good<br>\n";
+    }
+				
+    foreach $errname (@Verrors) {
+      if (@{$Verrorlist{$errname}}) {
+	print OUTPUT "List of $errname problems:<br>\n";
+	print OUTPUT "<font size=-1>\n";
+	print OUTPUT "<xmp>\n";
+	print OUTPUT " @{$Verrorlist{$errname}}";
+	print OUTPUT "</xmp><br>\n";
+	print OUTPUT "</font><br>\n";
+      }
+    }
+  } else {
+    print OUTPUT "Verifylibs bypassed on this component by definition.<br>\n";
+  }
+		
+  # examine the builddlls file
+  {
+    local $/ = "----\n";
+			
+    %DLLerrortype  = (
+		      "Severe"    => { match => 'SEVERE'
+				     },
+		      "No rule"   => { match => 'No rule|no rule'
+				     },
+		      error       => { match => '\(E\)|Error'
+				     },
+		      unresolved  => { match => 'unresolved|Unresolved',
+				       exclude => 'Checking|Took'
+				     },
+		      undefined  =>  { match => 'undefined|Undefined',
+				     },
+		      "link failed"=>{ match => 'ailed link', 
+				     },
+		      "bad magic" => { match => 'bad magic'
+				     },
+		      "Bus Error" => { match => 'Bus Error'
+				     },
+		      fatal  =>      { match => '[Ff]atal'},
+		      attempt =>     { match => 'Attempt to free'}
+		     );
+			
+    @DLLerrors = sort(keys(%DLLerrortype));
+			
+    if (-e "builddlls") {
+      open(READFILE, "<builddlls") or die "cannot open builddlls\n";
+    }
+    if ($opt_d) {
+      print "checking builddlls...\n";
+    }
+    $count = 1;
+			
+    @lines = <READFILE>;
+
+    while (@lines) {
+      $line = shift(@lines);
+					
+      if ($opt_p =~ /rs_aix/) {
+	if ($line =~ /(\*\* Submitted(.+)has been submitted\.\n)(.+)/s) {
+	  $line = $1;
+	  $pushback = $3;
+	  unshift (@lines, "$pushback");
+	}
+							
+	if ($line =~ /(.+\n)(($days).+2>&1\n)(.+)/s) {
+	  $line = $1;
+	  $pushback1 = $2;
+	  $pushback2 = $4;
+	  unshift (@lines, "$pushback2");
+	  unshift (@lines, "$pushback1");
+	}
+							
+	if ($line =~ /(ET_builddlls:.+2>&1\n)(.+)/s) {
+	  $line = $1;
+	  $pushback = $2;
+	  unshift(@lines, $pushback);
+	}
+      } else			# non-aix
+	{
+	  #$line =~ s/make: Warning: File \`Arch-linux(\d\d)?\' has modification time ([^\n])*\n//g;
+	  #$line =~ s/make: Warning: File \`\.\.\/lib(-\d\d)?lib[^\']+\' has modification time ([^\n])*\n//g;
+	  if ($line =~ /has modification time/) {
+	    next;
+	  }
+							
+							
+	  if ($line =~ /(.+)(($days)\s*\d\d\/\d\d\/\d\d\s*(.+))/s) {
+	    $line = $1;
+	    $pushback = $2;
+	    unshift (@lines, "$pushback");
+	  }
+	}
+		
+      foreach $errname (@DLLerrors) {
+	if ($DLLerrortype{$errname}{exclude}) {
+	  if ($line =~ /$DLLerrortype{$errname}{match}/ && $line !~ /$DLLerrortype{$errname}{exclude}/) {
+	    push( @DLLerrorlist, "builddlls($count)" . ":\n" . "$line\n");
+	    last;
+	  }
+	} else {
+	  if ($line =~ /$DLLerrortype{$errname}{match}/) {
+	    push( @DLLerrorlist, "builddlls($count)" . ":\n" . "$line\n");
+	    last;
+	  }
+	}
+      }
+					
+      # get the line count right
+      @temp = split(/\n/, $line);
+      $tempcount = scalar(@temp);
+      $count += $tempcount;
+    }	
+  }	
+		
+  if (@DLLerrorlist) {
+    print OUTPUT "Builddlls failed...<br><br>\n";
+    print OUTPUT "<font size=-1>\n";
+    print OUTPUT "<xmp>\n";
+    foreach $line (@DLLerrorlist) {
+      while ($line =~/.{$colwidth}.+/) {
+	#line is over $colwidth, print $colwidth long substrings
+	#and truncate until it fits under the wire
+								
+	$subline = substr($line, 0, $colwidth, "");
+	print OUTPUT "$subline\n";
+      }
+      print OUTPUT $line;
+    }
+    print OUTPUT "</xmp></font><br>\n";
+  } else {
+    print OUTPUT "Builddlls succeeded<br><br>\n";
+  }
+		
+		
+  #    %DLLerrortype  = (
+  # 		     "Severe"    => { match => 'SEVERE'
+  # 				    },
+  # 		     "No rule"   => { match => 'No rule|no rule'
+  # 				    },
+  # 		     error       => { match => '\(E\)'
+  # 				    },
+  # 		     unresolved  => { match => 'unresolved|Unresolved',
+  # 				      exclude => 'Checking|Took'
+  # 				    },
+  # 		     undefined  =>  { match => 'undefined|Undefined',
+  # 				    },
+  # 		     "link failed"=>{ match => 'ailed link', 
+  # 				    },
+  # 		     "bad magic" => { match => 'bad magic'
+  # 				    },
+  # 		     "Bus Error" => { match => 'Bus Error'
+  # 				    },
+  # 		     fatal  =>      { match => 'fatal|Fatal'}
+  # 		  );
+		
+		
+  #     @DLLerrors = sort(keys(%DLLerrortype));
+		
+  #     if (-e "builddlls") {open(READFILE, "<builddlls") or die "cannot open builddlls\n";}
+		
+  #     $count = 0;
+  #     foreach $line (<READFILE>)
+  #       {
+  # 	$count++;
+  # 	foreach $errname (@DLLerrors)
+  # 	  {
+  # 	    if ($DLLerrortype{$errname}{exclude})
+  # 	      {
+  # 		if ($line =~ /$DLLerrortype{$errname}{match}/ && $line !~ /$DLLerrortype{$errname}{exclude}/) 
+  # 		  {
+  # 		    push( @{$DLLerrorlist{$errname}}, "builddlls($count)" . ":" . $line);
+  # 		  }
+  # 	      }
+  # 	    else
+  # 	      {
+  # 		if ($line =~ /$DLLerrortype{$errname}{match}/)
+  # 		  {
+  # 		    push( @{$DLLerrorlist{$errname}}, "builddlls($count)" . ":" . $line);
+  # 		  }
+  # 	      }
+  # 	  }
+  #       }
+		
+  #     if (%DLLerrorlist)
+  #       {
+  # 	print OUTPUT "Builddlls failed...<br><br>\n";
+  #       }
+  #     else
+  #       {
+  # 	print OUTPUT "Builddlls succeeded<br><br>\n";
+  #       }
+		
+  #     foreach $errname (@DLLerrors)
+  #       {
+  # 	if (@{$DLLerrorlist{$errname}})
+  # 	  {
+  # 	    print OUTPUT "List of $errname problems:<br><br>\n";
+  # 	    print OUTPUT "<font size=-1>\n";
+  # 	    print OUTPUT "<xmp>\n";
+  # 	    print OUTPUT " @{$DLLerrorlist{$errname}}";
+  # 	    print OUTPUT "</xmp></font><br>\n";
+  # 	  }
+  #       }
+		
+  # [stack]: (S) SIGILL: Illegal instruction
+
+  # examine the testcases file
+		
+  %TESTerrortype  = (
+		     "unresolved"  => { match => 'unresolved|Unresolved',
+					exclude => 'Checking|Took'
+				      },
+		     "Error" =>      { match => '\(E\)| Error', 
+				     },
+		     "Segmentation" => { match => 'SIGSEGV: Segmentation violation'
+				       },
+		     "Sig Bus"   =>  { match => 'SIGBUS: Bus error'
+				     },
+		     "Sig Illegal"   =>  { match => 'SIGILL:'
+					 },
+		     "No such file" => { match => 'No such file or directory'
+				       },
+		     "Memory fault" => { match => 'Memory fault'
+				       },
+		    );
+		
+  @TESTerrors = sort(keys(%TESTerrortype));
+		
+  if (-e "testcases") {
+    open(READFILE, "<testcases") or die "cannot open testcases\n";
+  }
+  if ($opt_d) {
+    print "checking testcases...\n";
+  }
+  $count = 0;
+  foreach $line (<READFILE>) {
+    $count++;
+    foreach $errname (@TESTerrors) {
+      if ($TESTerrortype{$errname}{exclude}) {
+	if ($line =~ /$TESTerrortype{$errname}{match}/ && $line !~ /$TESTerrortype{$errname}{exclude}/) {
+	  push( @{$TESTerrorlist{$errname}}, "testcases($count)" . ":" . $line);
+	}
+      } else {
+	if ($line =~ /$TESTerrortype{$errname}{match}/) {
+	  push( @{$TESTerrorlist{$errname}}, "testcases($count)" . ":" . $line);
+	}
+      }
+    }
+  }
+		
+  if (%TESTerrorlist) {
+    print OUTPUT "Testcases failed...<br><br>\n";
+  } else {
+    print OUTPUT "Testcases succeeded. Dlls load okay<br><br>\n";
+  }
+		
+  foreach $errname (@TESTerrors) {
+    if (@{$TESTerrorlist{$errname}}) {
+      print OUTPUT "List of $errname problems:<br><br>\n";
+      print OUTPUT "<font size=-1>\n";
+      print OUTPUT "<xmp>\n";
+      print OUTPUT " @{$TESTerrorlist{$errname}}";
+      print OUTPUT "</xmp></font><br>\n";
+    }
+  }
+		
+}				# if ($opt_C)
+
+#----------------------------------------------------------------------
+#  FLEXLINT 
+#----------------------------------------------------------------------
+
+if ($opt_f) {
+  chdir $logdir;
+  $flexefile = "$etcdir/flexlint.list";
+		
+  if (-e $flexefile) {
+				# we have a list of files we are interested in
+    open(FLEXFILE, "<$flexefile") or print "cannot open $flexefile\n";
+    foreach $line (<FLEXFILE>) {
+      chomp $line;
+      push(@flexlist, "${line}.e");
+    }
+  } else {
+				# we are interested in all files
+    @flexlist = <*.e>;
+  }
+		
+  foreach $file (<@flexlist>) {
+				# $file has return char on end
+    chomp $file;
+				
+    if ( -e $file) {
+      open(LINTFILE, "<$file") || print "cannot open $file\n";
+      foreach $line (<LINTFILE>) {
+	if ($line =~ /\(Warning\)/) {
+	  $flexwarn{"${file}"} = "";
+	}
+	if ($line =~ /\(Error\)/) {
+	  $flexerror{"${file}"} = "";
+	}
+	if ($line =~ /\(Info\)/) {
+	  $flexinfo{"${file}"} = "" ;
+	}
+      }
+    } else {
+      print OUTPUT "Flexlint file: $file does not exist<br>\n";
+    }
+  }
+		
+  if (%flexerror) {
+    print OUTPUT "<p>The following files have flexlint errors:\n";
+    print OUTPUT "<ul><br>\n";
+    foreach $key (sort(keys(%flexerror))) {
+      print OUTPUT "<li><a href=\"${logdir}/$key\">$key</a><br>\n";
+    }
+    print OUTPUT "</ul><br>\n";
+  }
+  if (%flexwarn) {
+    print OUTPUT "<p>The following files have flexlint warnings:\n";
+    print OUTPUT "<ul><br>\n";
+    foreach $key (sort(keys(%flexwarn))) {
+      print OUTPUT "<li><a href=\"${logdir}/$key\">$key</a><br>\n";
+    }
+    print OUTPUT "</ul><br>\n";
+  }
+		
+  if (%flexinfo) {
+    print OUTPUT "<p>The following files offer flexlint info:\n";
+    print OUTPUT "<ul><br>\n";
+    foreach $key (sort(keys(%flexinfo))) {
+      print OUTPUT "<li><a href=\"${logdir}/$key\">$key</a><br>\n";
+    }
+    print OUTPUT "</ul><br>\n";
+  }
+		
+  if (!%flexinfo && !%flexwarn && !%flexerror) {
+    print OUTPUT "<p>There are no flexlint messages<br><br>\n";
+  }
+		
+}				# if ($opt_f)
+
+# ----------------------------------------------------------------------
+# REGRESSION
+# ----------------------------------------------------------------------
+
+if ($opt_R) {
+  # find the non-zero diff results files.
+  # while we're at it, make sure they are newer than the 'testfile' log (builddlls for now)
+  # in the event they don't get deleted and are left over from the last build
+  if (-e $testfile) {
+    (undef, undef, undef, undef, undef, undef, undef, undef, undef, $testtime) = stat $testfile;
+  } else {
+    print OUTPUT "$testfile logfile not found<br>\n";
+  }
+  # print "RESULTSDIR: $resultsdir\n";
+  if (-d $resultsdir) {
+    chdir $resultsdir;
+    $diffcount = 0;
+				# use a * so directories get included in path name -- generates an error if no results
+				# so we should add a check here
+    foreach $file (`find * -name diffRslts`) {
+      $diffcount++;
+      chomp $file;
+						
+      (undef, undef, undef, undef, undef, undef, undef, undef, undef, $regtime) = stat $file;
+      if ($regtime < $testtime) {
+	#we have old regressions, don't even bother with the rest
+	$regold = "$file";
+	last;
+      }
+						
+      if (-s $file) {
+	# print "$file going into difflist\n";
+	push(@difflist, $file);
+      }
+    }
+  }				# (-d $resultsdir)
+  else {
+    $nodiffdir = "true";
+  }
+		
+  if ($regold) {
+    print OUTPUT "Regression results are older than $testfile<br>Ignoring regression results<br>\n";
+    print OUTPUT "FILE: $regold\n";
+				# print OUTPUT "regtime: $regtime   testfiletime: $testtime<br>\n";
+    print `$cm_buildstatus -r $opt_r -p $opt_p -l build -E`;
+    exit;
+  } elsif (@difflist) {
+				# put an ALL entry in the reglist file
+    print DIFFILE "ALL state: unresolved\n";
+				
+    $testlog = "/afs/eda.fishkill.ibm.com/u/einslib/logs/$mon/$date.$product.$zf_version.$opt_p.dev";
+    open(TESTLOG, ">>$testlog");
+    print TESTLOG "$cyadate\nLog of testcases verified...\n";
+    print OUTPUT "Verified testcases log can be found in:<br>\n";
+				
+    print OUTPUT "<a href=\"http://$edaurl$testlog\"> $testlog </a><br>\n";
+    print OUTPUT "<br>\n";
+				#print OUTPUT "<pre><br>\n";
+    print OUTPUT "$diffcount testcases ran<br>\n";
+    print OUTPUT "There were regression differences.<br>\n";
+    print OUTPUT  "<a href = \"http://w3.eda.ibm.com/afs/eda/build/$product/$dot_version/build/etc/reglist/frame.$opt_p.html\">New Regression View</a><br>\n";
+				
+				# cgi-bin/einslib-cgi-bin/genreg.pl?release=$opt_r}&platform=${opt_p}\
+				#print OUTPUT "</pre><br>\n";
+    print OUTPUT "<p> Html files can be found in:<br>\n";
+				
+				# process the proces.html file to map regressions to owners (userids)
+    map_suites;
+				
+    foreach $diff (@difflist) {
+      # print the html hrefs,generate an ascii file with the reglist
+      # build the hash containing the email addresses ??
+						
+      # print "diff is: $diff\n";
+      ($pid, $suite) = split (/\//, $diff);
+      $diff =~ /(.+)\/diffRslts/;
+      $prtdiff = $1;
+						
+      #webpage hrefs
+      $href = "$resultsdir/$pid/html/index.html";
+      print OUTPUT "<a href=\"http://$edaurl$href\">$prtdiff </a><br>\n";
+						
+      #ascii reglist
+      if ($pid != $lastpid) {
+	print DIFFILE "pid:$pid href:$href state:unresolved suite:$suite name:\n";
+	$lastpid = $pid;
+      }
+      print DIFFILE "$prtdiff\tunresolved\n";
+						
+      # email address hash
+      if ($suite =~ /(\D+\d{2})/) {
+	$shortsuite = $1;
+      } else {
+	($shortsuite) = $suite =~ /(\D+)\d?/;
+      }
+						
+      foreach $owner (@{$regmap{$shortsuite}}) {
+	# create a list where each owner is listed once
+	$diffowners{$owner} = "true";
+								
+      }
+    }				#end foreach $diff
+  } elsif ($nodiffdir || $diffcount == 0) {
+    print OUTPUT "Regressions failed to run<br>\n";
+    $regfailed = "true";
+  } else {
+    print OUTPUT "$diffcount regressions ran<br>\n";
+    print OUTPUT "There are no regression differences<br>\n";
+  }
+		
+  # take the list of owners and get their email addresses from cmvc
+  #foreach $owner (keys(%diffowners)) {
+  #  $userline = `$report -view Users -family eda -where "login = '$owner'" -raw`;
+  #  (undef, undef, undef, $email) = split(/\|/, $userline);
+  #  print BUILDLOG "diff:$email\n";
+  #  $recipients{$email} = "true";
+  #}
+		
+		
+  print OUTPUT "<br>\n";
+    
+  # now print all the diff results
+  $lastpid = "";
+		
+  print OUTPUT "<a name=\"regression.top\"></a>\n";
+  print OUTPUT "<a name=\"ALL\"></a>\n";
+  foreach $diff (@difflist) {
+    ($pid, $suite) = split (/\//, $diff);
+    $diff =~ /(.+)\/diffRslts/;
+    ($prtdiff = $1) =~ s/\//\./g;
+				
+    open(INFILE, "<$resultsdir/$diff");
+				
+				# drop a tag if we have the start of a suite
+    if ($pid != $lastpid) {
+      print OUTPUT "<hr>";
+      print OUTPUT "<h3><a name=\"$pid.$suite\">$pid/$suite</h3></a>\n";
+      $lastpid = $pid;
+    }
+				
+    print OUTPUT "<a name=\"$prtdiff\"></a><b>The differences in $diff are:</b><br>\n";
+				# reduce font size slightly and go to literal text for diff
+    print OUTPUT "<font size=-1>\n";
+    print OUTPUT "<xmp>\n";
+    $numLines=0;
+    foreach $line (<INFILE>) {
+      $numLines++;
+      if ( $numLines == 1000 ) {
+        print OUTPUT "\n***** DIFF IS TRUNCATED!!!!   PLEASE FIND LINK AT THE TOP OF THIS PAGE FOR FULL DIFFRSLT *****\n\n";
+        last;
+      }
+      while ($line =~/.{$colwidth}.+/) {
+	#line is over $colwidth, print $colwidth long substrings
+	#and truncate until it fits under the wire
+								
+	$subline = substr($line, 0, $colwidth, "");
+	print OUTPUT "$subline\n";
+      }
+      print OUTPUT $line;
+    }
+    print OUTPUT "</xmp>\n";
+    print OUTPUT "</font>\n";
+				
+  }				#end foreach $diff
+}				#end if($opt_R)
+
+# ----------------------------------------------------------------------
+# update top level build webpage
+# ----------------------------------------------------------------------
+
+# if there are diff results the %recipients hash has already been populated
+# with the suite owners since we do this as we iterate over the regression diffs, 
+# but the track owners still need to be added
+
+# skip if checking any level other than build
+if ($opt_l eq "build") {
+  # build OK
+  if (!@difflist && !$regfailed && !$regold && !%errorlist && !@DLLerrorlist && !%Verrorlist && !%TESTerrorlist) {
+    print OUTPUT "Clean build<br>\n";
+    if ($opt_d) {
+      # Do NOT update the Build Status web page.
+      print BUILDLOG "Build Result: Clean Build\n";
+    } else {
+      # Update the Build Status web page.
+      print BUILDLOG "$cm_buildstatus -r $opt_r -p $opt_p -l build -o\n"; # Build Ok
+      print `$cm_buildstatus -r $opt_r -p $opt_p -l build -o`;
+    }
+				
+				# Update CM DB with the build status.
+    &logEvent ("BUILD_SUCCESS", "Clean build");
+    exit;
+  }
+    
+  # regressions and/or build
+  if ($opt_R) {
+				# regressions had diffs
+    if (@difflist && !%errorlist && !@DLLerrorlist && !%TESTerrorlist) {
+      print OUTPUT "Compiled and linked successfully<br>\n";
+						
+      if ($opt_d) {
+	# Do NOT update the Build Status web page.
+	print BUILDLOG "Build Result: Compiled and linked successfully but regressions had differences.\n";
+      } else {
+	# Will need info from CM DB (future phase) to perform 
+	# get_track_owners and send_email functionality.
+								
+	# get_track_owners;
+	# if ($opt_M) {send_email("Regression Diffs");}
+								
+	# Update the Build Status web page.
+	print BUILDLOG "$cm_buildstatus -r $opt_r -p $opt_p -l build -I\n"; # Reg diffs
+	print `$cm_buildstatus -r $opt_r -p $opt_p -l build -I`;
+      }
+      # Update CM DB with the build status.
+      &logEvent ("BUILD_SUCCESS", "Build successful (-I), regressions had differences");
+    }
+				
+				# build failed
+    elsif (%errorlist || @DLLerrorlist || %TESTerrorlist || $regfailed) # || %Verrorlist) add back in when we improve verify checking
+      {
+	print OUTPUT "Build failed<br>\n";
+						
+	if ($opt_d) {	
+	  # Do NOT update the Build Status web page.
+	  print BUILDLOG "Build Result: Failed.\n";
+	} else {
+	  # Will need info from CM DB (future phase) to perform 
+	  # get_track_owners and send_email functionality.
+								
+	  # get_track_owners;
+	  # if ($opt_M) {send_email("Build Failed");}
+								
+	  # Update the Build Status web page.
+	  print BUILDLOG "$cm_buildstatus -r $opt_r -p $opt_p -l build -f\n"; # Build failed
+	  print `$cm_buildstatus -r $opt_r -p $opt_p -l build -f`;
+	}
+						
+	# Update CM DB with the build status.
+	&logEvent ("BUILD_FAIL", "Build failed (-f)");
+	exit(1);
+      } else {
+	print OUTPUT "Unknown error<br>\n";
+						
+	if ($opt_d) {
+	  # Do NOT update the Build Status web page.
+	  print BUILDLOG "Build Result: Failed, compile errors.\n";
+	} else {
+	  # Update the Build Status web page.
+	  print BUILDLOG "$cm_buildstatus -r $opt_r -p $opt_p -l build -U\n"; # Unknown errors
+	  print `$cm_buildstatus -r $opt_r -p $opt_p -l build -U`;
+	}
+
+	# Update CM DB with the build status.
+	&logEvent ("BUILD_FAIL", "Build failed, compile errors");
+	exit(1);
+      }
+  } else {
+				# compile only results:
+				# link failed
+    if (!%errorlist && (@DLLerrorlist || %TESTerrorlist)) # ????? && !%Verrorlist)
+      {
+	print OUTPUT "Link errors<br>\n";
+						
+	if ($opt_d) {
+	  # Do NOT update the Build Status web page.
+	  print BUILDLOG "Build Result: Failed, link errors.\n";
+	} else {
+	  # Will need info from CM DB (future phase) to perform 
+	  # get_track_owners and send_email functionality.
+								
+	  # get_track_owners;
+	  # if($opt_M) {send_email("Link Errors");}
+								
+	  # Update the Build Status web page.
+	  print BUILDLOG "$cm_buildstatus -r $opt_r -p $opt_p -l build -E\n"; # Link errors
+	  print `$cm_buildstatus -r $opt_r -p $opt_p -l build -E`;
+	}
+						
+	# Update CM DB with the build status.
+	&logEvent ("BUILD_FAIL", "Build failed (-E), link errors");
+	exit(1);
+      }
+				# compile failed
+    elsif (%errorlist || %Verrorlist) {
+      print OUTPUT "Compile errors<br>\n";
+						
+      if ($opt_d) {
+	# Do NOT update the Build Status web page.
+	print BUILDLOG "Build Result: Failed, compile errors.\n";
+      } else {
+	# Will need info from CM DB (future phase) to perform 
+	# get_track_owners and send_email functionality.
+								
+	#get_track_owners;
+	#if($opt_M) {send_email("Compile Errors");}
+								
+	# Update the Build Status web page.
+	print BUILDLOG "$cm_buildstatus -r $opt_r -p $opt_p -l build -e\n"; # Compile errors
+	print `$cm_buildstatus -r $opt_r -p $opt_p -l build -e`
+      }
+						
+      # Update CM DB with the build status.
+      &logEvent ("BUILD_FAIL", "Build failed (-e), compile errors");
+      exit(1);
+    } else {
+      print OUTPUT "Unknown Error<br>\n";
+						
+      if ($opt_d) {
+	# Do NOT update the Build Status web page.
+	print BUILDLOG "Build Result: Failed, unknown errors.\n";
+      } else {
+	# Update the Build Status web page.
+	print BUILDLOG "$cm_buildstatus -r $opt_r -p $opt_p -l build -U\n"; # Unknown errors
+	print `$cm_buildstatus -r $opt_r -p $opt_p -l build -U`;
+      }
+						
+      # Update CM DB with the build status.
+      &logEvent ("BUILD_FAIL", "Build failed, unknown errors");
+      exit(1);
+    }
+  }
+}				# if $opt_l eq build

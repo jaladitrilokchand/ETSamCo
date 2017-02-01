@@ -1,0 +1,81 @@
+#! /bin/ksh -
+
+# ==========
+# create a csv report on stdout summarizing the bomcheck output for an agts
+# of ship2tk run. ksh is specified on the shebang line because the '-nt' 
+# option of test is used to see if bomcheck's most recent run was successful.
+#
+# to create the report in excel from the output csv file, bring it into excel
+# with Data->InportExternalData->ImportData. Mark column 'C', wrap the text 
+# using Format->Cells->AlignmentTab->WrapText->OK. You can also use 
+# Format->Cells as needed to coltrol colors and fonts. 
+
+
+# ----------
+# bomcheck puts its reports in different directories depending on how it is run.
+
+tk=14.1.6
+bomcheck_output_dir=/afs/eda/data/edainfra/bom/ship2tk_agts
+#bomcheck_output_dir=/afs/eda/data/edainfra/bom/ship2tk
+
+dev_bin=/afs/eda/data/edainfra/tools/enablement/dev/bin
+tf=/tmp/agts_bom_report.csv
+
+
+# ----------
+# create a temporary file containing all of the SHIP, TK and TK/PROD lines from
+# the bomcheck output in the output directory. only components that have passed
+# the agts run are included in the report.
+
+{
+
+  for c in `$dev_bin/statusAgts -t $tk | awk '$3 == "Pass" { print $1 }`
+  do
+    print "$c"
+    component=$c
+    f=$bomcheck_output_dir/$c.html
+    f_zo=$bomcheck_output_dir/${c}_ZO.html
+    if [ -f $f ]
+    then
+      if [ ! -f $f_zo ] || [ $f -nt $f_zo ]
+      then 
+	awk '
+	    BEGIN { 
+                match( FILENAME, /[a-zA-Z0-9_]+\.html$/ )
+                #c = substr( FILENAME, RSTART, RLENGTH-5 ) 
+            }
+	    $1 == "SHIP"     { so  = so  $3 "  " }
+	    $1 == "TK"       { to  = to  $3 "  " }
+	    $1 == "TK/PROD" { tpo = tpo $3 "  " }
+	    END { 
+		if ( length(so) )  { print $component ",SHIP only," so }
+                if ( length(tpo) ) { print $component ",TK/PROD only," tpo } 
+		if ( length(to) )  { print $component ",TK only," to } 
+	    }
+	    ' $f
+      fi
+    fi
+  done
+
+} > $tf
+
+
+# ----------
+# create the report using two greps of the temporary file so that the TK/PROD
+# lines are grouped together at the top of the report
+
+printf "All Groups to Ship BOM report for $tk on `date`,,\n"
+printf ",,\n"
+printf "Component,Category,File or directory\n"
+printf ",,\n"
+printf "Files in TK and PROD but not in SHIP. Why?,,\n"
+grep    ',TK/PROD ' $tf
+printf ",,\n"
+printf "Files in SHIP only or TK only. Routine additions and deletions?,,\n"
+grep -v ',TK/PROD ' $tf
+
+
+# ----------
+# cleanup the temporary file
+
+rm $tf

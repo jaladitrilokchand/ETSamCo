@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CqUpdate>
+	<login>
+		<username>asuren</username>
+		<password>fake</password>
+		<database>PROT0</database>
+		<schema>mdcms</schema>
+	</login>
+	<client>
+		<app-name>CQServiceTest</app-name>
+	</client>
+	<update>
+		<record_type>Problem</record_type>
+		<record_id>PROT000004093</record_id>
+		<action>WorkOn</action>
+		<fields>
+			<field
+				name="Priority"
+				value="4-Normal Priority" />
+			<field
+				name="customer_communication"
+				value="I will look into it." />
+			<field
+				name="projected_completion"
+				value="2009-08-07" />
+		</fields>
+	</update>
+</CqUpdate>

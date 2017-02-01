@@ -1,0 +1,582 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: cr.commit
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 12/06/2011
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 12/07/2011 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use Sys::Hostname;
+use Cwd;
+use Getopt::Long;
+Getopt::Long::Configure ("pass_through");
+use File::Temp qw(tempfile);
+use FindBin qw($RealBin);
+
+
+#
+# Global variables
+#
+my $EDA_SVN = "/afs/eda/tools/bin/svn";
+my $BTV_SVN = "/afs/btv/data/subversion/bin/svn";
+my $URL = "URL: ";
+my $ROOT = "Repository Root: ";
+my $BTV = "btv";
+
+
+# Program name
+my $appName = "cr.commit";
+my $appVersion = "v2.0";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $changeRequest = "";
+my $message       = "";
+my $messageFile   = 0;
+my $dbMode        = "PROD";
+my $help          = "";
+my $verbose       = 0;
+my $SVN_url       = "";
+my $SVN_root      = "";
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# Define the current directory
+#
+my $startDir = $ENV{"PWD"};
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    #printSyntax();
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+# Set the location and name of ETREE APIs
+my $BIN = $RealBin;
+my $DB_tkShow = "$BIN/tk.show -db $dbMode";
+my $DB_tkFinder = "$BIN/toolKitFinder -db $dbMode";
+my $DB_branchCheck = "$BIN/branchCheck -db $dbMode";
+my $DB_crIsValid = "$BIN/cr.isValid -db $dbMode";
+
+
+#
+# Open a temp file if the user is passing the abstract via a file
+#
+my ($TMP, $tempFileName);
+if ($messageFile) {
+  ($TMP, $tempFileName) = tempfile(SUFFIX => '.etree');
+  print "Temp: $tempFileName\n" if ($verbose);
+}
+
+
+#
+# Define custom perl libs path and modules
+#
+use lib "$RealBin/../libperl";
+use IcofFile;
+
+
+#
+# Get SVN information
+#
+my $SVN = SetSvn();
+my $stop = ReadSvnEnv();
+if ($stop) {
+  print "Unable to determine SVN information ...\n";
+  print "Please re-run this command in a SVN working copy.\n";
+  exit $ERROR;
+}
+
+
+#
+# Determine if Change Management is turned on for this branch
+#
+my $component = GetComponent();
+my $branch = GetBranch();
+
+
+#
+# Start the Change Management process
+#
+my $isCrRequired = GetCmRequired();
+if ($isCrRequired) {
+  if (ValidateCr()) {
+    UpdateMessage();
+  }
+  else {
+    print "This ChangeRequest($changeRequest) isn't available for svn commits\n";
+    print "in this Component($component).  Please verify this ChangeRequest\n";
+    print "has been opened for this component and is in the APPROVED state.\n";
+    exit $ERROR;
+  }
+}
+
+my $rc = ExecCommit();
+
+exit $rc;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+------------------------------------------------------
+ $appName $appVersion
+------------------------------------------------------
+Commit updates to SVN using the specified Change Request.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-cr ChangeRequest> [all svn commit switches]
+            [-y] [-h] [-db dbMode]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  ChangeRequest = A Change Request id (MDCMS######### ...).
+  -y            = (optional) Verbose mode (echo messages to screen)
+  dbMode        = (optional) DEV | PROD (defaults to PROD)
+  -h            = Help (shows this information)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('changeReg|cr=s'  => \$changeRequest,
+              '-message|m=s'    => \$message,
+              '-file|F=s'       => \$messageFile,
+              'database|db=s'   => \$dbMode,
+              'verbose|y'       => \$verbose,
+              'help|h|?'        => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the Change Request.
+  my $msg = "";
+  if (! $changeRequest) {
+    $msg = "ERROR: Change Request (-cr) is required\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ReadSvnEnv()
+# Purpose: Read the SVN root and url from the working copy
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub ReadSvnEnv {
+
+  @tokens = `$SVN info`;
+  my $rc = $? >> 8;
+  return $ERROR if ($rc != 0);
+
+  foreach $entry (@tokens) {
+    if ($entry =~ /$URL/) {
+      my ($key, $value) = split(/: /, $entry);
+      $SVN_url = $value;
+      chomp $SVN_url;
+    }
+    if ($entry =~ /$ROOT/) {
+      my ($key, $value) = split(/: /, $entry);
+      $SVN_root = $value;
+      chomp $SVN_root;
+    }
+  }
+
+  if ($verbose) {
+    print "URL: $SVN_url\n";
+    print "ROOT: $SVN_root\n";
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetSvn()
+# Purpose: Set the correct path to SVN ($SVN)
+# RCs    : Path to SVN.
+#------------------------------------------------------------------------------
+sub SetSvn {
+
+  my $host = hostname;
+  my $svn = $EDA_SVN;
+  $svn = $BTV_SVN if ($host =~ /\.$BTV\./);
+
+  if ($verbose) {
+    print "SVN: $svn\n";
+  }
+
+  return $svn;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetComponent()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub GetComponent {
+
+  @tokens = split(/\//, $SVN_root);
+  print "Component: $tokens[5]\n" if ($verbose);
+
+  return $tokens[5];
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetBranch()
+# Purpose: Returns the trunk or branch name
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetBranch {
+
+  my $rootLength = length($SVN_root);
+  my $branch = "";
+
+  my $subDir = substr($SVN_url, $rootLength + 1);
+  if ($subDir =~ /^trunk/) {
+    $branch = "trunk";
+  }
+  else {
+    @tokens = split(/\//, $subDir);
+    if (scalar(@tokens) == 1) {
+      $branch = $tokens[0];
+    }
+    elsif ((scalar(@tokens) >= 2) && ($tokens[0] eq "branches")) {
+      $branch = $tokens[1];
+    }
+    else {
+      $branch = $tokens[0];
+    }
+  }
+
+  print "Branch: $branch\n" if ($verbose);
+
+  return $branch;
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : GetCmRequired()
+# Purpose: Returns 1 if Change Management is required on this branch/Comp or
+#          0 if it is not required.
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub GetCmRequired {
+
+  my $command = "$DB_branchCheck -c $component -b $branch";
+  print "Command: $command\n" if ($verbose);
+  @tokens = `$command`;
+  my $rc = $? >> 8;
+  if ($rc == $OK) {
+    chomp $tokens[0];
+    print "Branch requires CR: $tokens[0]\n";
+
+    return $tokens[0];
+  }
+
+ return 0;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetToolKits()
+# Purpose: Returns a list of TKs for this branch
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub GetToolKits {
+
+  my $command = "$DB_tkFinder -c $component -b $branch -q";
+  print "Command: $command\n" if ($verbose);
+  @tokens = `$command`;
+  my $rc = $? >> 8;
+  if ($rc == $OK) {
+    foreach my $line (@tokens) {
+      chomp $line;
+      print "Tool Kit: $line\n" if ($verbose);
+      return @tokens;
+    }
+  }
+  else {
+    print "Tool Kit: ERROR\n" if ($verbose);
+    return $ERROR;
+  }
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ValidateCr()
+# Purpose: Determines if the CR is approved.
+# RCs    : 1 if valid otherwise 0
+#------------------------------------------------------------------------------
+sub ValidateCr {
+
+  # Validate change requests for dev tks
+  if ($changeRequest eq "DEV") {
+    return 1 if (validateTks());
+  }
+
+  # Validate the IRs for production tks
+  else {
+
+    my $command = "$DB_crIsValid -cr $changeRequest -c $component";
+    print "Command: $command\n" if ($verbose);
+    @tokens = `$command`;
+    my $rc = $? >> 8;
+
+    # if RC is 0 then CR is valid
+    if ($rc == $OK) {
+      print "CR($changeRequest) is valid for component($component)\n";
+      return 1;
+    }
+
+  }
+
+  print "CR($changeRequest) is NOT valid for component($component)\n";
+
+  return 0;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateMessage()
+# Purpose: Update the message with the Change Request
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub UpdateMessage {
+
+  if ($message) {
+    $message = "$changeRequest: $message" if ($message !~ /^$changeRequest/);
+  }
+  elsif ($messageFile) {
+    UpdateMessageFile();
+  }
+  else {
+    print "When adding your change description via the editor \n";
+    print "please prefix your description with " . $changeRequest . ": .\n";
+    print "Otherwise the SVN commit hook will not detect your \n";
+    print "ChangeRequest record.\n\n";
+    print "For example, \"" . $changeRequest . ": my change description ...\"\n"
+  }
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateMessageFile()
+# Purpose: Update the message file with the Change Request
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub UpdateMessageFile {
+
+  # Read the input file.
+  open IN, "<$messageFile" or die $!;
+  my @lines = <IN>;
+  close IN;
+
+  # Write to the temp file's filehandle
+  my $first = 1;
+  foreach $entry (@lines) {
+    if ($first) {
+      print $TMP "$changeRequest: $entry";
+      $first = 0;
+    }
+    else {
+      print $TMP "$entry";
+    }
+  }
+
+  system("cat $tempFileName") if $verbose;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ExecCommit()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub ExecCommit {
+
+  # Reconstruct the commit command
+  my $command = "$SVN commit";
+  if ($message) {
+    $command .= " -m \"$message\"";
+  }
+  elsif ($messageFile) {
+    $command .= " -F $tempFileName"
+  }
+
+  my $appArgs = join(" ", @ARGV);
+  $command .= " $appArgs";
+
+  # Run the command
+  print "Running command: $command\n";
+  system $command;
+  my $rc = $? >> 8;
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ValidateTks()
+# Purpose: Determines if the TKs are in the development state
+# RCs    : 1 if valid otherwise 0
+#------------------------------------------------------------------------------
+sub validateTks {
+
+  my @toolKits = GetToolKits($component, $branch);
+
+  # Validate the CR and TK stage are correct
+  foreach my $tk (@toolKits) {
+    chomp $tk;
+    my $command = "$DB_tkShow -t $tk";
+    print "Command: $command\n";
+    @tokens = `$command`;
+    my @stageLine = grep(/Stage/, @tokens);
+    @tokens = split(/: /, $stageLine[0]);
+    my $stage = $tokens[1];
+    chomp $stage;
+    if ($stage ne "DEVELOPMENT") {
+      print "ERROR: the tool kit($tk) is not in the development stage and\n";
+      print "       you are trying to commit with the DEV change request.\n";
+      return 0;
+    }
+  }
+
+  return 1;
+
+}

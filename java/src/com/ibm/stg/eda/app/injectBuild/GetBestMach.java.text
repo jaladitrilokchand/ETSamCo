@@ -1,0 +1,325 @@
+/**
+* <pre>
+* =============================================================================
+* 
+*  IBM Internal Use Only
+* 
+* =============================================================================
+* 
+*   SYNTAX: GetBestMach <-o os> <-s size> [-h] 
+* 
+*  CREATOR: Gregg Stadtlander
+*     DEPT: AW0V
+*     DATE: 03/15/2010
+* 
+* 
+*  RETURN CODES: 0 (Success) or 1 (Failed).
+* 
+* 
+* -PURPOSE---------------------------------------------------------------------
+*  Determines the best machine in the pool.
+* -----------------------------------------------------------------------------
+* 
+* 
+* -CHANGE LOG------------------------------------------------------------------
+* 03/15/2010 GS  Initial coding.
+* =============================================================================
+
+* </pre>
+*/
+
+package com.ibm.stg.iipmds.icof.app.TkInject;
+
+import java.io.IOException;
+import java.util.Hashtable;
+import java.util.Vector;
+
+import com.ibm.stg.iipmds.common.IcofException;
+import com.ibm.stg.iipmds.common.IcofSystemUtil;
+import com.ibm.stg.iipmds.icof.component.clearcase.ccFile;
+import com.ibm.stg.iipmds.icof.component.tk_patch.TkMachineList;
+
+public class GetBestMach {
+
+    /**
+     * The main method
+     *
+     * @param argv The command line arguments.
+     */
+    public static void main(String argv[]) {
+        
+        GetBestMach bestMach = new GetBestMach();
+        
+        try {
+
+        	// Read and verify the arguments.
+            bestMach.log("Parsing command line ...", false);
+            bestMach.processArgs(argv);
+            if (_bHelp) {
+                System.out.println(_sbUsage.toString());
+                System.exit(_iAppRc);
+            }
+
+            // Do work here ...
+            bestMach.log("Running tests ...", false);
+            bestMach.testIt();
+            _iAppRc = 0;
+            
+            
+        } catch (Exception e) {
+
+            try {
+
+                // Print out diagnostics about the exception.
+                bestMach.log(IcofException.printStackTraceAsString(e), true);
+                String sMsg = IcofException.printStackTraceAsString(e);
+                System.out.println(sMsg);
+                System.out.flush();
+
+                // Update the program RC to 1.
+                _iAppRc = 1;
+
+            } catch (Exception e2) {
+                e2.printStackTrace(System.out);
+            }
+
+        } finally {
+
+            try {
+                // Write any log entries.
+                bestMach.writeLog();
+
+            } catch (Exception ignore) {}
+
+        }
+
+        // Exit with the return code.
+        System.exit(_iAppRc);
+
+    }
+    
+    
+    //------------------------------------------------------------------------
+    /**
+     * Parses and verifies the command line arguments.
+     *
+     * @param     argv           The command line arguments.
+     * @exception IcofException  Invalid application invocation
+     */
+    private void processArgs(String argv[]) throws IcofException {
+
+        String sError = null;
+        String sMsg = null;
+        Vector vcSingleSwitches = null;
+        Vector vcArgSwitches = null;
+        Hashtable htParams = null;
+        
+        try {
+
+            // Parse input parameters
+            htParams = new Hashtable();
+            vcSingleSwitches = new Vector();
+            vcArgSwitches = new Vector();
+            vcSingleSwitches.add("-h");
+            vcArgSwitches.add("-o");
+            vcArgSwitches.add("-s");
+            sError = IcofSystemUtil.parseCmdLine(argv, vcSingleSwitches, 
+                                                 vcArgSwitches, htParams);
+
+            // Check arguments.
+            if ( htParams.size() > 3 || (sMsg != null && !sMsg.equals("")) ) {
+                // Add application invocation if present
+                sError += "\nINVOCATION: ";
+                sError += F$sClassName + " ";
+                for (int i = 0; i < argv.length; i++) {
+                    sError += argv[i] + " ";
+                }
+            }
+
+            // Check for verbose and help parameters.
+            if (htParams.containsKey("-h")) {
+                _bHelp = true;
+                setUsage();
+                return;
+            }
+
+            if (htParams.containsKey("-o")) {
+                _sOsName = (String) htParams.get("-o");
+                _sOsName.trim();
+            }
+            else {
+                sError += " A OS name (-o switch) must be specified.";
+            }
+            if (htParams.containsKey("-s")) {
+                _sOsSize = (String) htParams.get("-s");
+                _sOsSize.trim();
+            }
+            else {
+                sError += " An OS sizr (-s switch) must be specified.";
+            }
+            
+            // 
+            // Throw an exception if application usage was incorrect
+            //
+            if (sError != null) {
+                // Add the application usage
+                if ((_sbUsage == null))
+                    setUsage();
+                sError += _sbUsage.toString();
+                throw new Exception("Invalid application invocation"
+                                    + " or verification errors.\n"
+                                    + "Error = " + sError);     
+            }
+
+        } catch (Exception e) {
+            throw new IcofException(F$sClassName,
+                                    "processArgs()",
+                                    IcofException.SEVERE,
+                                    "An error oocured verifying the command"
+                                    + " line arguments.\n",
+                                    e.getMessage());        
+        } finally {
+            htParams = null;
+        }
+        
+    }
+
+    
+    //-------------------------------------------------------------------------
+    /**
+     * Set application's usage text.
+     */
+    private void setUsage() {
+
+        _sbUsage = new StringBuffer()
+            .append("\n\n")
+            .append("-----------------------------------\n")
+            .append(F$sClassName + " " + F$sAppVersion + "\n")
+            .append("-----------------------------------\n")
+            .append(" Determines the fastest machine in the pool for the \n")
+            .append(" specified os name and size.\n")
+            .append("\n")
+            .append("  -o os   = operating system.\n")
+            .append("  -s size = OS size in bits [32|64]\n")
+            .append("  -h      = (optional) application usage help\n")
+            .append("\n");
+
+    }
+
+    
+    //-------------------------------------------------------------------------
+    /**
+     * Run the tests.
+     * @throws IOException 
+     */
+    public void testIt() throws IcofException, IOException {
+
+        System.out.println("Searching for fastest machine ...");
+        System.out.println(" OS Name: " + _sOsName);
+        System.out.println(" OS Size: " + _sOsSize);
+        
+        // Create the Machine list object.
+        TkMachineList list = new TkMachineList();
+        String name = list.getFastestMachineName(_sOsName, 
+                                                 Integer.parseInt(_sOsSize));
+                
+        System.out.println("Fastest machine: " + name);
+        
+    }
+    
+    
+    //-------------------------------------------------------------------------
+    /**
+     * Adds the given information to the log buffer.
+     *
+     * @param     sLogThis       Information to add into the log buffer.
+     * @param     bEcho          If it is true, the passes string is echo'ed
+     *                           to System.out.
+     * @exception IcofException  Trouble logging the string.
+     */
+    private void log(String sLogThis, boolean bEcho) 
+        throws IcofException {
+
+        try {
+
+            // Append it to the log buffer.
+            if (sLogThis != null) {
+                _sbLog.append(sLogThis);
+                _sbLog.append("\n");
+
+                if (bEcho) {
+                    System.out.println(sLogThis);
+                    System.out.flush();
+                }
+            }
+
+        } catch (Exception e) {
+            throw new IcofException(F$sClassName,
+                                    "log()",
+                                    IcofException.SEVERE,
+                                    "Failed to log the string.\n"
+                                    + "Current value of log buffer = " 
+                                    + _sbLog.toString() + "\n"
+                                    + "Passed string = " + sLogThis + "\n",
+                                    e.getMessage());
+        }
+
+    }
+
+
+    //------------------------------------------------------------------------
+    /**
+     * Create the log file if it doesn't exist and write any log data to it.
+     * 
+     * @exception IcofException  Trouble setting a log file.
+     */
+    private void writeLog() throws IcofException {
+
+        try {
+
+            // Create a log file if it has not been created before.
+            _xLogFile = new ccFile(_sLogFile, false);
+            _xLogFile.validate(true);
+
+            // Write the log content.
+            _xLogFile.read();
+            _xLogFile.addLine("\n*******************************************");
+            _xLogFile.addLine("* Messages from the java class         ");
+            _xLogFile.addLine("*******************************************\n");
+            _xLogFile.addLine(_sbLog.toString());
+            _xLogFile.addLine(F$sClassName + " completed.");
+            _xLogFile.addLine("\n*******************************************");
+            
+            // Close file.
+            _xLogFile.write();
+
+            // Tell user about the log file.
+            System.out.println("\nSee " + _xLogFile.getPath()
+                               + " for more details.");
+            
+        } catch (Exception e) {
+            throw new IcofException(F$sClassName,
+                                    "setLogFile()",
+                                    IcofException.SEVERE,
+                                    "Failed to set a log file.\n",
+                                    e.getMessage());
+        }
+
+    }
+    
+
+    // Private members.
+    private static boolean _bHelp = false;
+    private static String _sLogFile = null;
+    private static ccFile _xLogFile = null;
+    private static String _sOsName = null;
+    private static String _sOsSize = null;
+    private static StringBuffer _sbUsage = null;
+    private static StringBuffer _sbLog = new StringBuffer();
+    private static int _iAppRc = 1;
+    
+    // Constants.
+    private static final String F$sClassName = "GetBestMach";
+    private static final String F$sAppVersion = "v1.0";
+
+}

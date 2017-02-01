@@ -1,0 +1,1374 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: createTkVols
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#    DATE: 01/31/2013
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 01/31/2013 EH  Initial coding.
+# 04/25/2013 EH  Get new quota from prod.
+# 05/11/2013 EH  Initial update for customTk.
+# 06/19/2013 EH  Support for shipb, ship, tkb, tk repositories works now.
+# 06/20/2013 EH  Added filter to disable processing of non delivered 
+#                components in ship and tk repositories.
+# 08/05/2013 GS  Code clean up. Updated to use prod if tk14.1.n-1 not found.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+
+# Global variables
+my $BIN                   = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $GET_COMP              = "$BIN/getComponents ";
+my $LUCI_CMD              = "/afs/eda/projects/luci/bin/luci_cmd";
+my $SETUP_DIRS            = "/afs/eda/prod/tools/14.1/bin/setup_dirs";
+my $FS_CMD                = "/usr/afsws/bin/fs";
+my $afsCellShort          = "eda";
+my $afsCellLong           = "eda.fishkill.ibm.com";
+my $afsId                 = "svnlib";
+my $logDir                = "/afs/eda/data/edainfra/volume_creation";
+
+# Program name
+my $appName = "createTkVols";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help                  = "";
+my $verbose               = 0;
+my $verbose2              = 0;
+my $noCmdExec             = 0;
+my $noCtk                 = "";
+my $cmdLineArgs           = "";
+my $logDate               = "";
+my @tokens                = ();
+my @results               = ();
+my $command               = "";
+my $msg                   = "";
+my $mountPointDir         = "";
+my $rc                    = 8;
+my $component             = "";
+my $volName               = "";
+my %compSpace             = ();
+my $luciQuotaMb           = "";
+my $tgtQuotaKb            = 5000;
+my $defaultLuciQuotaMb    = 5;
+my $luciQuotaKb           = "";
+my $mountPointExists      = "";
+my $toolKit               = "";
+my $dbMode                = ""; # default is prod if empty (GS)
+my $customTkQualifier     = "";
+my $volNameReposQualifier = "_";
+my $permsRefLevel         = "";
+my $spaceRefLevel         = "";
+my $refDir                = "";
+my $tgtDir                = "";
+my $tkExtendedDir         = "";
+my $hLDirPair             = "";
+my $permsRefLevelOverRide = "";
+my $spaceRefDir           = "";
+my $release               = "";
+my $isDelivered           = 1;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+my $TRUE  = 1;
+my $FALSE = 0;
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+my $startDir = $ENV{"PWD"};
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = \&handleDIE;
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Initialize logging
+$rc = setupLogging();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to complete $appName initalization", $ERROR);
+}
+
+#---------------------------------------------------------------------------
+# CustomTk NON-COMPONENT PROCESSING
+#
+# Process high level directories first.
+#---------------------------------------------------------------------------
+
+# When processing customTK, create HLD/custom version directories if they don't already exist
+if ($customTkQualifier) {
+
+  # Allow ability to suppress creation of customTk volumes and mount points but
+  #   permit use of $customTkQualifier for when legacy xtinct work is being done.
+  unless ($noCtk) {
+
+    $tgtQuotaKb = 5000;
+
+    # customtkb
+    $rc = CreateHLQCustomDir("customtkb", $toolKit,
+			     $customTkQualifier, $tgtQuotaKb);
+    if ($rc > 0) {
+      CleanExit("ERROR: Unable to create & initialize HLD/customtkb directory",
+		$ERROR);
+    }
+
+    # customtk
+    $rc = CreateHLQCustomDir("customtk", $toolKit,
+			     $customTkQualifier, $tgtQuotaKb);
+    if ($rc > 0) {
+      CleanExit("ERROR: Unable to create & initialize HLD/customtk directory",
+		$ERROR);
+    }
+  }
+
+  # tk14.1.nnaaaaaa
+  #
+  # Set default permissions on /afs/eda/tk<tk_ver> so that any 
+  # subdirectories that are created will inherit at least the minimum permissions.
+  #   Example of path: /afs/eda.fishkill.ibm.com/tk14.1.99a
+  print "\nSetting default permissions on /afs/$afsCellLong/tk$toolKit$customTkQualifier so that "; 
+  print "new subdirectories inherit those permissions\n";
+  $rc = SetDefaultPermissions("/afs/$afsCellLong/tk$toolKit$customTkQualifier");
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to set default permissions on directory /afs/$afsCellLong/tk$toolKit$customTkQualifier", $ERROR);
+  }
+}
+
+# Output line seperator to log file prior to starting component processing
+print "\n--------------------------------------------------------------------------------\n";
+
+#---------------------------------------------------------------------------
+# COMPONENT PROCESSING
+#
+# Iterate through each component that is defined for specified Tool Kit.
+#---------------------------------------------------------------------------
+
+# Define extended Tool Kit version
+if ($customTkQualifier) {
+  $tkExtendedDir = "tk$toolKit$customTkQualifier";
+}
+else {
+  $tkExtendedDir = "tk$toolKit";
+}
+
+# Get a list of components to be checked
+my @components = ();
+if ($component) {
+  push(@components, $component);
+}
+else {
+  $command = $GET_COMP . " -t $toolKit -q ";
+  chomp(@results = `$command`);
+  @components = split(/,/, $results[0]);
+}
+
+# Iterate through each component in the list
+foreach $component (@components) {
+
+  # Ignore test components
+  next if $component =~ /etreetest/;
+  next if $component =~ /svn_test/;
+  next if $component =~ /svntest/;
+
+  # Only proceed if the target component exists in "build" and "prod"
+  if (!-e "/afs/eda/build/$component/14.1") {
+    print "Component $component does not exist in reference location build. It will not be processed\n";
+    next;
+  }
+  if (!-e "/afs/eda/prod/$component/14.1") {
+    print "Component $component does not exist in reference location prod. It will not be processed\n";
+    next;
+  }
+
+  print "\nBeginning processing for component $component\n";
+
+  # Determine if this component is required in ship.
+  $isDelivered = SetDelivered($component);
+
+  # Get reference levels for space and permissions
+  $rc = GetRefLevels($customTkQualifier);
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to get reference levels for space and permissions", $ERROR);
+  }
+
+  # Get the amount of space used by this component in the reference level.
+  #
+  # Using "build" as the space reference for all cases. It was getting too
+  # complicated to determine a unique reference level for each situation.
+  $spaceRefLevel = "build";
+  $spaceRefDir = "/afs/eda/build/$component/14.1";
+  $rc = getSpaceData($spaceRefDir);
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to get the amount of space used by this component in the $spaceRefLevel level", $ERROR);
+  }
+  print "\n  $component component in $spaceRefLevel respository is using: $compSpace{'usedKb'} KB\n";
+
+  # Calculate new quota as 2X usedKB for last TK version.
+  CalcNewVolQuota($component);
+
+  #---------------------------------------------------------------------------
+  # tk14.1.nn/<comp>
+  # Create component volume and release dir for tk14.1.nn (if it does not exist).
+  # 
+  # For example: /afs/eda/tk14.1.nn/<comp>
+  #              /afs/eda/tk14.1.nn/<comp>/14.1
+  #---------------------------------------------------------------------------
+  $hLDirPair = "tk$toolKit";
+  $release = "";
+  $rc = CreateCompVol($component, $hLDirPair, "", "_", $permsRefLevel, $luciQuotaMb, $tgtQuotaKb, $release);
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to create new volume and initialize mount point directory for $component under /afs/eda/$hLDirPair", $ERROR);
+  }
+
+  # Create release directory for /afs/eda/tk14.1.nn/<comp>
+  $rc = CreateRlsDir($hLDirPair, $component, $permsRefLevel); 
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to initialize release directory $hLDirPair/$component/14.1", $ERROR);
+  }
+
+  #---------------------------------------------------------------------------
+  # shipb/<comp>
+  # Create component volume for shipb (if it does not exist).
+  # 
+  # For example: /afs/eda/shipb/<comp>
+  #---------------------------------------------------------------------------
+  $hLDirPair = "shipb";
+  $release = "";
+  $rc = CreateCompVol($component, $hLDirPair, "", "_", $permsRefLevel,
+		      $defaultLuciQuotaMb, $tgtQuotaKb, $release);
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to create new volume and initialize mount point directory for $component under /afs/eda/$hLDirPair", $ERROR);
+  }
+
+  #---------------------------------------------------------------------------
+  # ship/<comp>
+  # Create component volume and release dir for ship (if it does not exist).
+  #
+  # For example: /afs/eda/ship/<comp>
+  #              /afs/eda/ship/<comp>/14.1
+  #---------------------------------------------------------------------------
+  if ($isDelivered) {
+    $hLDirPair = "ship";
+    $release = "";
+    $rc = CreateCompVol($component, $hLDirPair, "", "_", $permsRefLevel,
+			$defaultLuciQuotaMb, $tgtQuotaKb, $release);
+    if ($rc > 0) {
+      CleanExit("ERROR: Unable to create new volume and initialize mount point directory for $component under /afs/eda/$hLDirPair", $ERROR);
+    }
+
+    # Create release directory for /afs/eda/ship/<comp>
+    $release = "14.1";
+    $rc = CreateCompVol($component, $hLDirPair, "", "_", $permsRefLevel,
+			$luciQuotaMb, $tgtQuotaKb, $release);
+    if ($rc > 0) {
+      CleanExit("ERROR: Unable to initialize release directory $hLDirPair/$component/14.1", $ERROR);
+    }
+  }
+
+  #---------------------------------------------------------------------------
+  # tkb/<comp>
+  # Create component volume for tkb (if it does not exist).
+  # 
+  # For example: /afs/eda/tkb/<comp>
+  #---------------------------------------------------------------------------
+  $hLDirPair = "tkb";
+  $release = "";
+  $rc = CreateCompVol($component, $hLDirPair, "", "_", $permsRefLevel,
+		      $defaultLuciQuotaMb, $tgtQuotaKb, $release);
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to create new volume and initialize mount point directory for $component under /afs/eda/$hLDirPair", $ERROR);
+  }
+
+  #---------------------------------------------------------------------------
+  # tk/<comp>
+  # Create component volume and release dir for tk (if it does not exist).
+  #
+  # For example: /afs/eda/tk/<comp>
+  #              /afs/eda/tk/<comp>/14.1
+  #---------------------------------------------------------------------------
+  if ($isDelivered) {
+    $hLDirPair = "tk";
+    $release = "";
+    $rc = CreateCompVol($component, $hLDirPair, "", "_", $permsRefLevel,
+			$defaultLuciQuotaMb, $tgtQuotaKb, $release);
+    if ($rc > 0) {
+      CleanExit("ERROR: Unable to create new volume and initialize mount point directory for $component under /afs/eda/$hLDirPair", $ERROR);
+    }
+
+    # Create release directory for /afs/eda/ship/<comp>
+    $release = "14.1";
+    $rc = CreateCompVol($component, $hLDirPair, "", "_", $permsRefLevel,
+			$luciQuotaMb, $tgtQuotaKb, $release);
+    if ($rc > 0) {
+      CleanExit("ERROR: Unable to initialize release directory $hLDirPair/$component/14.1", $ERROR);
+    }
+  }
+
+  #---------------------------------------------------------------------------
+  # tk14.1.nnaaaaaa/<comp>
+  # Create component volume and release dir for tk14.1.nnaaaaaa
+  #
+  # For example: /afs/eda/tk14.1.99a/<comp>
+  #              /afs/eda/tk14.1.99a/<comp>/14.1
+  #---------------------------------------------------------------------------
+  $hLDirPair = "$tkExtendedDir";
+  $release = "";
+
+  # Skip when $customTkQualifier = "" (not creating customTK stuff) because
+  #   "$hLDirPair + $customTkQualifier" revert to $hLDirPair which has already been processed...
+  if ($customTkQualifier) {
+    $rc = CreateCompVol($component, $hLDirPair, $customTkQualifier, "_",
+			$permsRefLevel, $luciQuotaMb, $tgtQuotaKb, $release);
+    if ($rc > 0) {
+      CleanExit("ERROR: Unable to create new volume and initialize mount point directory for $component under /afs/eda/$hLDirPair", $ERROR);
+    }
+
+
+    # Create release directory for tk14.1.nnaaaaaa
+    $rc = CreateRlsDir($hLDirPair, $component, $permsRefLevel);
+    if ($rc > 0) {
+      CleanExit("ERROR: Unable to initialize release directory $hLDirPair/$component/14.1", $ERROR);
+    }
+  }
+
+  # CUSTOMTK ONLY PROCESSING
+  if (($customTkQualifier) && (!$noCtk)) {
+
+    #--------------------------------------------------------------------------
+    # Create component directory for customtkb if it does not exist.
+    #
+    # For example: /afs/eda/customtkb/tk14.1.99a/<comp>
+    #--------------------------------------------------------------------------
+    $hLDirPair = "customtkb/$tkExtendedDir";
+    $rc = CreateCompDir($hLDirPair, $component);
+    if ($rc > 0) {
+      CleanExit("ERROR: Unable to create new $component directory for $component under $hLDirPair", $ERROR);
+    }
+
+    #--------------------------------------------------------------------------
+    # Create component volume & release dir for customtk if it does not exist.
+    #
+    # For example: /afs/eda/customtk/tk14.1.99a/<comp>
+    #              /afs/eda/customtk/tk14.1.99a/<comp>/14.1
+    #--------------------------------------------------------------------------
+    if ($isDelivered) {
+      $hLDirPair = "customtk/$tkExtendedDir";
+      $release = "";
+      $rc = CreateCompVol($component, $hLDirPair, $customTkQualifier, "k",
+			  $permsRefLevel, $luciQuotaMb, $tgtQuotaKb, $release);
+      if ($rc > 0) {
+        CleanExit("ERROR: Unable to create new volume $hLDirPair/$component",
+		  $ERROR);
+      }
+
+      # Create release directory customtk/tk14.1.nnaaaaaa/<comp>/14.1
+      $rc = CreateRlsDir($hLDirPair, $component, $permsRefLevel); 
+      if ($rc > 0) {
+        CleanExit("ERROR: Unable to initialize release directory $hLDirPair/$component/14.1", $ERROR);
+      }
+    }
+  }
+}
+
+# Output line seperator to log file prior to posting results for next component
+print "\n--------------------------------------------------------------------------------\n";
+
+chomp($logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+CleanExit("\n$logDate $appName complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  chomp(my ($errMsg) = @_);
+  CleanExit("$errMsg\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+  print "$message\n";
+  print "Return code: $rc\n";
+  close (STDOUT);
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Creates AFS volumes in tk14.1.n repositories for all components defined in 
+the specified Tool Kit.
+
+Use of the -ctk option will create AFS volumes and directories for custom
+Tool Kit repositories.
+
+When the -ctk option is used, it is assumed that the following mount points
+have already been created (requires STG IT Admin):
+
+  /afs/eda.fishkill.ibm.com/tk<tool_kit><tk_qualifier>
+    For example: /afs/eda.fishkill.ibm.com/tk14.1.99a
+  /afs/eda.fishkill.ibm.com/customtkb
+  /afs/eda.fishkill.ibm.com/customtk
+
+If the -c option is not used to identify an individual component, the script
+will process all components in the specified Tool Kit (with the exception of
+svntest and svn_test components).
+  
+This script must be run as svnlib from AIX since the Luci CLI commands only work on AIX.
+  
+The svnlib ID must have at least insert privledges on the directories listed above.
+
+Log files are written to /afs/eda/data/edainfra/volume_creation
+
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName [-h]
+  $appName <-t tool_kit> [-ctk tk_qualifier] [-noctk] [-c component] [-permreflevel ref_level] [-h] [-k] [-y] [-yy]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit     = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+  tk_qualifier = custom TK qualifier (a single, lower case alpha character that
+                 will be added as a suffix to the Tool Kit version to make it unique)
+  -noctk       = Suppress creation of customTk volumes (when doing legacy xtinct processing)
+  component    = name of component (e.g., einstimer)
+  ref_level    = overide level to get customtk component permissions from (e.g., tk14.1.5 or tkb) 
+  -h             (optional) application help
+  -k             (optional) Suppress execution of significant commands for debugging (dryrun).
+                            This option also disables verification of created directories.
+  -y             (optional) Verbose (print the invocation of each command)
+  -y             (optional) More verbose (print the invocation of each command and target/actual quotas)
+   
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+}
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Capture command line arguments for logging (before GetOptions deletes them)
+  $cmdLineArgs = join(' ', @ARGV);
+
+  # Parse command line arguments   
+  GetOptions ('component|c=s'  => \$component,
+              't=s'            => \$toolKit,
+              'ctk=s'          => \$customTkQualifier,
+              'noctk'          => \$noCtk,
+              'permreflevel=s' => \$permsRefLevelOverRide,
+              'k'              => \$noCmdExec,
+              'y'              => \$verbose,
+              'yy'             => \$verbose2,
+              'help|h|?'       => \$help
+              ) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) must be specified\n";
+    return $ERROR;
+  }
+  unless ($toolKit =~ /^14\.1\./) {
+    print "ERROR: Tool Kit must start with 14.1.\n";
+    return $ERROR;
+  }
+
+  # Enable regular verbose also if the second level verbose is specified
+  $verbose = 1 if ($verbose2);
+  
+  # Verify that operating system is AIX
+  my $osStr = `uname -a`;
+  if ($osStr !~ /^AIX/) {
+    print "ERROR: This script must be run from AIX.\n";
+    print "       The Luci CLI commands only work on AIX.\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : getSpaceData($lvl, $component)
+# Purpose: Get space stats from fs lq command for a level and component
+#
+# fs lq results            are in KB
+# luci_cmd -l create -q units are MB
+# luci_cmd -l update -q units are MB
+# luci_cmd -l history   units are KB !!!
+# luci_cmd -l query     units are KB !!!
+#
+# RCs    : 0 = OK
+#          8 = ERROR
+#-----------------------------------------------------------------------------
+sub getSpaceData {
+
+  my ($dir) = @_;
+
+  my @fsLq = ();
+  my $line;
+  my @tokens = ();
+  my $command = "";
+
+  if (-d $dir) {
+
+    $command = "fs lq $dir";
+    chomp(@fsLq = `$command`);
+    my $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: $command failed\n";
+      return $ERROR;
+    }
+
+    # Process fs lq results
+    foreach $line (@fsLq) {
+
+      # Skip fs lq header line
+      next if (substr($line,0,6) eq "Volume");
+
+      # Parse stats
+      @tokens = split(/ +/, $line);
+
+      $compSpace{'volName'} = $tokens[0];
+      $compSpace{'quotaKb'} = $tokens[1];
+      $compSpace{'usedKb'}  = $tokens[2];
+      $compSpace{'usedPct'} = $tokens[3];
+      $compSpace{'partPct'} = $tokens[4];
+
+      $compSpace{'volName'} =~ s/(^\s+|\s+$)//g;
+      $compSpace{'quotaKb'} =~ s/(^\s+|\s+$)//g;
+      $compSpace{'usedKb'}  =~ s/(^\s+|\s+$)//g;
+      $compSpace{'usedPct'} =~ s/(^\s+|\s+$)//g;
+      $compSpace{'partPct'} =~ s/(^\s+|\s+$)//g;
+    }
+  }
+  else {
+    # If the component/release directory does not exist, set the results 
+    # to nothing
+    $compSpace{'volName'} = 0;
+    $compSpace{'quotaKb'} = 0;
+    $compSpace{'usedKb'}  = 0;
+    $compSpace{'usedPct'} = 0;
+
+    if (!$noCmdExec) {
+      print "  ERROR: Cannot get volume information because $dir does not exist\n";
+      return $ERROR;
+    }
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : copyAclToRelDir($refDir, $tgtDir)
+# Purpose: Copy AFS ACL from reference dir to new component/14.1 directory.
+# RCs    : 0 = OK
+#          8 = ERROR
+#-----------------------------------------------------------------------------
+sub copyAclToRelDir {
+
+  my ($refDir, $tgtDir) = @_;
+  my $rc = 0;
+  my $command;
+
+  if (-d $refDir) {
+    $command = "$FS_CMD ca $refDir $tgtDir";
+    chomp($logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+    print "  $logDate Running $command\n" if ($verbose);
+
+    # Skip command execution if the -k option was specified
+    unless ($noCmdExec) {
+      @results = `$command`;
+      $rc = $? >> 8;
+
+      if ($rc > 0) {
+        print "ERROR: Unable to set ACL on $tgtDir\n";
+        print @results;
+        return $ERROR;
+      }
+    }
+  }
+  else {
+    $rc = 8;
+    print "ERROR: Unable to copy ACL from reference dir. $refDir does not exist.\n";
+  }
+
+  return ($rc);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateSubDirs($mountPointDir)
+# Purpose: Run setup_dirs script to create subdirectories.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateSubDirs {
+
+  $command = "$SETUP_DIRS";
+  $command .= " --all";
+  $command .= " --no_32bit";
+  $command .= " --makefiles";
+  $command .= " $mountPointDir/14.1";
+
+  chomp($logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  print "  $logDate Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: $SETUP_DIRS failed\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : mtPtDirExists($mountPointDir)
+# Purpose: Verify existence of mount point directory.
+#          Anticipate a delay in Luci completion of create request.
+#          Retry after 5 seconds if the directory is not present.
+#          Give up after 36 retrys.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub mtPtDirExists {
+
+  my ($mountPointDir) = @_;
+  my $mountPointExists = 0;
+  my $i = 0;
+
+  unless ($noCmdExec) {
+    for($i = 0; $i < 36; $i++) {
+      chomp(my $logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+      print "$logDate Checking for existence of new mount point directory\n";
+      if ((-d $mountPointDir) && (! $noCmdExec)) {
+        $mountPointExists = 1;
+        last;
+      }
+      else {
+        sleep 5;
+      }
+    }
+  }
+  else {
+
+    # If this is a dry run, pretend that this routine passed.
+    $mountPointExists = 1;
+  }
+
+  return $mountPointExists;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateCompRelDir($mountPointDir)
+# Purpose: Verify existence of component/14.1 directory.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateCompRelDir {
+
+  unless ($noCmdExec) {
+    mkdir("$mountPointDir/14.1");
+    if (! -d "$mountPointDir/14.1") {
+      return $ERROR;
+    }
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CalcNewVolQuota($component)
+# Purpose: Calculate new quota as 2X usedKB for last TK version.
+#          Convert from KB to MB and round up to 1 MB if necessary.
+#          Invoke exception process for newQuotas > 8000 MB.
+# RCs    : 0 = OK
+#------------------------------------------------------------------------------
+sub CalcNewVolQuota {
+
+  my ($component) = @_;
+
+  # Calculate new quota as 2X usedKB for last TK version
+  # Convert from KB to MB and round up to 1 MB if necessary
+  # Invoke exception process for newQuotas > 8000 MB
+  my $tgtQuotaMb = ((2 * $compSpace{'usedKb'})/1000);
+  $tgtQuotaMb = 50 if ($tgtQuotaMb < 1);
+
+  # Convert target quota to a whole number
+  $tgtQuotaMb = sprintf("%.0f", $tgtQuotaMb);
+  print "  Target quota for new $component volumes: $tgtQuotaMb MB\n";
+
+  # Don't request Luci to provide more than 8192 MB (the maximum that Luci will
+  # accept.
+  if ($tgtQuotaMb <= 8192) {
+    $luciQuotaMb = $tgtQuotaMb;
+  }
+  else {
+    $luciQuotaMb = 8192;
+    $msg = "WARNING: The target quota for $component exceeds the maximum that can be requested in Luci.\n";
+    $msg .= "WARNING: The maximum Luci quota of 8192 MB will be substituted. An STGIT Help ticket must be opened to request that the quota be increased to the target quota for the $component AFS volumes created by this script.";
+    print "$msg\n";
+  }
+  $tgtQuotaKb = ($tgtQuotaMb * 1000);
+  $luciQuotaKb = ($luciQuotaMb * 1000);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateNewVol($afsId, $afsCellShort, $volName, $luciQuotaMb, $mountPointDir)
+# Purpose: Request creation of a new volume.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateNewVol {
+
+  my ($afsId, $afsCellShort, $volName, $luciQuotaMb, $mountPointDir, $tgtQuotaKb) = @_;
+
+  # Construct command to request creation of a new volume.
+  # Luci CLI requires that fully qualified cell name be used in mount point path (i.e., eda.fishkill.ibm.com)
+  # For example: /afs/eda/projects/luci/bin/luci_cmd -o create -u svnlib -c eda -v ship.elm -q 1 -m /afs/eda.fishkill.ibm.com/ship/elm -w 30 -e
+  $command = "$LUCI_CMD -o create";
+  $command .= " -u $afsId";
+  $command .= " -c $afsCellShort";
+  $command .= " -v $volName";
+  $command .= " -q $luciQuotaMb";
+  $command .= " -m $mountPointDir";
+  $command .= " -w 30";
+  #$command .= " -e"; # Send email to owner of AFS ID running this process
+
+  chomp(my $logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  print "  $logDate Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to create AFS volume to be mounted at $mountPointDir\n";
+      print @results;
+      return $ERROR;
+    }
+    else {
+      print @results;
+    }
+  }
+
+  # Verify existence of mount point directory.
+  $mountPointExists = mtPtDirExists($mountPointDir);
+  unless ($mountPointExists) {
+    print "ERROR: Mount point directory $mountPointDir does not exist\n";
+    return $ERROR;
+  }
+
+  # Verify quota of new volume
+  %compSpace = ();
+  getSpaceData($mountPointDir);
+  if ($verbose2) {
+    print "\n  Checking quota of new AFS volume at $mountPointDir:\n";
+    print "    Target:          $tgtQuotaKb KB\n";
+    print "    Actual:          $compSpace{'quotaKb'} KB\n";
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CopyDotOwnerFile($component, $mountPointDir)
+# Purpose: Copy .owner file from /afs/eda/build/<component>/14.1 (if it exists).
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CopyDotOwnerFile {
+
+  my ($component) = @_;
+  my $dotOwnerFile = "/afs/eda/build/$component/14.1/.owner";
+
+  if (-f $dotOwnerFile) {
+
+    # Copy .owner file from reference location to component treetop
+    $command = "cp $dotOwnerFile $mountPointDir/14.1";
+
+    # Skip command execution if the -k option was specified
+    unless ($noCmdExec) {
+      @results = `$command`;
+      $rc = $? >> 8;
+
+      if ($rc > 0) {
+        print "ERROR: Unable to copy $dotOwnerFile to $mountPointDir/14.1\n";
+        return $ERROR;
+      }
+      else {
+        print "Copied $dotOwnerFile to $mountPointDir/14.1\n";
+      }
+    }
+  }
+  else {
+    print "WARNING: $dotOwnerFile does not exist\n";
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateVolName($component)
+# Purpose: Create volume name in this format: tk141_3.ess
+#------------------------------------------------------------------------------
+sub CreateVolName {
+
+  my ($component, $volNameReposQualifier, $customTkQualifier, $hLDirPair, $release) = @_;
+
+  my $volName =  "";
+
+  # Case when volume is for shipb, ship, tkb or tk
+  if (($hLDirPair =~ /^shipb$/) ||
+      ($hLDirPair =~ /^ship$/) ||
+      ($hLDirPair =~ /^tkb$/) ||
+      ($hLDirPair =~ /^tk$/)) {
+    $volName =  $hLDirPair;
+  }
+
+  # Remaining cases
+  else {
+    my $customTkQualifShort = substr($customTkQualifier, 0, 1);
+
+    my @tokens = split(/\./, $toolKit);
+    $volName =  "tk";
+    $volName .= "$tokens[0]";
+    $volName .= "$tokens[1]";
+    $volName .= "$volNameReposQualifier";
+    $volName .= "$tokens[2]";
+    $volName .= "$customTkQualifShort";
+  }
+
+  # Add component name when appropriate
+  if ($component) {
+    $volName .= ".";
+    $volName .= "$component";
+  }
+
+  # Add release when appropriate
+  if ($release) {
+    $volName .= ".";
+    $volName .= "14_1";
+  }
+
+  # Do not let the volume name exceed 22 characters in length
+  if (length($volName) > 22 ) {
+     $volName = substr($volName, 0, 22);
+  }
+
+  return $volName;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateCustomVerDir($customVerDir)
+# Purpose: Create AFS volume and mount point directory for HLD/<custom version>
+#          if they do not exist.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateCustomVerDir {
+
+  my ($customVerDir, $custTkId, $mountPointDir, $tgtQuotaKb) = @_;
+  my $luciQuotaMb = 5;
+  my $release = "";
+  my $hLDirPair = "$customVerDir";
+
+  # Set the $volNameReposQualifier to the last character of $customVerDir
+  # For instance, $volNameReposQualifier = "b" when $customVerDir = "customtkb"
+  my $volNameReposQualifier = substr($customVerDir, -1, 1);
+
+  # Create /afs/eda/customtkb/tk14.1.<nn><a> if it does not exist
+  unless (-d "$mountPointDir") {
+    print "\n  Need to create a volume and mount point for $mountPointDir\n";
+    #$volName = CreateVolName("", $volNameReposQualifier, $custTkId); # <-- no component
+    $volName = CreateVolName("", $volNameReposQualifier, $custTkId, $hLDirPair, $release); # <-- no component
+
+    # Request creation of a new volume.
+    $rc = CreateNewVol($afsId, $afsCellShort, $volName, $luciQuotaMb, $mountPointDir, $tgtQuotaKb);
+    if ($rc > 0) {
+      return $ERROR;
+    }
+  }
+  else {
+    print "\n  No need to create a volume because directory already exists: $mountPointDir\n";
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateRlsDir($mountPointDir, $component, $refDir, $tgtDir)
+# Purpose: Create a release directory (14.1) and initialize it with permissions,
+#          default subdirectories and .owner file
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+#sub CreateVolAndInit {
+sub CreateRlsDir {
+
+  my ($hLDirPair, $component, $permsRefLevel) = @_;
+
+  $mountPointDir = "/afs/$afsCellLong/$hLDirPair/$component";
+
+  if (-e "$mountPointDir/14.1") {
+    print "\nNothing to do because directory already exists: $mountPointDir/14.1\n";
+    return $OK;
+  }
+
+  # Create the 14.1 subdirectory under mount point directory
+  print "\nCreating $mountPointDir/14.1 directory\n";
+  $rc = CreateCompRelDir($mountPointDir);
+  if ($rc > 0) {
+    print "ERROR: Unable to create 14.1 subdirectory under mount point directory\n";
+    return $ERROR;
+  }
+
+  # Copy permissions from reference directory to new component/14.1 directory
+  $refDir = "/afs/eda/$permsRefLevel/$component/14.1";
+  if (! -d $refDir) {
+    print "WARING: $refDir DOES NOT EXIST!\n";
+    $refDir = "/afs/eda/prod/$component/14.1";
+    print "        using .. for ACLs .. $refDir\n";
+  }
+  $tgtDir = "$mountPointDir/14.1";
+  $rc = copyAclToRelDir($refDir, $tgtDir);
+  if ($rc > 0) {
+    print "ERROR: Unable to set permissions for $component/14.1\n";
+    return $ERROR;
+  }
+
+  # Run setup_dirs script to create subdirectories under component/14.1 directory
+  CreateSubDirs($mountPointDir);
+  if ($rc > 0) {
+    print "ERROR: Unable to create subdirectories for $component/14.1\n";
+    return $ERROR;
+  }
+
+  # Copy .owner file from /afs/eda/prod/<component>/14.1 (if it exists)
+  CopyDotOwnerFile($component, $mountPointDir);
+  if ($rc > 0) {
+    print "ERROR: Unable to copy .owner file\n";
+    return $ERROR;
+  }
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : setupLogging()
+# Purpose: Enable logging
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub setupLogging {
+
+  # Create $logDir if it does not already exist
+  mkpath($logDir) if (! -d $logDir);
+
+  # Open log file for script messages
+  chomp(my $logDate = `date +%C%y%m%d\_%H%M%S`);
+  my $logFile = "$logDir/" . $appName . "_" . $logDate . ".log";
+
+  # Open a filehandle for both stdout and a log file
+  open (STDOUT, "| tee -a $logFile") || die "ERROR: unable to open log file $logFile  $!\n";
+
+  my $currentAfsId = (getpwuid($<)) [0];
+  if ($currentAfsId ne "$afsId") {
+    print "\nERROR: Only the $afsId AFS ID is permitted to run this script\n";
+    return $ERROR;
+  }
+
+  chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  chomp(my $machine = `hostname`);
+  print "\n$dateTime $currentAfsId on $machine invoked $appName $cmdLineArgs\n\n";
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetDefaultPermissions($dir)
+# Purpose: Set default access on specified directory
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SetDefaultPermissions {
+
+  my ($dir) = @_;
+
+  $command = "fs sa $dir svnlib rlidwka";
+  $command .= " svnlib:write rlidwk";
+  $command .= " svnlib:read rl";
+  $command .= " system:administrators rlidwka";
+  $command .= " system:authuser l";
+  $command .= " system:anyuser l";
+  $command .= " bradmin rlidwka";
+
+  print "  $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to set ACL on $dir\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateHLQCustomDir("customtkb", $toolKit, $customTkQualifier)
+# Purpose: Create AFS volume and mount point directory for HLD/<custom version>
+#          if they do not exist.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateHLQCustomDir {
+
+  #my ($itemNum, $HLQCustomDir, $newTK, $custTkId, $tgtQuotaKb) = @_;
+  my ($HLQCustomDir, $newTK, $custTkId, $tgtQuotaKb) = @_;
+
+  # Create AFS volume and mount point directory for HLD/<custom version>
+  #   if they do not exist.
+  #   Example of path: /afs/eda.fishkill.ibm.com/customtkb/tk14.1.99a
+  my $mountPointDir = "/afs/$afsCellLong/$HLQCustomDir/tk$newTK$custTkId";
+  print "\nChecking for $mountPointDir\n";
+  $rc = CreateCustomVerDir($HLQCustomDir, $custTkId, $mountPointDir, $tgtQuotaKb);
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to create HLD/$HLQCustomDir directory", $ERROR);
+  }
+
+  # Set default permissions on .../customtkb directory  <-- EH: SHOULD THIS BE DONE FIRST?
+  #   Example of path: /afs/eda.fishkill.ibm.com/customtkb
+  print "\n  Setting minimum permissions on high level directories so that "; 
+  print "new subdirectories inherit those permissions\n";
+  $rc = SetDefaultPermissions("/afs/$afsCellLong/$HLQCustomDir");
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to set default permissions on directory /afs/$afsCellLong/$HLQCustomDir", $ERROR);
+  }
+
+  # Set default permissions on .../customtkb/<custom tk version> directory
+  #   Example of path: /afs/eda.fishkill.ibm.com/customtkb/tk14.1.99a
+  $rc = SetDefaultPermissions($mountPointDir);
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to set default permissions on directory $mountPointDir", $ERROR);
+  }
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateCompVol($component, $customTkQualifier, $volNameReposQualifier, $tkExtendedDir, "tk", "tk")
+# Purpose: Create new volume and initialize mount point directory
+# RCs    : 0 = OK
+#          8 = ERROR
+#-----------------------------------------------------------------------------
+sub CreateCompVol {
+
+  my ($component, $hLDirPair, $customTkQualifier, $volNameReposQualifier, $permsRefLevel, $luciQuotaMb, $tgtQuotaKb, $release) = @_;
+
+  my $mountPointDir = "";
+
+  if ($release) {
+    $mountPointDir = "/afs/$afsCellLong/$hLDirPair/$component/$release";
+  }
+  else {
+    $mountPointDir = "/afs/$afsCellLong/$hLDirPair/$component";
+  }
+
+  # Create volume and mount point if it does not exist
+  unless (-d "$mountPointDir") {
+
+    print "\nCreating volume and mount point at: $mountPointDir\n";
+
+    # Determine the appropriate volume name
+    $volName = CreateVolName($component, $volNameReposQualifier, $customTkQualifier, $hLDirPair, $release);
+
+    # Create new volume and initialize mount point directory
+    $rc = CreateNewVol($afsId, $afsCellShort, $volName, $luciQuotaMb, $mountPointDir, $tgtQuotaKb);
+    if ($rc > 0) {
+      print "ERROR: Unable to create new volume at $mountPointDir\n";
+      return $ERROR;
+    }
+  }
+
+  else {
+    print "\nNothing to do because directory already exists: $mountPointDir\n";
+    return $OK;
+  }
+
+  # Initialize the 14.1 directory if it was just created
+  if ($release) {
+
+    # Copy permissions from reference directory to new component/14.1 directory
+    $refDir = "/afs/eda/$permsRefLevel/$component/14.1";
+    if (! -d $refDir) {
+      print "WARING: $refDir DOES NOT EXIST!\n";
+      $refDir = "/afs/eda/prod/$component/14.1";
+      print "        using .. for ACLs .. $refDir\n";
+    }
+    $tgtDir = "$mountPointDir";
+    $rc = copyAclToRelDir($refDir, $tgtDir);
+    if ($rc > 0) {
+      print "ERROR: Unable to set permissions for $component/14.1\n";
+      return $ERROR;
+    }
+
+    # Run setup_dirs script to create subdirectories under component/14.1 directory
+    CreateSubDirs($mountPointDir);
+    if ($rc > 0) {
+      print "ERROR: Unable to create subdirectories for $component/14.1\n";
+      return $ERROR;
+    }
+
+    # Copy .owner file from /afs/eda/build/<component>/14.1 (if it exists)
+    CopyDotOwnerFile($component, $mountPointDir);
+    if ($rc > 0) {
+      print "ERROR: Unable to copy .owner file\n";
+      return $ERROR;
+    }
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateCompDir($itemNum, $hLDir, $tkExtendedDir, $component)
+# Purpose: Create component directory
+# RCs    : 0 = OK
+#          8 = ERROR
+#-----------------------------------------------------------------------------
+sub CreateCompDir {
+
+  my ($hLDirPair, $component) = @_;
+
+  $mountPointDir = "/afs/$afsCellLong/$hLDirPair/$component";
+  unless (-e "$mountPointDir") {
+
+    print "\nCreating directory: $mountPointDir\n";
+    unless ($noCmdExec) {
+      mkdir "$mountPointDir";
+      unless (-d "$mountPointDir") {
+        print "ERROR: Could not create directory $mountPointDir\n";
+        return $ERROR;
+      }
+    }
+  }
+  else {
+    if (!-d "$mountPointDir") {
+        print "ERROR: $mountPointDir already exists and it is not a directory.\n";
+        return $ERROR;
+    }
+    print "\nNothing to do because directory already exists: $mountPointDir\n";
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetRefLevels($customTkQualifier)
+# Purpose: Create component directory
+# RCs    : 0 = OK
+#          8 = ERROR
+#-----------------------------------------------------------------------------
+sub GetRefLevels {
+
+  my ($customTkQualifier) = @_; 
+
+  # For customTK processing
+  if ($customTkQualifier) {
+
+    # Determine which level to sync permissions from
+    unless ($permsRefLevelOverRide) {
+      $permsRefLevel = "tk$toolKit";
+    }
+    else {
+      $permsRefLevel = "$permsRefLevelOverRide";
+    }
+  }
+
+  # For non-customTK processing
+  else { 
+
+    # For non-customTK requests:
+    # Define reference level to be previous tk14.1.x repository if the requested 
+    # TK version is > 14.1.0.
+    # Otherwise, use the prod level as a reference.
+    # Always use prod for the $spaceRefLevel
+    my @tokens = split(/\./, $toolKit);
+    if ($tokens[2] > 0) {
+      $permsRefLevel = "tk$tokens[0].$tokens[1]." . ($tokens[2] - 1);
+    }
+    else {
+      $permsRefLevel = "prod";
+    }
+
+    # Find an alternative reference level if this component does not exist in the previous tk14.1.x repository
+    if (! -d "/afs/eda/$permsRefLevel/$component") { 
+
+      # For components that do not exist in the previous TK version, use prod.
+      if (-d "/afs/eda/prod/$component") {
+        $permsRefLevel = "prod";
+      }
+      else {
+        print "ERROR: Unable to locate a reference level containing $component component\n";
+        return $ERROR;
+      }
+    }
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetDelivered($component)
+# Purpose: Determine if this component needs to have a directory in ship and tk
+# RCs    : 1 = delivered
+#          0 = not delivered
+#------------------------------------------------------------------------------
+sub SetDelivered {
+
+  my ($component) = @_;
+
+  # Construct a list of delivered components
+  my $command = "$GET_COMP";
+  $command .= " -t $toolKit";
+  $command .= " -ct DELIVERED,TEST_SUPPORT";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+  print "Running $command\n" if ($verbose);
+
+  my @results = `$command`;
+  my @delComps = split(/,/, $results[0]);
+
+  my $rc = 0;
+  $rc = 1 if (grep(/^$component$/, @delComps));
+
+  print "Is delivered: $rc\n" if ($verbose);
+
+  return $rc;
+
+}

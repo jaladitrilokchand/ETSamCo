@@ -1,0 +1,861 @@
+#!/usr/bin/env ksh
+#========================================================================================================
+# Program Name: svnUpdateRelease
+#
+# Author(s)   : A. Magnan
+#
+# Purpose     : Updates the EDA BUILD WC from the EDA SVN 14.1 repository 
+#
+# Function : Performs "update" function for a given component/release that:
+#               1) updates EDA BUILD with latest revision of SVN code committed to
+#                  the SVN trunk.
+#               2) updates the CM metadata with CM info for all commits to the SVN
+#                  trunk that have occurred from the SVN lastExtract date.
+#               3) Generates the LEVELHIST file and the extracted file list used
+#                  by the Build Status Web page.
+#            Allows selection of either running in DEVMODE or PRODMODE:
+#               1) DEVMODE: 
+#                    SVN Repository: edadev/14.1
+#                    AFS Extraction: /afs/eda/build/svn_test/{component}/14.1
+#                    CM DB (DB2)   : Development
+#               2) PRODMODE: 
+#                    SVN Repository: eda/14.1
+#                    AFS Extraction: /afs/eda/build/{component}/14.1
+#                    CM DB (DB2)   : Production
+#
+# Notes       : (1) The input is a component/release pair (e.g. model.1401)
+#               (2) Library cleanup for deleted files is handled by the Make system.
+#
+# Revisions   : 0.0 06/16/10 AM Initial version
+#               0.1 06/16/10 AM Added functions to ensure that:
+#                               1) we run in DEVMODE until a component is rolled 
+#                                  out into production.
+#                               2) limit the AFS IDs that can execute this script.
+#               0.2 06/28/10 AM Added parentheses around strings being passed to
+#                               modifyFuncUpdate for all component cases.
+#               0.3 06/29/10 AM Added creation of build/etc dirs from component
+#                               treetop if does not already exist.
+#               0.4 07/07/10 AM Updated SVNCLIB definition in DEVMODE to point at the 
+#                               ~edainfra/tools/enablement/dev/bin directory.
+#                               Replaced CMDBLIB variable with SVNCLIB for consistency.
+#               0.5 07/08/10 AM Wrote new function, get_revID, to modularize existing
+#                               in-line code.
+#                               Wrote new function, get_svnRepos, to get name of SVN
+#                               repository from SVN WC identified in BUILDDIR.
+#                               Removed need for SVN_SERVER variable; redefined
+#                               SVN_REPOS variable.
+#               0.6 07/09/10 AM Added code to check for BUILDDIR existence since SVN_TEST
+#                               may not be set up.
+#               0.7 07/14/10 AM Added "-db DEV" switch to all CM DB API calls that need
+#                               to reference the CM DEV DB, i.e. calls in DEVMODE.
+#               0.8 07/15/10 GS Removed edautils from force dev list.
+#               0.9 07/21/10 AM Added edautils to rolled out part of forceDevMode list.
+#               1.0 07/22/10 AM Added model and maise to rolled out part of forceDevMode list.
+#               1.1 08/02/10 AM Added rice to rolled out part of forceDevMode list.                     
+#               1.2 08/03/10 GS Added vss to rolled out part of forceDevMode list.                      
+#               1.3 08/03/10 AM Added "-O" switch for overnight build use.
+#                               -O active: extracted.files.curr.html deleted/created before 
+#                                          CM DB update, extraction/update status written into
+#                                          this file if RC != 0.
+#                               Send e-mail to SVN Admins if cannot reach SVN server after timeout.
+#               1.4 08/05/10 AM Removed forceDevMode function and changed logic to default to the
+#                               DEVMODE flow. Removed -d switch and defined a new -P switch to 
+#                               explicitly force logic into PRODUCTION flow. 
+#               1.5 08/06/10 AM Updated help and mailing list information.
+#                               Merged in revision history from production updates.  
+#               1.6 08/09/10 AM Rewrote modifyFuncUpdate code section to simplify and generalize
+#                               the DEV vs PROD flows, overnight build, and output file selection.
+#                               Removed test code for failed test server messaging.
+#               1.7 08/11/10 AM Replaced "\n" with "<br>" in CSFile since it is an HTML file.
+#                               Added "rm $LOCK_EXTRACT" to modifyFuncUpdate RC=2 section.
+#               1.8 08/12/10 AM Updated "rm $LOCK_EXTRACT" in modifyFuncUpdate RC=2 section to work
+#                               only with specified components (e.g. Einstimer associated). This
+#                               is implemented as a -A switch (means Always Build).
+#                               Removed "tee" logfile statements and set up calls to other programs
+#                               to write to $BUILDLOG only. 
+#               1.9 09/16/10 AM New function, notify_builder, to auto-notify component builders when 
+#                               an actual update to EDA BUILD occurs or there is an error in the attempt.
+#                               Note: This is for model* only; function to be updated to work on all
+#                               components when the CM DB capability is ready. 
+#               2.0 09/20/10 AM Added new, non-adverstised -d switch to force code path for all calls 
+#                               to my tools WC for debug purposes. Valid values are devWC and prodWC.
+#                               Also, now passing $SVNCLIB value to svnUpdate via its new -e switch.
+#               2.1 10/26/10 GS Changed path to svn from btv to eda.
+#               2.2 12/22/10 AM Updated notify_builder routine to get builder list from CM DB.
+#               2.3 01/14/11 AM Parameterized inputs for use in simp_build by adding -e and -l switches.
+#                               Removed userID check.
+#                               Added check to confirm BUILDDIR is an SVN WC.
+#                               Added logic to update CM DB only if default BUILDDIR and BUILDLOGDIR 
+#                               definitions were used when executing this script.
+#               2.4 01/19/11 AM Added functionality to get the SVN revision number on the URL trunk vs on
+#                               the svn WC. Function called get_revID_URL.
+#                               Reworked old function, get_revID, to get_revID_WC, which gets the current
+#                               revision number on the SVN WC.
+#                               Decision to run svn update is made based on revID_URL > revID_WC.
+#               2.5 01/20/11 AM Changed auto-authentication capability to be called when trying to get
+#                               the latest revision ID from the SVN trunk.
+#                               Running SVN update native command, eliminating need to call svnUpdate
+#                               script which tried to handle auto-authentication at SVN WC update time.
+#               2.6 01/26/11 AM Added components (edautils/14.1 and ess/14.1) for auto-authentication.
+#========================================================================================================       
+function help
+{
+cat << \EOF
+# Usage    : svnUpdateRelease -r <comp.rlse> [-h] [-e <extract target loc>] [-l LOG dir] [-A] [-O] [-P]
+#            -h  shows this help
+#            -e  SVN extraction location (BUILDDIR)
+#                   (default: /afs/eda/build/svn_test/{comp}/14.1 unless -P switch used)
+#                   (default if -P switch used: /afs/eda/build/{comp}/14.1)
+#            -l  Directory to log script results (BUILDLOGDIR)
+#                   (default: /afs/eda/u/$USER/logs/${MONTH})
+#                   Log file predefined as ${DATE}.${PRODUCT}.${REL_VER}.svnUpdate
+#            -r  <comp.rlse>    
+#                   (e.g. model.1401)
+#            -A  always build even if nothing new has been extracted/updated.
+#                   (default: if no extraction, no build required)
+#            -O  overnight extraction/update
+#                   use this flag to run script from cron, which clears the file used as
+#                   the Overnight Build entry on the EDA Build Status web page.
+#                   (default: appends extraction info to the existing extracted.files.curr.html file)
+#            -P  forces script to run in Production mode.
+#                   use this flag to execute script in EDA production release flow and extract into the
+#		    /afs/eda/build/{component}/14.1 release directory (required to actually release). 
+#                   (default: Development mode)
+#
+# IMPORTANT NOTE: If you use the -e switch, you will need to rerun this script without it when
+#                 you are ready to extract your code changes into the EDA Release system.    
+#                   
+EOF
+}
+
+function goodbye
+{
+  [[ -n $ENTIRE ]] && print "\n$SHELL_NAME: $EXT_RLSE ending at $(date +"%a  %D %T") on $(hostname -s)" >> $BUILDLOG
+  rc="$1"
+  [[ -n $2 ]] && print "$2" >> $BUILDLOG
+  exit "${rc:-0}"
+}
+
+function parse_rel 
+{
+  # Variables:
+  # ----------
+  # INPUT:
+  # RELEASE      =  release.ver  (release name)
+  # OUTPUT:
+  # PRODUCT      =  release name in lowercase, ie. 'einstimer'
+  # REL_VER      =  release version, leading zeros ie., 0901 or 1401
+  # R_V          =  release version, dot version ie., 14.1
+
+  typeset RELEASE=$1
+
+  PRODUCT=$(print $RELEASE | cut -f1 -d. )
+  LOG_VER=$(print $RELEASE | cut -f2 -d.)
+
+  REL_VER=$(print $RELEASE | cut -f2 -d.)
+  [[ $REL_VER = +([0-9])-[0-9]* ]] && RV_EXT=-$(print $REL_VER | cut -d- -f2-) || RV_EXT=
+  R_V="$(print $REL_VER | cut -c1,2 | sed 's/^0//').$(print $REL_VER | cut -c3,4 | sed 's/^0//')$RV_EXT"
+}
+
+function sendFailMsg
+{
+failMsg="SVN Server is not available; svnUpdateRelease has timed out after waiting 2 hours."
+mail -s "SVN Server Needs Attention" $svnAdminMail <<EOF
+$failMsg
+EOF
+}
+
+function test_server
+{
+  typeset -i COUNT
+  COUNT=0
+  cd $1
+  until [[ -n $SERVER_UP || $COUNT -gt 24 ]]
+  do
+    $SVN info 2>&1 >/dev/null  
+    if [[ $? = 0 ]]
+    then
+      SERVER_UP=true
+    else
+      date
+      sleep 300
+      print "$(date): Waiting for SVN server" >> $BUILDLOG
+      COUNT=$COUNT+1
+    fi
+  done
+  if [[ $COUNT -gt 24 ]]
+  then
+    sendFailMsg
+    svnFailMsg="SVN Server is not available; svnUpdateRelease has timed out after waiting 2 hours."
+    goodbye 1 "\n$svnFailMsg"
+  fi
+}
+
+function get_revID_WC
+{
+  #
+  # Purpose: Get the SVN revision ID associated with the SVN WC
+  #
+  print "\nRetrieving SVN Revision ID from SVN WC..." >> $BUILDLOG
+
+  cd $BUILDDIR
+  revID_WC=$($SVN info | grep "Revision:" | cut -f2 -d" ")
+  cd - 2>/dev/null >/dev/null
+
+  print "REVID WC: $revID_WC" >> $BUILDLOG
+}
+
+function get_revID_URL
+{
+  #
+  # Purpose: Get the SVN revision ID on the SVN URL associated with the SVN WC
+  #
+  print "\nRetrieving SVN Revision ID from SVN trunk..." >> $BUILDLOG
+
+  cd $BUILDDIR
+  svn_URL=$($SVN info | grep "URL:" | cut -f2 -d" ") 
+  revID_URL=$($SVN info $svn_URL | grep "Revision:" | cut -f2 -d" ")
+  cd - 2>/dev/null >/dev/null
+
+  print "REVID URL: $revID_URL" >> $BUILDLOG
+}
+
+function check_svnWC
+{
+  #
+  # Purpose: Ensure that BUILDDIR is an SVN WC
+  #
+  myrc=0
+  print -n "\n$(date +"%a %D %T"): Checking if $BUILDDIR is an SVN WC..." >> $BUILDLOG
+
+  cd $BUILDDIR
+
+  # Get the entire repository root, then remove the trailing component name
+  WC_tmp=$($SVN info 2>&1)
+  if [[ $WC_tmp = "svn: '.' is not a working copy" ]]
+  then
+    myrc=8
+    print "it's not!\n" >> $BUILDLOG
+  else
+    print "it is!\n" >> $BUILDLOG
+  fi
+
+  cd - 2>/dev/null >/dev/null
+  return $myrc
+}
+
+function get_svnRepos
+{
+  #
+  # Purpose: Get the SVN repository associated with the SVN WC
+  #
+  print "\nRetrieving SVN Repository info for this SVN WC..." >> $BUILDLOG
+
+  cd $BUILDDIR
+
+  # Get the entire repository root, then remove the trailing component name
+  repos_tmp=$($SVN info | grep "Repository Root:" | cut -f3 -d" ")
+  SVN_REPOS=${repos_tmp%\/*}
+
+  cd - 2>/dev/null >/dev/null
+
+  print "Repository Name: $SVN_REPOS\n" >> $BUILDLOG
+}
+
+function notify_builder
+{
+  #
+  # Purpose: Send e-mail to the component builder when an actual SVN extraction/update
+  #          of new code occurs for an overnight build.
+  #
+  #          Set up for model* for now!
+  #
+  found_builder=FALSE
+
+  if [[ $PRODUCT = @(model|modelio|modelutil) ]]
+  then
+    # Get e-mail addresses of component builders
+    print "Command: $SVNCLIB/showComponent -r 14.1 -c $PRODUCT -a | grep BUILDER | cut -f2 -d\":\"" >> $BUILDLOG
+    builderList=$($SVNCLIB/showComponent -r 14.1 -c $PRODUCT -a | grep BUILDER | cut -f2 -d":")
+    if [[ -n $builderList ]]
+    then
+      found_builder=TRUE
+      print "Found builders: $builderList!" >> $BUILDLOG
+      msg_to=$builderList
+    fi
+
+    # Send e-mail to builder(s)
+    if [[ $found_builder = TRUE ]]
+    then
+      mail -s "$MSG_SUBJ" $msg_to <<EOF
+      $MSG_BODY
+EOF
+    else
+      print "\nUnable to find any builders for component $PRODUCT/$R_V in CM DB!\n" >> $BUILDLOG
+      mail -s "Missing Builders in CM DB for $PRODUCT/$R_V" amagnan@us.ibm.com
+    fi
+  fi
+}
+#======================================================================
+#                       MAIN Routine
+#======================================================================
+PRODMODE=FALSE
+OVERNIGHT=FALSE
+ALWAYSBUILD=FALSE
+AUTOAUTH=FALSE
+userID=`whoami`
+
+unset MYWC MYLOG
+# Parse args
+while getopts :e:hl:r:AOPTX OPTION
+do
+  case "$OPTION" in
+    e) MYWC=$OPTARG;;
+    h) help; goodbye 1;;
+    l) MYLOG=$OPTARG;;
+    r) RELEASE=$OPTARG;;
+    A) ALWAYSBUILD=TRUE;;
+    O) OVERNIGHT=TRUE;;
+    P) PRODMODE=TRUE;;
+    T) DEBUG=TRUE;;
+    X) NOEXTRACT=TRUE;;
+    :) help; goodbye 1 "\n*** Option -$OPTARG requires a parameter.";;
+    ?) help; goodbye 1 "\n*** Option -$OPTARG is not recognized.";;
+  esac
+done
+shift $(($OPTIND - 1))
+
+EXT_RLSE=$RELEASE
+
+# Error checking for parameters
+[[ -z $RELEASE ]] && { help; goodbye 1 "\n*** No component.release specified."; }
+[[ -z $NAME ]] && USERNAME=
+
+if [[ -n $DEBUG ]]
+ then
+  print "\nDo you want to trace the script? [Yes: type y]: \c"
+  read REPLY
+  [[ -n $REPLY ]] && set -x
+fi
+
+SCRIPT=$$
+SHELL_NAME=${0##*/}
+
+maxerrcnt=0
+
+# ----------------------------------------------------------------------
+# Get the hour based on 24-hour time
+# If it is before after 6pm, use tomorrow's date for the log file
+# ----------------------------------------------------------------------
+# The normal setting for TZ in Fishkill is EST5EDT (GMT+5 and DST),
+# telling the system we are 5 hours behind Greenwich, which is the time
+# it is physically keeping. Pretend we are in Middle Europe, where
+# the new day begins 6 pm our time.
+
+# Variables:
+# ----------
+# OUTPUT:
+# ADOW         =  adjusted day of week (next day if after 1800 hours)
+# DATE         =  current date (adjusted ahead if after 1800 hours)
+# DOW          =  day of week
+# HOUR         =  current hour
+# MONTH        =  current month
+#
+integer HOUR=$(date +%H)
+if [[ $HOUR -ge 18 ]]
+ then
+  typeset -l DATE=$(TZ=MET-1MEDT date +%b%d )
+  typeset -l MONTH=$(TZ=MET-1MEDT date +%b )
+  ADOW=$(TZ=MET-1MEDT date +%a)
+ else
+  typeset -l DATE=$(date +%b%d )
+  typeset -l MONTH=$(date +%b )
+  ADOW=$(date +%a)
+fi
+DOW=$(date +%a)
+
+# Use parse_rel function to get PRODUCT name and convert from zero-based release
+# version to dot version $R_V (e.g. 1401 -> 14.1)
+# parse_rel - parse cmvc release name, must be called with 
+# release name in $1
+
+parse_rel $RELEASE
+
+#===============================
+# Define EDA BUILD environment
+#===============================
+LEVEL=build
+
+if [[ -n $MYWC ]]
+then
+  BUILDDIR=$MYWC
+else
+  if [[ $PRODMODE = FALSE ]]
+  then
+    svnAdminMail="amagnan@us.ibm.com stadtlag@us.ibm.com"
+    BUILDDIR=/afs/eda/$LEVEL/svn_test/$PRODUCT/$R_V
+  else
+    svnAdminMail="amagnan@us.ibm.com stadtlag@us.ibm.com jwcolem@us.ibm.com"
+    BUILDDIR=/afs/eda/$LEVEL/$PRODUCT/$R_V
+  fi
+fi
+
+# Define program execution LOG files
+if [[ -n $MYLOG ]]
+then
+  BUILDLOGDIR=$MYLOG
+  BUILDLOG=${BUILDLOGDIR}/${DATE}.${PRODUCT}.${REL_VER}.svnUpdate_override
+else
+  BUILDLOGDIR=/afs/eda/u/$USER/logs/${MONTH}
+
+  # Create infrastructure, if needed, for default execution
+  [[ ! -d /afs/eda/u/$USER/logs/${MONTH} ]] && mkdir -p /afs/eda/u/$USER/logs/${MONTH}
+
+  if [[ $PRODMODE = FALSE ]]
+  then
+    BUILDLOG=${BUILDLOGDIR}/${DATE}.${PRODUCT}.${REL_VER}.svnUpdate_devmode
+  else
+    BUILDLOG=${BUILDLOGDIR}/${DATE}.${PRODUCT}.${REL_VER}.svnUpdate
+  fi
+fi
+
+# Handle AFS Tokens
+if [[ $OVERNIGHT = TRUE ]]
+then
+  # Get a token so the script can run via cron
+  PASS=$(cat /tmp/local/$USER)
+  /usr/afsws/bin/klog -pass $PASS
+  export KAUTH=afs
+  /usr/afsws/bin/tokens >> $BUILDLOG
+fi
+
+# Does the BUILDDIR directory exist?
+if [[ ! -d $BUILDDIR ]]
+then
+    print "ERROR: BUILDDIR directory, $BUILDDIR, does not exist!" >> $BUILDLOG
+    exit 8
+fi
+
+#==================================================================
+# Define infrastructure to support parallel build and build status
+#==================================================================
+LIBRARYDIR=$BUILDDIR/build
+# Create infrastructure, if needed, for default execution
+if [[ ! -d $LIBRARYDIR ]] 
+then
+  if [[ -z $MYWC ]]
+  then
+    mkdir -p $BUILDDIR/build
+  else
+    LIBRARYDIR=$BUILDDIR
+  fi
+fi    
+
+LIBETC=$LIBRARYDIR/etc
+# Create infrastructure, if needed, for default execution
+if [[ ! -d $LIBETC ]] 
+then
+  if [[ -z $MYWC ]]
+  then
+    mkdir -p $LIBRARYDIR/etc
+  else
+    LIBETC=$BUILDDIR
+  fi
+fi
+
+LOG=$LIBETC/svn.autoextract.log
+[[ ! -s $LOG ]] && print "# Activity log." > $LOG
+print "#" >> $LOG
+
+# Define constructs to control sequential compile/link execution
+LOCK_EXTRACT=$BUILDDIR/lock.extract
+NO_EXTRACT=$BUILDDIR/no.extract
+
+#--------------------------------------------
+# Define the SVN environment
+# BTV cell: /afs/btv/data/subversion/bin/svn
+# EDA cell: /afs/eda/tools/bin/svn
+#--------------------------------------------
+SVN="/afs/eda/tools/bin/svn"
+export SVN
+
+# Is BUILDDIR an SVN WC?
+check_svnWC
+rc=$?
+if (( rc != 0 ))
+then
+    print "ERROR: The SVN extraction target must be an SVN WC!" >> $BUILDLOG
+    print "       Target directory, $BUILDDIR, is not an SVN WC!\n" >> $BUILDLOG
+    exit 8
+fi
+
+# Get the name of the SVN repository for the SVN WC 
+get_svnRepos 
+
+# Select AFS path for enablement tool script execution
+if [[ $PRODMODE = FALSE ]]
+then
+  # Development flow (uses build/svn_test/{component}/14.1 dirs)
+  # Use the enablement tool development location
+  SVNCLIB=/afs/btv/data/edainfra/tools/enablement/dev/bin
+else
+  # Production flow (uses build/{component}/14.1 dirs)
+  # Use the enablement tool production location
+  SVNCLIB=/afs/btv/data/edainfra/tools/enablement/prod/bin
+fi
+
+# For now, only allow auto-authentication for OVERNIGHT extractions and for
+# select components that we know have the proper infrastructure setup.  
+if [[ $PRODUCT = @(model|modelio|modelutil|edautils|ess) && $OVERNIGHT = TRUE ]]
+then
+  AUTOAUTH=TRUE
+fi
+
+if [[ $AUTOAUTH = TRUE ]]
+then
+  print "\nPerforming auto-authentication for $PRODUCT." >> $BUILDLOG
+  funcPW=`cat /tmp/local/$USER.funcid`
+  cd $BUILDDIR
+
+  SVNURL=$($SVN info | grep "URL:" | cut -f2 -d" ")
+  export SVNURL
+  authResults=$(/usr/bin/expect $SVNCLIB/svn_auth_user.exp $funcPW 2>&1)
+  print "Auto-authenticate results:" >> $BUILDLOG
+  print "$authResults" >> $BUILDLOG
+
+  # Was authentication attempted?
+  grep "Authentication realm:" $BUILDLOG
+  rc=$?
+  if (( rc == 0 ))
+  then
+    print "SVN authentication challenge was detected." >> $BUILDLOG
+  else
+    print "SVN authentication challenge was NOT detected." >> $BUILDLOG
+  fi
+
+  cd - 2>/dev/null >/dev/null
+else
+  print "\nNo auto-authentication performed for $PRODUCT." >> $BUILDLOG
+fi
+
+#------------------------------
+# Generate DEVMODE Info
+#------------------------------
+if [[ $PRODMODE = FALSE ]]
+then
+  print "\nRunning in DEVELOPMENT MODE on component $PRODUCT...\n" >> $BUILDLOG
+  print "TEST ENVIRONMENT: ($BUILDDIR)." >> $BUILDLOG
+  [[ -z $MYWC && -z $MYLOG ]] && print "The CM DEV DB is being used!\n" >> $BUILDLOG
+else
+  print "\nRunning in PRODUCTION MODE on component $PRODUCT...\n" >> $BUILDLOG
+fi
+print "SVN             : $SVN" >> $BUILDLOG
+print "SVN_REPOS       : $SVN_REPOS" >> $BUILDLOG
+if [[ $AUTOAUTH = TRUE ]]
+then
+  print "SVNURL          : $SVNURL" >> $BUILDLOG
+fi
+print "BUILDDIR        : $BUILDDIR" >> $BUILDLOG
+print "BUILDLOG        : $BUILDLOG" >> $BUILDLOG
+print "LOG             : $LOG" >> $BUILDLOG
+print "SVNCLIB         : $SVNCLIB\n" >> $BUILDLOG
+
+if [[ $OVERNIGHT = TRUE ]]
+then
+  print "Running in OVERNIGHT Build Mode." >> $BUILDLOG
+else
+  print "Running in MANUAL Build Mode." >> $BUILDLOG
+fi
+
+if [[ $ALWAYSBUILD = TRUE ]]
+then
+  print "Running in ALWAYS BUILD Mode." >> $BUILDLOG
+else
+  print "Running in BUILD IF EXTRACTION Mode." >> $BUILDLOG
+fi
+
+print "\n$SHELL_NAME for $RELEASE starting at $(date +"%a %D %T") on $(hostname -s) by $userID" >> $BUILDLOG
+print "Today is $DOW, but the adjusted day of week is $ADOW" >> $BUILDLOG
+
+# Drop the LOCK_EXTRACT file in the build directory. 
+# This keeps the build (compile/link) scripts from starting until extract is completed.  
+touch $LOCK_EXTRACT
+
+# Remove the NO_EXTRACT file if it exists.
+[[ -a $NO_EXTRACT ]] && rm $NO_EXTRACT
+
+# set entire so we get the right goodbye()
+ENTIRE=TRUE
+
+#------------------------------------------------
+# Test the SVN server to see if it is available.
+#------------------------------------------------
+print "\n$(date):...Running test_server" >> $BUILDLOG
+print "# $(date):" >> $LOG
+print "test_server $BUILDDIR" >> $LOG
+print "$(date): test_server $BUILDDIR" >> $BUILDLOG
+if [[ $PRODMODE = FALSE ]]
+then
+  print "DEVMODE: test_server $BUILDDIR" >> $BUILDLOG
+  test_server $BUILDDIR
+else
+  test_server $BUILDDIR
+fi
+
+#-------------------------------------------------------------
+# Call the CM interface to check if the component and release 
+# are defined in the CM DB.
+#------------------------------------------------------------- 
+print "\n$(date):...Running validateRelComp" >> $BUILDLOG
+print "# $(date):" >> $LOG
+if [[ $PRODMODE = FALSE ]]
+then
+  cmdbCmd="$SVNCLIB/validateRelComp -c $PRODUCT -r $R_V -db DEV"
+  print "DEVMODE: $(date): $cmdbCmd" >> $BUILDLOG
+else
+  cmdbCmd="$SVNCLIB/validateRelComp -c $PRODUCT -r $R_V"
+  print "$(date): $cmdbCmd" >> $BUILDLOG
+fi
+print "$cmdbCmd" >> $LOG
+$cmdbCmd 2>&1 >> $BUILDLOG
+rc=$?
+if (( rc != 0 ))
+then
+  case $rc in
+    1) print "ERROR: Release not found in CM DB!\n" >> $BUILDLOG;;
+    2) print "ERROR: Component not found in CM DB!\n" >> $BUILDLOG;;
+    3) print "ERROR: Release and component not found in CM DB!\n" >> $BUILDLOG;;
+    *) print "ERROR: Unknown rc,\"$rc\", from script $SVNCLIB/validateCompRelease.\n" >> $BUILDLOG;;
+  esac
+  goodbye $rc
+fi
+
+#-------------------------------------------------
+# Look for read-only files and make them writable
+#-------------------------------------------------
+print "\n$(date):...Checking for files with read-only permissions" >> $BUILDLOG
+EXCLUDE="| egrep -v \"include|IMPORT\""
+curCmd="eval find $BUILDDIR -type f -perm 440 -print -o -type f -perm 444 -print $EXCLUDE | xargs chmod 644"
+print "$(date): $curCmd" >> $BUILDLOG
+print "$curCmd" >> $LOG
+$curCmd 2>&1 >> $BUILDLOG
+
+if [[ -n $NOEXTRACT ]]
+then
+  print "\n$(date):...NOEXTRACT is set true, no extract occurs" >> $BUILDLOG
+  rm $LOCK_EXTRACT
+  exit
+fi
+
+#------------------------------------------------------------------------------
+# Determine if we need an extraction by comparing the current revision number
+# in the SVN WC with the revision number in the SVN URL repository.
+#------------------------------------------------------------------------------
+revID_URL=""
+get_revID_URL
+if [[ $revID_URL = "" ]]
+then
+  print "ERROR: Could not get SVN revision number from SVN repository trunk!" >> $BUILDLOG
+  exit 8
+fi
+
+revID_WC=""
+get_revID_WC
+if [[ $revID_WC = "" ]]
+then
+  print "ERROR: Could not get SVN revision number from SVN WC!" >> $BUILDLOG
+  exit 8 
+fi
+
+if [[ $revID_URL != $revID_WC ]]
+then
+  print "\nINFO: There is a difference of revision numbers between the SVN repository (rev $revID_URL) and SVN WC (rev $revID_WC)!" >> $BUILDLOG
+  print "      This indicates that an SVN WC update is required.\n" >> $BUILDLOG
+  if [[ $revID_URL > $revID_WC ]]
+  then
+    #---------------------------------------------
+    # Update the EDA BUILD WC from the SVN trunk
+    #---------------------------------------------
+    
+    # Get into the WC directory
+    cd $BUILDDIR
+    print "Updating WC located at $BUILDDIR.\n" >> $BUILDLOG
+
+    # Perform the update
+    # @results contains the message back from the SVN update operation which
+    # would contain the revision number if there were file changes.
+    print "\n$(date):...Running svnUpdate" >> $BUILDLOG
+    print "# $(date):...Running svnUpdate" >> $LOG
+
+    if [[ $PRODMODE = FALSE ]]
+    then
+      svnCmd="$SVN update"
+      print "DEVMODE: $(date): $svnCmd\n" >> $BUILDLOG
+    else
+      svnCmd="$SVN update"
+      print "$(date): $svnCmd\n" >> $BUILDLOG
+    fi
+    print "$svnCmd" >> $LOG
+    $svnCmd 2>&1 >> $BUILDLOG
+    rc=$?
+    if (( rc != 0 ))
+    then
+      updateStatus=ERROR
+      updateMsg="Failure detected in svnUpdate script."
+      print "$updateStatus: $updateMsg\n" >> $BUILDLOG
+      goodbye $rc
+    else
+      updateStatus=OK
+      updateMsg="svnUpdate successful."
+      print "$updateStatus: $updateMsg\n" >> $BUILDLOG
+      # Get the revision number
+      revID_WC=""
+      get_revID_WC
+      if [[ $revID_WC != $revID_URL ]]
+      then
+	print "ERROR: SVN WC revision number indicates a problem with the SVN update!" >> $BUILDLOG
+      fi
+    fi
+
+    #==============================================================================
+    # Update CM DB for Update processing
+    # Only run if user used default BUILDDIR. 
+    # This is the defined EDA Release process.
+    #==============================================================================
+    if [[ -z $MYWC ]]
+    then
+      #----------------------------------------------------------------------
+      # Update the CM DB for the SVN "update" work
+      # Query the CM DB for changeset file info:
+      # Create LEVELHIST file for components:
+      #   dotlib, edautils, einstimer, ess, maise, netcalc, model, nutshell,
+      #   rice, vss  
+      # Create Overnight Extracted FileSet for use by Build Status Web page
+      # for components:
+      #   edautils, einstimer, ess, model, rice, vss   
+      #----------------------------------------------------------------------
+      print "INFO: Obtained SVN revision number $revID_WC for WC.\n" >> $BUILDLOG
+      if [[ $PRODMODE = FALSE ]]
+      then
+        LHFile="/afs/eda/build/svn_test/$PRODUCT/$R_V/LEVELHIST"
+        CSFile="/afs/eda/build/svn_test/$PRODUCT/$R_V/build/etc/extracted.files.curr.html"
+        dbSwitch="-db DEV"
+      else
+        LHFile="/afs/eda/build/$PRODUCT/$R_V/LEVELHIST"
+        CSFile="/afs/eda/build/$PRODUCT/$R_V/build/etc/extracted.files.curr.html"
+        dbSwitch="-db PROD"
+       fi
+
+      # We want to remove the existing CSFile if this is an overnight build (vs manual build)
+      if [[ $OVERNIGHT = TRUE ]]
+      then
+        if [[ -f $CSFile ]]
+        then
+          rm $CSFile
+        fi
+        print "$(date +"%a %D %T"): Starting overnight SVN extraction/update...<br>" > $CSFile
+      else
+        print "\n$(date +"%a %D %T"): Starting overnight SVN extraction/update...<br>" >> $CSFile
+      fi
+  
+      # Components that use simp_build for their build flow do not need a CSFile created.
+      case $PRODUCT in
+        dotlib|maise|netcalc|nutshell)  
+         # Create only an LHFile
+         wSwitch=""
+         ;;
+      *) # Default: Create both an LHFile and a CSFile
+         wSwitch="-w $CSFile"
+         ;;
+      esac
+      cmdbCmd="$SVNCLIB/modifyFuncUpdate -c $PRODUCT -r $R_V -s \"$updateStatus\" -t \"$updateMsg\" -u -v $revID_WC -l \"$LHFile\" $wSwitch $dbSwitch"
+      print "$(date): $cmdbCmd" >> $BUILDLOG
+      print "$(date): $cmdbCmd" >> $LOG
+      $cmdbCmd 2>&1 >> $BUILDLOG
+      rc=$?
+      if (( rc != 0 ))
+      then
+        case $rc in
+          1) # Error detected
+	     updateStatus=ERROR
+             updateMsg="Failure detected in updating of CM DB (for SVN update)."
+             print "ERROR: $updateMsg\n" >> $BUILDLOG
+             print "$(date +"%a %D %T"): ERROR: $updateMsg<br>" >> $CSFile
+             if [[ $OVERNIGHT = TRUE ]]
+             then
+               # Notify builder of ERROR condition
+               MSG_SUBJ="Overnight SVN Extraction Attempted for Component $PRODUCT/14.1"
+               MSG_BODY="ERROR encountered in overnight run. Please check the component log file ($BUILDLOG) for details."
+               notify_builder
+             fi
+             goodbye $rc;;
+	  2) # modifyFuncUpdate passes back an RC=2, if the SVN revision has already been updated in the
+             # EDA BUILD WC - this is a valid condition so change the RC=0 from svnUpdateRelease script.
+
+             print "\nINFO: The BUILD area has already been updated with this revision, rev $revID_WC!" >> $BUILDLOG
+
+             # Use the NO EXTRACT file to tell the build flow that this revision has already been extracted and
+	     # 'build on demand' will give up in build script.
+             # Also do not run the genLevelHist script since should already contain this revision's entries.
+	
+	     print "INFO: No extraction/update was needed, creating a no.extract file for use by SVN build flow.\n" >> $BUILDLOG
+	     touch $NO_EXTRACT
+
+             # Optionally, allow builds to run even if no extraction has occurred.
+	     if [[ $ALWAYSBUILD = TRUE ]]
+             then
+	       print "INFO: No extraction/update was needed, but user wants builds to run anyway." >> $BUILDLOG
+               print "INFO: Removing lock.extract file.\n" >> $BUILDLOG
+               rm $LOCK_EXTRACT
+             fi
+             print "$(date +"%a %D %T"): No new SVN revisions to extract/update.<br>" >> $CSFile
+             goodbye 0;;
+	  *) print "ERROR: Unknown failure detected in modifyFuncUpdate script (for svnUpdate) (rc = $rc).\n" >> $BUILDLOG
+             print "$(date +"%a %D %T"): ERROR: Unknown failure detected in modifyFuncUpdate script (for svnUpdate) (rc = $rc).<br>" >> $CSFile
+            if [[ $OVERNIGHT = TRUE ]]
+            then
+              # Notify builder of ERROR condition
+              MSG_SUBJ="Overnight SVN Extraction Attempted for Component $PRODUCT/14.1"
+              MSG_BODY="ERROR encountered in overnight run. Please check the component log file ($BUILDLOG) for details."
+              notify_builder
+            fi
+            goodbye $rc;;
+        esac
+      else
+        updateStatus=OK
+        updateMsg="CM DB updated successfully for revision $revID_WC."
+        print "INFO: $updateMsg\n" >> $BUILDLOG
+        print "$(date +"%a %D %T"): Completed successfully.<br>" >> $CSFile
+ 
+        # Give the green light for the build scripts
+        print "INFO: Removing lock.extract file\n" >> $BUILDLOG
+        rm $LOCK_EXTRACT
+
+        # Notify builder of successful SVN update
+        if [[ $OVERNIGHT = TRUE ]]
+        then
+          MSG_SUBJ="Overnight SVN Extraction Successful for Component $PRODUCT/14.1"
+          MSG_BODY="Please check the component log file ($BUILDLOG) for details."
+          notify_builder
+        fi
+      fi # else for rc
+    else
+      print "WARN: CM DB update was not performed because AFS ID $USER extracted code outside the required EDA Release location." >> $BUILDLOG
+      print "INFO: For the extracted code to be released, rerun this script without the -e switch !!\n" >> $BUILDLOG
+    fi
+  else  
+    # [[ $revID_URL < $revID_WC ]]
+    print "\nERROR: Revision number in SVN repository (rev $revID_URL) is a lower number than the number in the SVN WC (rev $revID_WC) !!" >> $BUILDLOG
+    print "ERROR: This indicates a problem with the SVN WC !!" >> $BUILDLOG
+  fi
+else  
+  # [[ $revID_URL = $revID_WC ]]
+  print "\nINFO: The revision numbers are the same between the SVN repository (rev $revID_URL) and the SVN WC (rev $revID_WC)." >> $BUILDLOG
+  print "INFO: No extraction/update was needed, creating a no.extract file for use by SVN parallel build flow." >> $BUILDLOG
+  print "INFO: Also, deleting the lock.extract file.\n" >> $BUILDLOG
+  rm $LOCK_EXTRACT
+  touch $NO_EXTRACT
+fi
+
+# All Done - success if made it to this point!
+goodbye

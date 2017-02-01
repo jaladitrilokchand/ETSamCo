@@ -1,0 +1,331 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: checkXlcVersion
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#    DATE: 01/07/2013
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 01/07/2013 EH  Initial coding.
+# 01/14/2013 EH  Added component owner email address to output.
+# 01/16/2013 EH  Fixed bug that prevented some components with "version not 
+#                found" occurrences from appearing in non conforming report.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+
+#
+# Global variables
+#
+my $BIN       = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $GET_COMP  = "$BIN/getComponents ";
+my $toolKit   = "14.1.build";
+my $level     = "prod";
+#my $outputDir = "/afs/eda/u/ehull/tau/checkXlc";  # DEBUG
+my $outputDir  = "/afs/eda/data/edainfra/checks/html";
+my $detailOutputFile      = "checkXlc-AllComps.html";
+my $failSummaryOutputFile = "checkXlc-NonConformingComps.html";
+
+
+# Program name
+my $appName = "checkXlcVersion";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help             = "";
+my @results          = ();
+my $command          = "";
+my $msg              = "";
+my @libFiles         = ();
+my $file             = "";
+my $tgtDir           = "";
+my $rc               = 8;
+my $verString        = "";
+my $notCompliantFlag = "";
+my $fileWorstCase    = "*";
+my $verStringRpt     = "";
+my @fileSummary      = ();
+my @compSummary      = ();
+my $fileHeading      = "";
+my $compWorstCase    = " ";
+my $compOwner        = "";
+my $compHeading      = "";
+my $component        = "";
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+processArgs();
+
+# Get a list of components to be checked
+my @components = ();
+if ($component) {
+  push(@components, $component);
+}
+else {
+  $command = $GET_COMP . " -t $toolKit -q ";
+  chomp(@results = `$command`);
+  @components = split(/,/, $results[0]);
+}
+
+# Create output directory if it does not exist
+if (! -d "$outputDir") {
+  `mkdir -p $outputDir`;
+}
+
+# Get the current datetime
+chomp(my $logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+
+# Open a file handle for the all components report
+open(DETAIL_OUTPUT, ">$outputDir/$detailOutputFile") || die "open $outputDir/$detailOutputFile failed";
+print DETAIL_OUTPUT "<pre>\n";
+print DETAIL_OUTPUT "IBM xlC versions found in /afs/eda/prod/&lt;component&gt;/14.1/.lib-aix64/ library files.\n\n";
+print DETAIL_OUTPUT "All components are listed.\n\n";
+print DETAIL_OUTPUT "* in column 1 indicates xlC 11.1.0.11 was not used.\n\n";
+print DETAIL_OUTPUT "+ in column 1 indicates a compiler predating xlC was used.\n\n";
+print DETAIL_OUTPUT "Updated $logDate\n\n";
+
+# Open a file handle for the failed components report
+open(FAIL_SUMMARY_OUTPUT, ">$outputDir/$failSummaryOutputFile") || die "open $outputDir/$failSummaryOutputFile failed";
+print FAIL_SUMMARY_OUTPUT "<pre>\n";
+print FAIL_SUMMARY_OUTPUT "IBM xlC versions found in /afs/eda/prod/&lt;component&gt;/14.1/.lib-aix64/ library files.\n\n";
+print FAIL_SUMMARY_OUTPUT "Only components with at least one exception to the requirement to use xlC 11.1.0.11 are listed.\n\n";
+print FAIL_SUMMARY_OUTPUT "* in column 1 indicates xlC 11.1.0.11 was not used.\n\n";
+print FAIL_SUMMARY_OUTPUT "+ in column 1 indicates a compiler predating xlC was used.\n\n";
+print FAIL_SUMMARY_OUTPUT "Updated $logDate\n\n";
+
+#---------------------------------------------------------------------------
+# Locate each .a file and check xlC version(s) used
+#---------------------------------------------------------------------------
+foreach $component (@components) {
+
+  $compWorstCase = " ";
+  @compSummary = ();
+
+
+  # Ignore test components
+  next if $component =~ /etreetest/;
+  next if $component =~ /svn_test/;
+  next if $component =~ /svntest/;
+  
+  $compOwner = GetOwner($component);
+
+  $tgtDir = "/afs/eda/$level/$component/14.1/.lib-aix64";
+  if (-d $tgtDir) {
+    chdir("$tgtDir");
+  }
+  else {
+    $compHeading = sprintf "%1s Component %-12s    Owner email: %-25s", $compWorstCase, $component, $compOwner;
+    print DETAIL_OUTPUT "\n--------------------------------------------------------------------------------\n";
+    print DETAIL_OUTPUT "$compHeading\n";
+    print DETAIL_OUTPUT "--------------------------------------------------------------------------------\n\n";
+    print DETAIL_OUTPUT "  WARNING: Directory $tgtDir does not exist\n";
+    next;
+  }
+  
+  # Command to list the dot a files in the current directory
+  $command = "ls -1a *.a 2>/dev/null";
+  
+  # Run the command
+  chomp(@libFiles = `$command`);
+  $rc = $? >> 8;
+
+  if ($rc != 0) {
+    $compHeading = sprintf "%1s Component %-12s    Owner email: %-25s", $compWorstCase, $component, $compOwner;
+    print DETAIL_OUTPUT "\n--------------------------------------------------------------------------------\n";
+    print DETAIL_OUTPUT "$compHeading\n";
+    print DETAIL_OUTPUT "--------------------------------------------------------------------------------\n\n";
+    print DETAIL_OUTPUT "  WARNING: There were no .a files found in $tgtDir\n";
+    next;   
+  }  
+  
+  foreach $file (@libFiles) {
+  
+    @fileSummary = ();
+    $fileWorstCase = "";
+  
+    # Skip debug files
+    next if $file =~ /-g\./;
+
+    # Grep the output of the strings command for xlC entries
+    chomp(@results = `strings $file |grep -E \"IBM XL C| VisualAge | VisualAge\\(R\\) |C for AIX Compiler\" |sort -u`);
+   
+    # Were any IBM XL C versions found?
+    if (scalar(@results) == 0) {
+      $notCompliantFlag = "";
+      $fileWorstCase = "";
+      #$compWorstCase = "";
+      $compWorstCase = "" if (($compWorstCase ne "*") && ($compWorstCase ne "+")); # Fix for 20130116 bug
+      $verString = "IBM XL C version not found";
+      $verStringRpt = sprintf "%1s   %-40s", $notCompliantFlag, $verString;
+      push (@fileSummary, $verStringRpt);
+    }
+    else {
+    
+      # Check each version string for presence of "Version 11.1.0.11"
+      foreach $verString (@results) {
+      
+        if ($verString =~ /Version 11.1.0.11$/) {
+          $notCompliantFlag = "";
+        }
+        elsif (($verString =~ / VisualAge/) || ($verString =~ /C for AIX Compiler/)) {
+          $notCompliantFlag = "+";
+          $fileWorstCase = "+"  if $fileWorstCase ne "*";
+          $compWorstCase = "+"  if $compWorstCase ne "*";
+        }
+        else {
+          $notCompliantFlag = "*";
+          $fileWorstCase = "*";
+          $compWorstCase = "*";
+        }
+
+        $verStringRpt = sprintf "%1s   %-40s", $notCompliantFlag, $verString;
+        push (@fileSummary, $verStringRpt);
+      }
+    }
+    
+    # Add results for this dot a file to a component summary
+    #
+    # Write a heading that identifies the current library file
+    $fileHeading = sprintf "%1s %-40s\n", $fileWorstCase, "$component/14.1/.lib-aix64/$file";
+    push (@compSummary, "$fileHeading");
+    push (@compSummary, join("\n", @fileSummary, "\n"));
+  }
+  
+  # Output results for current component to detail report
+  $compHeading = sprintf "%1s Component %-12s    Owner email: %-25s", $compWorstCase, $component, $compOwner;
+  print DETAIL_OUTPUT "\n--------------------------------------------------------------------------------\n";
+  print DETAIL_OUTPUT "$compHeading\n";
+  print DETAIL_OUTPUT "--------------------------------------------------------------------------------\n\n";
+  print DETAIL_OUTPUT @compSummary;
+  
+  # Create fails only report
+  if (($compWorstCase eq "*") || ($compWorstCase eq "+")) {
+    $compHeading = sprintf "%1s Component %-12s    Owner email: %-25s", $compWorstCase, $component, $compOwner;
+    print FAIL_SUMMARY_OUTPUT "\n--------------------------------------------------------------------------------\n";
+    print FAIL_SUMMARY_OUTPUT "$compHeading\n";
+    print FAIL_SUMMARY_OUTPUT "--------------------------------------------------------------------------------\n\n";
+    print FAIL_SUMMARY_OUTPUT @compSummary;
+  }
+}
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Searches all components in the /afs/eda/$level repository for .a files in 
+.lib-aix64 directories. Then the strings command is used to identitify which 
+version of xlC was used to compile the library file. An indicator is set if any 
+IBM xlC version other than 11.1.0.11 is listed.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  -h      Application help (optional)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+}
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('component|c=s'  => \$component,
+              'help|h|?'   => \$help
+              ) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetOwner()
+# Purpose: Look up the Component owner from the database
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetOwner {
+
+  my ($component) = @_;
+
+  chomp(my $showComponentResult = `$BIN/showComponent -r 14.1 -c $component |grep "^TEAM LEAD"`);
+  my $owner = (split(/\:/, $showComponentResult)) [1];
+
+  # Remove leading and trailing spaces
+  $owner =~ s/(^\s+|\s+$)//g;
+
+  return $owner;
+
+}

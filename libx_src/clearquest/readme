@@ -1,0 +1,7 @@
+When running any of the services, you need to have 
+"/opt/rational/common/stpwvcm.jar" in your classpath 
+since the Team API is expecting it to be there. 
+
+The libx/rational/stpwvcm.jar is only for compilation purpose.
+
+  

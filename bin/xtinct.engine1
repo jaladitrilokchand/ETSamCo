@@ -1,0 +1,396 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: xtinct.engine1
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 12/11/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 12/11/2012 GFS  Initial coding.
+# 12/17/2012 GFS  Added logging the advance_to_xtinct event.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TKutils;
+
+# Global variables
+my $BIN_DIR  = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $SVN      = "/afs/eda/tools/bin/svn";
+my $logDir   = "/afs/eda/data/edainfra/logs";
+my $AUTH_ID  = "cmlib";
+my $OK       = 0;
+my $ERROR    = 8;
+
+# Program variables
+my $appName = "xtinct.engine1";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dryRun          = 0;
+my $toolKit         = "";
+my $component       = "";
+my $dbMode          = ""; # default is prod if empty (GS)
+my $logFile         = "";
+my $cmdLineArgs     = "";
+my $sourceLevel     = "tkb";
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc  = $ERROR;
+my $startDir = $ENV{"PWD"};
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleDIE(); };
+
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+if ($verbose) {
+  print "Tool Kit : $toolKit\n";
+  print "Component: $component\n";
+  print "Dry run  : $dryRun\n";
+}
+
+
+# Verify the user is authorized to execute
+if (! TKutils::IsAuthorized($AUTH_ID, $dryRun)) {
+  exit $ERROR;
+}
+
+
+# Log AGTS start event for this TK/component <SUPPRESS FOR DRY RUN>
+LogComponentEvent("XTINCT_START", $logFile, $sourceLevel);
+
+
+# Enable logging
+$rc = SetupLogging();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to complete $appName initalization",
+	    $ERROR);
+}
+
+
+# Update symlinks to $sourceLevel and xtinct TKs
+$rc = UpdateSymlink($toolKit, "xtinct", "create");
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to create new symlinks", $ERROR);
+}
+
+
+# Update the stage for this TK/component
+$rc = SetStageName($toolKit, "XTINCT");
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to set new TK's stage name to XTINCT/TK$toolKit",
+	    $ERROR);
+}
+
+
+# Log the promote event
+# (this will set the revisions for the new xtinct/tk14.1.x location)
+LogComponentEvent("ADVANCED_TO_XTINCT", $logFile, $sourceLevel);
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to log advanced to xtinct event", $ERROR);
+}
+
+chomp(my $logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+CleanExit("\n$logDate $appName complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n",
+	    $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  CleanExit("\n[$appName] Caught an unexpected die - exiting\n",
+	    $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+
+  # Log XTINCT event
+  my $event = "XTINCT_SUCCESS";
+  $event = "XTINCT_FAIL" if ($rc != $OK);
+  LogComponentEvent($event, $logFile, $sourceLevel);
+
+  close(STDOUT);
+
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script manages the symbolic links migrate the given component from TKB
+to the new (first) xtinct TK location.
+";
+
+  my $syntax = "
+SYNTAX:
+$appName <-t tool_kit> <-c component> [-dryrun] [-db dbmode] [-h] [-y]
+
+RETURN CODES:
+0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+tool_kit  = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+component = name of component (e.g., einstimer)
+-dryrun     (optional) Dry run ... disable command execution
+dbmode    = database mode (e.g., prod or dev) default: prod
+-h          (optional) application help
+-y          (optional) Verbose (print the invocation of each command)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  my $rc = $OK;
+  my $command = "";
+
+  # Capture command line arguments for logging
+  $cmdLineArgs = join(' ', @ARGV);
+
+  # Parse command line arguments
+  GetOptions('tk|t=s'        => \$toolKit,
+	     'component|c=s' => \$component,
+	     'dryrun'        => \$dryRun,
+	     'db=s'          => \$dbMode,
+	     'y'             => \$verbose,
+	     'help|h|?'      => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) must be specified\n";
+    return $ERROR;
+  }
+  if (! $component) {
+    print "ERROR: component (-c) must be specified\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateSymlink()
+# Purpose: Update symlinks to tk14.1.x repository
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub UpdateSymlink {
+
+  my ($tgtToolKit, $tgtLevel, $action) = @_;
+
+  print "Updating($action) symlink from $tgtLevel/tk$toolKit/$component/14.1" .
+        " to $tgtToolKit/$component/14.1\n";
+
+  my $command = "$BIN_DIR/update_lc_complink";
+  $command .= " -t $tgtToolKit";
+  $command .= " -c $component";
+  $command .= " -s $tgtLevel";
+  $command .= " -O $action";
+
+  # Run the command
+  my $rc = 0;
+  my @results;
+  $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print "ERROR: Unable to update symlinks ...\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetupLogging()
+# Purpose: Enable logging
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SetupLogging {
+
+  # Create logDir if it does not already exist
+  $logDir .= "/$toolKit/xtinct";
+  mkpath($logDir) if (! -d $logDir);
+
+  # Open log file for script messages
+  chomp(my $logDate = `date +%C%y%m%d\_%H%M%S`);
+  $logFile = "$logDir/$appName" . "_" . $component . "_" . $logDate . ".log";
+
+  # Open a filehandle for both stdout and a log file
+  open (STDOUT, "| tee -a $logFile") ||
+    die "ERROR: unable to open log file $logFile\n";
+
+  chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  chomp(my $machine = `hostname`);
+  print "\n$dateTime started on $machine invoked $appName $cmdLineArgs\n\n";
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LogComponentEvent($event, $message, $location)
+# Purpose: Log a tool kit/component specific event and location
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub LogComponentEvent {
+
+  my ($event, $message, $location) = @_;
+
+  # Construct the command
+  my $command = "$BIN_DIR/svnLog";
+  $command .= " -c $component";
+  $command .= " -e $event";
+  $command .= " -l $location";
+  $command .= " -m \"$message\"" if ($message);
+  $command .= " -db $dbMode" if ($dbMode);
+
+  my $rc = 0;
+  my @results;
+  $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+  if ($rc > 0) {
+    print "ERROR: Unable to log component event $event\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetStageName()
+# Purpose: Update TK component stage
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub SetStageName {
+
+  my ($tkVersion, $stageName) = @_;
+
+  print "Updating TK $tkVersion $component stage to \"$stageName\" " .
+        "in ETREE DB\n";
+
+  # Construct the command
+  my $command = "$BIN_DIR/updateTkComp";
+  $command .= " -t $tkVersion";
+  $command .= " -s $stageName";
+  $command .= " -c $component";
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+  if ($rc > 0) {
+    print "ERROR: Unable to update TK $tkVersion $component stage " .
+      "to \"$stageName\" in ETREE DB\n";
+    print @results;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}

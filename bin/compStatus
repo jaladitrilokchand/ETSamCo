@@ -1,0 +1,100 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: compStatus
+#  SYNTAX: Run with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 05/03/2010
+#
+#  INPUTS: See application help message.
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: n/a
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# Show Component status
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 05/17/2010 GS  Initial coding.
+# 06/20/1011 GS  Updated to use EdaJavaEnv.
+# 01/18/2013 GS  Updated to use RealBin.
+# =============================================================================
+
+use warnings;
+use strict;
+
+use Getopt::Long;
+Getopt::Long::Configure ("pass_through");
+
+use English;
+use Cwd;
+use File::Basename;
+use FindBin qw($RealBin);
+
+use lib "$RealBin/../libperl";
+use EdaJavaEnv;
+
+
+# Application constants.
+my $CLASS_NAME    = "ComponentShowStatus";
+my $CLASS_SUB_DIR = "etree";
+my $OK = 0;
+my $ERROR = 8;
+
+my @tokens = split("/", $RealBin);
+pop @tokens;
+my $rootDir = join("/", @tokens) . "/";  
+
+
+# Get application data.
+my $wrapperName = basename($PROGRAM_NAME);
+
+# Get the correct java executable
+my $javaExec = EdaJavaEnv::getJavaExec();
+
+# Set the classpath
+my $classpath = EdaJavaEnv::startClassPath($javaExec);
+$classpath .= ":" . EdaJavaEnv::getEtreeJars($rootDir);
+$classpath .= ":" . EdaJavaEnv::getUtilJars($rootDir);
+$classpath .= ":" . $rootDir . "java/classes"; 
+
+# Get the application args
+my $appArgs = EdaJavaEnv::getArgs(@ARGV);
+
+# Prepare to handle system/user interruptions.
+$SIG{'INT'} = sub { handleInterruption("INT"); };
+$SIG{'QUIT'} = sub { handleInterruption("QUIT"); };
+$SIG{__DIE__}  = sub { handleInterruption("DIE"); };
+
+
+# Construct the command to execute
+my $javaCall = "$javaExec -classpath $classpath ";
+$javaCall .= "com.ibm.stg.eda.app.$CLASS_SUB_DIR.$CLASS_NAME";
+$javaCall .= " $appArgs";
+
+
+# Execute the application.
+#print("Calling     : $javaCall\n");
+#print("-------------------------------------------------\n");
+
+my $rc = system $javaCall;
+
+$rc = $? >> 8;
+exit $rc;
+
+
+# ------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle user/system interruptions.
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub handleInterruption {
+  my ($type) = @_;
+  print("\n[$wrapperName] Caught $type interruption - exiting neatly.\n");
+  exit $ERROR;
+}

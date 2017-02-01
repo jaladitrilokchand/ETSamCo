@@ -1,0 +1,177 @@
+
+****************************
+Wed Jun  9 10:56:10 EDT 2010
+****************************
+
+8  (?)  hardcode component and release
+102  tcl/test_a.tcl  delta  stadtlag@us.ibm.com
+
+9  (?)  hardcode component and release
+103  tcl/test_a.tcl  delta  stadtlag@us.ibm.com
+
+10  (?)  Some new abstract here ...
+104  tcl/test_a.tcl  delta  stadtlag@us.ibm.com
+
+
+
+****************************
+Fri Jun 11 16:05:29 EDT 2010
+****************************
+
+23  (?)  Some new abstract here ...
+106  tcl/test_a.tcl  delta  stadtlag@us.ibm.com
+
+
+<br>
+****************************<br>
+Mon Jul 26 17:26:16 EDT 2010<br>
+****************************<br>
+<br>
+MDCMS????????: Another update ...<br>
+DB_ID: 34<br>
+111  dir/file_d.C  D  stadtlag@us.ibm.com<br>
+111  dir/file_u.C  U  stadtlag@us.ibm.com<br>
+111  dir/file_a.C  A  stadtlag@us.ibm.com<br>
+<br>
+MDCMS????????: Another update ...
+and some more text here<br>
+DB_ID: 35<br>
+112  dir/file_d.C  D  stadtlag@us.ibm.com<br>
+112  dir/file_u.C  U  stadtlag@us.ibm.com<br>
+112  dir/file_a.C  A  stadtlag@us.ibm.com<br>
+<br>
+
+<br>
+****************************<br>
+Mon Jul 26 17:45:19 EDT 2010<br>
+****************************<br>
+<br>
+MDCMS????????: Another update ...<br>
+DB_ID: 34<br>
+111  dir/file_d.C  D  stadtlag@us.ibm.com<br>
+111  dir/file_u.C  U  stadtlag@us.ibm.com<br>
+111  dir/file_a.C  A  stadtlag@us.ibm.com<br>
+<br>
+MDCMS????????: Another update ...
+and some more text here<br>
+DB_ID: 35<br>
+112  dir/file_d.C  D  stadtlag@us.ibm.com<br>
+112  dir/file_u.C  U  stadtlag@us.ibm.com<br>
+112  dir/file_a.C  A  stadtlag@us.ibm.com<br>
+<br>
+
+<br>
+****************************<br>
+Mon Jul 26 17:51:25 EDT 2010<br>
+****************************<br>
+<br>
+MDCMS????????: Another update ...<br>
+DB_ID: 34<br>
+111  dir/file_d.C  D  stadtlag@us.ibm.com<br>
+111  dir/file_u.C  U  stadtlag@us.ibm.com<br>
+111  dir/file_a.C  A  stadtlag@us.ibm.com<br>
+<br>
+MDCMS????????: Another update ...
+and some more text here<br>
+DB_ID: 35<br>
+112  dir/file_d.C  D  stadtlag@us.ibm.com<br>
+112  dir/file_u.C  U  stadtlag@us.ibm.com<br>
+112  dir/file_a.C  A  stadtlag@us.ibm.com<br>
+<br>
+
+<br>
+****************************<br>
+Mon Jul 26 17:53:13 EDT 2010<br>
+****************************<br>
+<br>
+MDCMS????????: Another update ...
+and some more text here<br>
+DB_ID: 36<br>
+113  dir/file_d.C  D  stadtlag@us.ibm.com<br>
+113  dir/file_u.C  U  stadtlag@us.ibm.com<br>
+113  dir/file_a.C  A  stadtlag@us.ibm.com<br>
+<br>
+
+<br>
+****************************<br>
+Mon Jul 26 18:04:05 EDT 2010<br>
+****************************<br>
+<br>
+MDCMS????????: Another update ...
+and some more text here<br>
+DB_ID: 37<br>
+114  dir/file_d.C  D  stadtlag@us.ibm.com<br>
+114  dir/file_u.C  U  stadtlag@us.ibm.com<br>
+114  dir/file_a.C  A  stadtlag@us.ibm.com<br>
+<br>
+
+<br>
+****************************<br>
+Thu Aug  5 09:08:55 EDT 2010<br>
+****************************<br>
+<br>
+MDCMS????????: Another update ...
+and some more text here<br>
+DB_ID: 57<br>
+115  dir/file_d.C  D  stadtlag@us.ibm.com<br>
+115  dir/file_u.C  U  stadtlag@us.ibm.com<br>
+115  dir/file_a.C  A  stadtlag@us.ibm.com<br>
+<br>
+
+<br>
+****************************<br>
+Thu Aug  5 17:30:03 EDT 2010<br>
+****************************<br>
+<br>
+MDCMS????????: Another update ...
+and some more text here<br>
+DB_ID: 58<br>
+116  dir/file_d.C  D  stadtlag@us.ibm.com<br>
+116  dir/file_u.C  U  stadtlag@us.ibm.com<br>
+116  dir/file_a.C  A  stadtlag@us.ibm.com<br>
+<br>
+MDCMS????????: Another update ...
+and some more text here<br>
+DB_ID: 59<br>
+117  dir/file_d.C  D  stadtlag@us.ibm.com<br>
+117  dir/file_u.C  U  stadtlag@us.ibm.com<br>
+117  dir/file_a.C  A  stadtlag@us.ibm.com<br>
+<br>
+
+<br>
+****************************<br>
+Mon Aug  9 14:55:39 EDT 2010<br>
+****************************<br>
+<br>
+MDCMS????????: Another update ...
+and some more text here<br>
+DB_ID: 60<br>
+118  dir/file_A.C  A  stadtlag@us.ibm.com<br>
+118  dir/file_D.C  D  stadtlag@us.ibm.com<br>
+118  dir/file_U.C  U  stadtlag@us.ibm.com<br>
+<br>
+
+<br>
+****************************<br>
+Wed Aug 11 09:56:54 EDT 2010<br>
+****************************<br>
+<br>
+MDCMS????????: Another update ... and some more text here<br>
+DB_ID: 61<br>
+119  dir/file_A.C  A  stadtlag@us.ibm.com<br>
+119  dir/file_D.C  D  stadtlag@us.ibm.com<br>
+119  dir/file_U.C  U  stadtlag@us.ibm.com<br>
+<br>
+
+<br>
+****************************<br>
+Wed Aug 11 10:05:01 EDT 2010<br>
+****************************<br>
+<br>
+MDCMS????????: 1234567890 1234567890 1234567890 1234567890 1234567890 and som ...<br>
+DB_ID: 62<br>
+120  dir/file_A.C  A  stadtlag@us.ibm.com<br>
+120  dir/file_D.C  D  stadtlag@us.ibm.com<br>
+120  dir/file_U.C  U  stadtlag@us.ibm.com<br>
+<br>
+

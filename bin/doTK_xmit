@@ -1,0 +1,636 @@
+#!/usr/bin/perl
+#
+#=============================================================================
+#
+#    FILE: doTK_xmit
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 11/22/2011
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+#- PURPOSE --------------------------------------------------------------------
+# See "printHelp" method.
+#-----------------------------------------------------------------------------
+#
+#
+#- CHANGE LOG -----------------------------------------------------------------
+# 11/12/2011 GS  Initial coding.
+# 12/22/2011 GS  Updated to mark submitted/released CR as complete.
+# 05/02/2012 GS  Updated to work with new improved AGTS process.
+# 08/09/2012 GS  Updated to support new 14.1.build TK in BDP.
+# 01/31/2013 GS  Added support for new XMIT_NOOP state.  Removed looking for
+#                new revisions in shipb vs tkb.
+#                Enhanced to support recompiles where developers may not have
+#                created CRs but updates need to be transmitted.
+#                Updated to use TKutils module.
+# 02/06/2013 GS  Updated to check the xmit status of a component so it will
+#                only process components once (unless they failed). Added
+#                support for new XMIT_NOOP (noop) status.
+# 07/16/2014 GS  Updated to work with the new non-SelfStor packaging/install
+#                process (14.1.8 and beyond)
+#=============================================================================
+
+use warnings;
+use strict;
+use File::stat;
+use Sys::Hostname;
+use Cwd;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use File::Copy;
+
+# Define custom perl libs path and modules
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use IcofFile;
+use TKutils;
+
+#
+# Global variables
+#
+my $BUILD   = "/afs/eda/build/";
+
+
+# Program name
+my $appName = "doTK_xmit";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $toolKit    = "";
+my $debug      = 0;
+my $help       = "";
+my $verbose    = 0;
+my $component  = "";
+my $release    = "";
+my $shipbRev   = 0;
+my $tkbRev     = 0;
+my $recompile  = 0;
+my $crDescFile = "";
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+# Set the location and name of createFuncUpdate application
+my $EDA_INFRA = "/afs/eda/data/edainfra";
+my $DEV_LOGS = "$EDA_INFRA/tools/enablement/dev/logs";
+my $BIN = "$EDA_INFRA/tools/enablement/prod/bin";
+my $DEV_BIN = "$EDA_INFRA/tools/enablement/dev/bin";
+my $XMIT = "$DEV_BIN/pkg.create";
+my $GET_COMPS = "$BIN/getComponents";
+my $CR_SHOW = "$BIN/changeReqShowByStatus";
+my $CR_UPDATE = "$BIN/changeReqUpdateAll";
+my $CR_COMPLETE = "$BIN/cr.complete";
+my $GET_REVS = "$BIN/getRevisionsTk";
+my $CREATE_CR = "$BIN/cr.create";
+my $OVERRIDE_DIR = "$EDA_INFRA/xmit_overrides";
+my $startDir = $ENV{"PWD"};
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# To exit cleanly from a Ctrl+C or an unexpected die()
+$SIG{'INT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{'QUIT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{__DIE__}  = sub { handleInterruption(); };
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Verify data needed to support recompiles
+my @xmitExcludes = ();
+exit $ERROR if (VerifyRecompile() != $OK);
+
+# Verify user is running as svnlib
+if (! TKutils::IsAuthorized("svnlib", $debug)) {
+  exit #ERROR;
+}
+
+# Create a list of DELIVERED components
+my @delComponents = SetComponents($toolKit, $component);
+
+# Transmit components that have successfully completed AGTS
+print "\n";
+print "Starting component xmits ... \n";
+print "-----------------------------\n";
+foreach $component (@delComponents) {
+
+  # Skip etree/svn test components
+  next if ($component =~ /^etree/);
+  next if ($component =~ /^svntest/);
+  print "\nProcessing component: $component\n";
+
+  # Get current XMIT status of this component
+  my $status = GetStatus($toolKit, $component);
+  if (($status eq "Pass") || ($status eq "noop")) {
+    print " - Already been xmitted - $status\n";
+    next;
+  }
+  if ($status eq "WIP") {
+    print " - xmit underway by another process - $status\n";
+    next;
+  }
+
+  # Log the xmit start event
+  LogComponentEvent($component, "XMIT_START", "Logged by doTK_xmit");
+
+  # Determine latest revision in shipb for this component
+  $shipbRev = SetRevision($component, "shipb");
+
+  # Update "open" Change Requests to complete
+  UpdateChangeReqs("14.1.build", $component, $shipbRev);
+  my $numChangeReqs = CountCompletedChangeReqs("14.1.build",
+					       $component, $shipbRev);
+
+  # Xmit this component
+  TransmitComponent($toolKit, $component, $numChangeReqs);
+
+}
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Transmit components that have completed AGTS.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-recompile] [-g] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit   Tool Kit [14.1.0, 14.1.1 ...].
+  component  (optional) Component to process
+  -recompile (optional) If components don't have CRs and are not in the
+                        exclude list then create a CR and transmit anyway.
+  -g         (optional) Debug mode [no actions taken]
+  -h         (optional) Application help
+  -y         (optional) Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tool_kit|t=s'    => \$toolKit,
+              'comp|c=s'        => \$component,
+              'debug|g'         => \$debug,
+              'recompile'       => \$recompile,
+              'verbose|y'       => \$verbose,
+              'help|h|?'        => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the required parameters.
+  my $msg = "";
+  if (! $toolKit) {
+    $msg = "ERROR: tool_kit (-t) is a required parameter\n";
+  }
+
+  # Set the release
+  $release = "1401" if ($toolKit =~ /^14.1/);
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateChangeReqs($toolKit, $component, $shipbRev)
+# Purpose: Updates open Change Requests for this TK and component to complete
+# RCs    : Number of CRs updated
+#------------------------------------------------------------------------------
+sub UpdateChangeReqs {
+
+  my ($tk, $comp, $rev) = @_;
+
+  print " [UpdateChangeReqs] ... $tk - $comp\n";
+
+  # Update each approved CR to complete
+  my $crCount = 0;
+
+  # Find the Change Requests for this state
+  my $command = "$CR_SHOW";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " -s APPROVED";
+  $command .= " -max $rev";
+
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  print "  Return code: $rc\n";
+  return 0 if ($rc == 2);
+
+  my $list = $results[0];
+  chomp $list;
+  my @crs = split(/;/, $list);
+  print "  Found " . scalar(@crs) . " APPROVED change requests ...\n";
+
+  # Update Change Requests to complete
+  my $cr = "";
+  foreach $cr (@crs) {
+    $crCount++;
+    $command = "$CR_UPDATE";
+    $command .= " -cr $cr";
+    $command .= " -s COMPLETE";
+
+    $rc = TKutils::RunCommand($command, \@results, $debug, $verbose);
+    print "  Return code: $rc\n" if ($verbose);;
+  }
+
+  return $crCount;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : TransmitComponent($component)
+# Purpose: Transmit this component
+# RCs    : none
+#------------------------------------------------------------------------------
+sub TransmitComponent {
+
+  my ($tk, $comp, $numCrs) = @_;
+  my $rc = $OK;
+  my $cr = "";
+  print " [TransmitComponent] ... $tk - $comp\n";
+
+  # If no new CRs ... do the one of the following
+  #  1) If not -recompile then run pkg.create -ctk (ignore CRs)
+  #  2) If -recompile and component in excludes list then run
+  #     pkg.create -ctk (ignore CRs)
+  #  3) If -recompile and component not in excludes list the create new
+  #     change request and run pkg.create -z <CR>
+  print "  CR count: $numCrs\n";
+  my $crSwitch = "-agts";
+  if ($numCrs < 1) {
+    if (! $recompile || ($recompile && grep(/^$comp$/, @xmitExcludes))) {
+      # Recompile flag not set or recompile but comp in excludes list
+      print "  * No COMPLETED CRs for $tk/$comp so no CRs to process\n";
+      $crSwitch = "-ctk";
+    }
+    else {
+      # Recompile set and not an excluded comp so create a CR
+      $cr = CreateChangeRequest($comp);
+      if ($cr eq "ERROR") {
+	print "ERROR: unable to create new CR for $comp!\n";
+	LogComponentEvent($comp, "XMIT_FAIL", "Unable to create new CR");
+	return $ERROR;
+      }
+      $crSwitch = "-z $cr";
+    }
+  }
+
+  # Run the xmit command ... add -C if -recompile and CR was created
+  my $command = "$XMIT -full";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " $crSwitch";
+  $command .= " -y";
+
+  my @results;
+  $rc = TKutils::RunCommand($command, \@results, $debug, $verbose);
+  print "  Return code: $rc\n";
+  print join("", @results);
+  if ($rc == $OK) {
+    LogComponentEvent($comp, "XMIT_SUCCESS", "Logged by doTK_xmit");
+  }
+  else {
+    LogComponentEvent($comp, "XMIT_FAIL", "Logged by doTK_xmit");
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents($toolKit, $component)
+# Purpose: Determine the components to process
+# RCs    : none
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  my ($tk, $comp) = @_;
+  print " [SetComponents] ... $tk\n";
+
+  my @comps = ();
+  if ($comp eq "") {
+    my $command = "$GET_COMPS";
+    $command .= " -t $tk";
+    $command .= " -ct DELIVERED";
+    $command .= " -q";
+
+    my @results;
+    my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+    if ($rc < 1) {
+      my $list = $results[0];
+      chomp $list;
+      @comps = split(/,/, $list);
+    }
+  }
+  else {
+    push(@comps, $comp);
+  }
+
+  print "  Delivered components: " . scalar(@comps) . "\n";
+
+  return @comps;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LogComponentEvent($event, $message)
+# Purpose: Log a tool kit/component specific event
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub LogComponentEvent {
+
+  my ($comp, $event, $message) = @_;
+
+  print " Logging TK/Component event ($event) ...\n";
+
+  # Construct the command
+  my $command = "$BIN/svnLog";
+  $command .= " -c $comp";
+  $command .= " -e $event";
+  $command .= " -l shipb";
+  $command .= " -m \"$message\"" if ($message);
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $debug, $verbose);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CountCompletedChangeReqs($toolKit, $component, $shipbRev)
+# Purpose: Determines if there are any completed CRs
+# RCs    : Number of CRs completed
+#------------------------------------------------------------------------------
+sub CountCompletedChangeReqs {
+
+  my ($tk, $comp, $rev) = @_;
+
+  print " [CountCompletedChangeReqs] ... $tk - $comp\n";
+
+  # Find the Change Requests for this state
+  my $command = "$CR_SHOW";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " -s COMPLETE";
+  $command .= " -max $rev";
+  print "  Running ... $command\n";
+
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  print "  Return code: $rc\n";
+  return 0 if ($rc == 2);
+
+  my $list = $results[0];
+  chomp $list;
+  my @crs = split(/;/, $list);
+  print "Completed CRs: $list\n";
+  print "  Found " . scalar(@crs) . " completed ...\n";
+
+  return scalar(@crs);
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : SetRevision($component, $location)
+# Purpose: Determines the latest revision is location
+# RCs    : Number of CRs completed
+#------------------------------------------------------------------------------
+sub SetRevision {
+
+  my ($comp, $location) = @_;
+
+  print " [SetRevision] for $comp in $location\n";
+
+  # Determine the latest revision in location
+  my $rev = 0;
+  my $command = "$GET_REVS";
+  $command .= " -c $comp";
+  $command .= " -l $location";
+  $command .= " -latest";
+
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+
+  $rev = $results[0];
+  chomp($rev);
+  print "  $location revision: $rev\n";
+
+  return $rev;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : VerifyRecompile()
+# Purpose: If -recompile specified then confirm an xmit_overridew directory
+#          exists and contains the necessary files.
+# RCs    : OK or ERROR
+#------------------------------------------------------------------------------
+sub VerifyRecompile {
+
+  print " [VerifyRecompile] ...\n";
+  my $rc = $OK;
+  return $rc if (! $recompile);
+
+  # Verify /afs/eda/data/edainfra/xmit_overrides/14.1.x directory
+  $OVERRIDE_DIR .= "/$toolKit";
+  if (! -d $OVERRIDE_DIR) {
+    print " ERROR .. unable to file override directory ...\n";
+    print " DIR: $OVERRIDE_DIR\n";
+    $rc = $ERROR;
+  }
+
+  # Verify /afs/eda/data/edainfra/xmit_overrides/14.1.x/cr_descrioption.txt
+  $crDescFile = "$OVERRIDE_DIR/cr_description.txt";
+  if (! -f $crDescFile) {
+    print " ERROR .. unable to file CR description file ...\n";
+    print " FILE: $crDescFile\n";
+    $rc = $ERROR;
+  }
+  print "CR descrition file found - $crDescFile\n";
+
+  # Verify /afs/eda/data/edainfra/xmit_overrides/14.1.x/xmit.excludes
+  my $xmitExcludesFile = "$OVERRIDE_DIR/xmit.excludes";
+  if (! -f $xmitExcludesFile) {
+    print " ERROR .. unable to file XMIT excludes file ...\n";
+    print " FILE: $xmitExcludesFile\n";
+    $rc = $ERROR;
+  }
+  else {
+    if (! IcofFile::ReadFileToList("$xmitExcludesFile", \@xmitExcludes, 0)) {
+      print("ERROR: could not open file! $xmitExcludesFile");
+      $rc = $ERROR;
+    }
+    print "Excludes file found - $xmitExcludesFile\n";
+    print join("\n", @xmitExcludes) . "\n";
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateChangeRequest($component)
+# Purpose: Create a change request
+# RCs    : ERROR or change request
+#------------------------------------------------------------------------------
+sub CreateChangeRequest {
+
+  my ($comp) = @_;
+  print " [CreateChangeRequest] ...\n";
+  my $cr = "";
+  return $cr if (! $recompile);
+
+  my $command = "$CREATE_CR";
+  $command .= " -c $comp";
+  $command .= " -feature";
+  $command .= " -sev 1";
+  $command .= " -f $crDescFile";
+
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $debug, $verbose);
+  return "ERROR" if ($rc != $OK);
+
+  # Parse the CR number from results that look like this ...
+  #  Tool Kit: 14.1.build
+  #  New Change Request: PROT000080215
+  #  Change Request created in APPROVED state
+  foreach $entry (@results) {
+    if ($entry =~ /Request:/) {
+      chomp($entry);
+      @tokens = split(/: +/, $entry);
+      $cr = $tokens[1];
+      last;
+    }
+  }
+
+  # Complete the new CR
+  $command = "$CR_UPDATE";
+  $command .= " -cr $cr";
+  $command .= " -s COMPLETE";
+  $rc = TKutils::RunCommand($command, \@results, $debug, $verbose);
+  print "  Return code: $rc\n" if ($verbose);
+
+  return $cr;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetStatus($toolKit, $component)
+# Purpose: Refresh the AGTS web status report
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetStatus {
+
+  my ($tk, $comp) = @_;
+
+  print " Reading XMIT status ...\n" if ($verbose);
+
+  # Construct the command
+  my $command = "$DEV_BIN/statusXmit";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " -q";
+
+  # Run the command and show results
+  print "Running $command\n" if ($verbose);
+  my @results = `$command`;
+  my $status = "";
+  foreach $entry (@results) {
+    if ($entry =~ /^$comp /) {
+      my @tokens = split(/ +/, $entry);
+      $status = $tokens[2];
+      last;
+    }
+  }
+
+  return $status;
+
+}

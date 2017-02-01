@@ -1,0 +1,939 @@
+#!/usr/bin/perl
+
+use Getopt::Std;
+use File::Basename;
+use Cwd;
+
+# QUESTION: should we be using --keep-changelists when we run commit to a changelist?
+# Answer: not for now
+
+# Requirement: 1. assumes script has been invoked from the directory from which checkin will occur
+# Enhanced to remove requirement #1. see CQ 97892 pb6
+
+# most cmvc files are path based, under <comp>/<rel>  --- relative path must be established to
+# ensure files get compared from identical locations
+# 'svn info' in the current directory is parsed for the URL:
+
+# Note: the url for the repository is based on the sandbox already set up
+# URL: https://bluejiffy.btv.ibm.com/eda/14.1/model/trunk/idm/idm
+
+# global variables
+
+# set CMVC_FAMILY
+#$ENV{"CMVC_FAMILY"} = "eda";
+ if ( ! $ENV{"CMVC_FAMILY"} ) {
+   $thehost = `/bin/hostname`;
+   if ( $thehost =~ /fishkill.ibm.com/ ) {
+      $ENV{"CMVC_FAMILY"} = "eda";
+   }
+   else {
+      $ENV{"CMVC_FAMILY"} = 'eda@edacmvc.fishkill.ibm.com@1601';
+   }
+ }
+
+# provide multiple paths for cmvc based on source in linux & aix 
+$platform = `/usr/afsws/bin/sys`;
+chomp($platform);
+if ( $platform ) {
+   if ( $platform =~ /rs_aix/ ) { $cmvcpath = "/usr/lpp/cmvc/bin";}
+   else { $cmvcpath = "/afs/eda/${platform}/prod/cmvc/current/bin";}
+}
+else  { 
+   print "Cannot determine CMVC patch, exit....\n";
+   exit 1;
+}
+
+$Report = "$cmvcpath/Report";
+$File   = "$cmvcpath/File";
+$svn = "/afs/eda/tools/bin/svn";
+$cmp = "/usr/bin/cmp";
+
+%status_text =
+  ( '?' => "(?) Files that do not exist in subversion:",
+    'A' => "(A) Files Added:",
+    'D' => "(D) Files Deleted:",
+    'M' => "(M) Files Modified:"
+  );
+
+sub help
+  {
+    print "\ndm_checkin [-c][-h][-i] -m \"<message>\" -r <release> -t <track>  [-l <changelist>] [<file>[<file>...]]\n";
+    print "\t-c\t\t run in check mode. Print the cmvc commands that would occur, do not do the svn commit\n";
+    print "\t-h\t\t this help\n";
+    print "\t-i\t\t ignore repository updates if not affecting files modified in the working copy\n";
+    print "\t-F <message file>\t commit log file to document code change\n";
+    print "\t-m \"<message>\"\t quoted message to document code change\n";
+    print "\t-r <release>\t cmvc release\n";
+    print "\t-t <track>\t cmvc track for checkin\n";
+
+    print "\n\tuser can specify files to check in with one of three methods:\n";
+    print "\t\t-l <changelist>\t subversion changelist to categorize files to check in\n";
+    print "\t\t[<file>[<file>...]] \t provide a list of files\n";
+    print "\t\t(no arguments)\t script will retrieve a file list based on \'svn status\'\n";
+    print "\n\n";
+
+    print "This script will generate a list of files currently in common between svn 14.1 and cmvc 13.1 with the intent of\n";
+    print "keeping them in common during checkin.  If the user wishes to break the commonality of a file or force a file to become\n";
+    print "common between the releases, then toggle the files between the lists\n";
+  }
+
+sub cleanup
+  {
+    my $file;
+    # remove files in tmp on exit
+    if(@cleanup_list)
+       {
+	 foreach $file (@cleanup_list)
+	   {
+	     # $tmp_file = "/tmp/${file}";
+	     if(-e $file)
+	       {
+		 print LOG  "cleaning up $file\n";
+		 #unlink $file;
+                 `/bin/rm -fr $file`
+	       } # file exists
+	   } # foreach $file in common
+       } # common file list exists
+    exit;
+  } # cleanup
+
+# install as sig handler
+# $SIG{QUIT} = \&cleanup;
+# $SIG{INT} = \&cleanup;
+# $SIG{__DIE__} = \&cleanup;
+# $SIG{TERM} = \&cleanup;
+
+
+
+sub get_svn_info
+  {
+    my $line;
+    my ($rv, $p);
+
+    print LOG "svn info\n---------\n";
+
+    foreach $line (`$svn info`)
+      {
+	print LOG "$line";
+	# if($line =~ m|^URL:\s+\S+/eda/([\d\.]+)/(\w+)/trunk/\s*$|)
+	if($line =~ m|^URL:\s+\S+/eda(dev)?/([\d\.]+)/(\w+)/trunk(/(\S+))*|)
+	  {
+	    $rv = $2;  $p = $3; $base_relpath = $5;
+	    $url = $line;
+	    $url =~ s/URL:\s+//;
+	    chomp $url;
+
+	    # print "rv: $rv comp: $p rp: $base_relpath\n";
+	    # print "url: $url\n";
+	    print LOG "rv: $rv comp: $p rp: $base_relpath\n";
+
+	    if($opt_c && $line !~ /edadev/)
+	      { print "\n**** Warning! check mode should be done from a test (edadev) working copy!! ****\n\n";}
+	    last;
+	  }
+      }
+    #if($rv ne "14.1")
+    #  { die "the svn working copy is not 14.1, this script may only be used for 14.1. checkin... exiting\n"; }
+    #elsif($p ne $product)
+    if($p ne $product)
+      { die "the cmvc release provided on the command line does not match the svn working copy, $product is not $p...exiting\n";}
+    else
+      {}
+  } # get svn info
+
+# svn file status is broken up into columns for the first 6 chars, 7th shows up only with --show-updates or --verbose,
+# 8th & 9th fields are variable length
+
+# by single char column:
+# ------------------------------------------------------
+#   1) file modification status                      $fm
+#   2) file propery status                           $fp
+#   3) file locked status                            $fl
+#   4) addition-with-history                         $fh
+#   5) file switched relative to parent (branched?)  $fs
+#   6) locked info                                   $fli
+#   7) file requires update  -- more than 1 char     $fu
+
+#   8) revision of working copy  -- variable         $rev
+#   9) file path                 -- variable         $fpath
+
+# only using $fm, $fu, $fpath for now, but set if future need
+
+sub get_svn_status
+  {
+    my $line;
+    my $fstat, $file;
+
+    print LOG "svn status\n----------\n";
+
+    foreach $line (`$svn status --show-updates`)
+      {
+	print LOG "$line";
+	push(@svn_status, $line);
+
+	if($line =~ /^\s+$/)  { next }  # skip whitespace only lines
+
+	if($line =~ /Status\s+against\s+revision:\s+(\d+)/)
+	  {
+	    $rep_rev = $1;
+	    next;
+	  }
+	elsif($line =~ /Changelist/) # line is header to a changelist
+	  {
+	    $in_clist = 't';
+	    ($cl_name) = $line =~ /Changelist\s+\'(\S+)\'/;
+	    # print "cln: $cl_name\n";
+	    next;
+	  }
+	else
+	  {
+	    ($state_array, $rest) = unpack("A6 A*", $line);
+	    # print "sa: $state_array\n r: $rest \n";
+
+	    ($fm, $fp, $fl, $fh, $fs, $fli) = split(//, $state_array);
+
+	    ($fu, $rev, $fpath) = $rest =~ /\s*([\*])?\s*(\d+)?\s+(\S+)/;
+	    # print "u: $fu fm: \'$fm\' rev: $rev fp: $fpath\n";
+
+	    if($fm =~ /\w/)
+	      {
+		$files{$fm}{$fpath} = "t";
+		$file_state{$fpath} = $fm;
+	      }
+	    elsif($opt_l && $opt_l eq $cl_name)
+	      {
+		$files{'unmodified'}{$fpath} = "t";
+		$file_state{$fpath} = 'unmodified';
+	      }
+
+	    if($fu =~ /\S/)
+	      {
+		push(@files_needing_update, $fpath);
+	      }
+
+	    # now add modified/unmodified files to changelist
+	    if($in_clist) # normal file list is done, now listing changelist(s) files
+	      {
+		# print "adding $fpath to $cl_name...\n";
+		$cl_files{$cl_name}{$fpath} = "t";
+	      } # in clist
+	  } # else (file listing)
+      } # foreach $line
+  } # get svn status
+
+
+
+sub check_commonality
+  {
+    # get the current revision of the file & determine revision one back
+    # diff svn one rev back against current cmvc file
+    # base level svn file lives in .svn/text-base/<filename>.svn-base, but that may change someday
+    # so use svn export <url> > tempfile instead
+
+    my ($file) = @_;
+    my ($dir, $short_path, $result);
+    my ($sd, $f);
+    print "....checking svn <--> cmvc commonality for $file....";
+
+    # $base_relpath and $url are set in get_svn_info
+    if($base_relpath)
+      {
+	# print "\nbrp: $base_relpath\n";
+	# print "url: $url\n";
+	$rel_path    = "${base_relpath}/${file}";
+      }
+    else
+      {
+	$rel_path = $file;
+      }
+    # cmvc file is $rel_path (concat of base_relpath and path in $file
+    $tmp_dir = dirname($rel_path);
+    # make the correct subdirs in tmp
+    `mkdir -p /tmp/$timestamp/cmvc/$tmp_dir`;
+     if ( $? != 0 ) { die "Cannot create directory /tmp/$timestamp/cmvc/$tmp_dir\n"; }
+    `mkdir -p /tmp/$timestamp/svn/$tmp_dir`;
+     if ( $? != 0 ) { die "Cannot create directory /tmp/$timestamp/svn/$tmp_dir\n"; }
+
+    $cmvc_tmp_path = "/tmp/$timestamp/cmvc/${rel_path}";
+    $svn_tmp_path  = "/tmp/$timestamp/svn/${rel_path}";
+
+    #push(@cleanup_list, $cmvc_tmp_path);
+    #push(@cleanup_list, $svn_tmp_path);
+    push(@cleanup_list, "/tmp/$timestamp");
+
+    $export_command = "$svn export $url/$file $svn_tmp_path";
+    print LOG "ec: $export_command\n";
+
+    print LOG `$export_command`;
+
+    # print "\nstp: $svn_tmp_path\n";
+    # print "rp: $rel_path\n";
+    # print "ctp: $cmvc_tmp_path\n";
+
+
+    print LOG "$File -extract $rel_path -release $opt_r -stdout > ${cmvc_tmp_path}\n";
+    $result = system("$File -extract $rel_path -release $opt_r -stdout > ${cmvc_tmp_path}");
+    if($result)
+       {
+	 die "\n$rel_path does not exist in cmvc or could not be extracted\n";
+       }
+
+    print LOG "$cmp -s $svn_tmp_path $cmvc_tmp_path\n";
+    system("$cmp -s $svn_tmp_path $cmvc_tmp_path");
+    $result = $? >> 8;                          # need this because common return code is in upper byte
+    # print "r: $result\n";
+
+    if($result == 0)
+      {
+	# base files are the same/ they are 'in common'
+	$common_files{$rel_path} = "t";
+	print "same\n";
+      }
+    elsif($result == 1)
+      {
+	# files differ
+	$noncom_files{$rel_path} = "t";
+	print "differ\n";
+      }
+    elsif($result > 1)
+      {
+	die "compare error: cmp return code 2 on file: $file... exiting\n";
+      }
+    else
+      {} # this can't happen
+
+    $locker = "";
+    # print "$Report -general fileview -select userlogin -where \"releasename in \'$opt_r\' AND basename in \'$file\' AND userlogin like \'%\'\"\n";
+    $locker = `$Report -general fileview -select userlogin -where \"releasename in \'$opt_r\' AND basename in \'$file\' AND userlogin like \'%\'\"`;
+
+    if($locker)
+      {
+	print "\t\t\t....and locked by $locker\n";
+      }
+  } # check_commonality
+
+sub svn_commit
+    {
+      #build checkin list
+      $ci_flist = join (" ", @common_files);
+
+      if($opt_m) # metadata flag
+	{$meta_flag = "-m \"$svn_message\"";}
+      elsif($opt_F)
+	{$meta_flag = "-F \"$svn_commit_log\"";}
+
+      if ( $base_relpath) {
+        $relp = $base_relpath;
+        $relp =~ s/\/$//s;
+        $dirlevel = ($relp =~ tr/\///);
+
+        $cpwd = getcwd;
+        $count = 0;
+        while ( $count <= $dirlevel ) {
+           chdir('../') or die "Cannot change dir to root level\n";
+           $count ++;
+        }
+      }
+
+      #print LOG "svn command: $svn commit $cl_flag $meta_flag\n";
+      print LOG "svn command: $svn commit $meta_flag $ci_flist\n";
+
+      foreach $line (`$svn commit $meta_flag $ci_flist`)
+	{
+          if ($? != 0) { die "svn commit failed, exiting\n";}
+	  print LOG "$line";
+	  if ($line =~ /revision\s+(\d+)/)
+	    {
+	      $new_rev = $1;
+	      print LOG "new revision $new_rev";
+	    }
+	}
+
+     if ( $base_relpath) {
+       chdir($cpwd) or die "Cannot change dir to $cpwd\n";
+     }
+
+    }
+
+
+sub user_file_review
+  {
+    until($lcans eq "done" || $lcans =~ "quit|exit")
+      {
+	$x = 0;
+	@common_files = ();
+	print "\n\nfiles to be kept in common between svn 14.1 and cmvc 13.1:\n";
+	print "----------------------------------------------------------\n\n";
+
+	foreach $file (sort(keys(%common_files)))
+	  {
+	    push(@common_files, $file);
+	    print "c${x}) $file\n";
+	    $x++;
+	  }
+
+	$y = 0;
+	@noncom_files = ();
+	print "\nfiles that will not be in common between svn 14.1 and cmvc 13.1:\n";
+	print "----------------------------------------------------------------\n\n";
+	foreach $file (sort(keys(%noncom_files)))
+	  {
+	    push(@noncom_files, $file);
+	    print "n${y}) $file\n";
+	    $y++;
+	  }
+	print "\nEnter the prefix of the file(s) you wish to toggle, \'done\' to continue, or \'quit\' to exit :\n";
+	$ans = <STDIN>;
+	chomp $ans;
+	$lcans = lc($ans);
+
+	# print "$lcans\n";
+	if($lcans ne "done")
+	  {
+	    # parse the codes the user has provided and toggle the files
+	    $code_string = $ans;
+	    $code_string =~ s/,/ /g;  # replace commas with white space
+	    # print "cs: $code_string\n";
+
+	    foreach $code (split(/ /, $code_string))
+	      {
+		if($code !~ /^\s*$/)
+		  {
+		    print "c:$code\n";
+		    if($code =~ /^c(\d+)/)
+		      {
+			print "removing c$1 from common list\n";
+			$f = $common_files[$1];
+			print "f: $f\n";
+			delete $common_files{$f};
+			$noncom_files{$f} = "t";
+		      }
+		    if($code =~ /^n(\d+)/)
+		      {
+			print "removing n$1 from non-common list\n";
+			$f = $noncom_files[$1];
+			print "f: $f\n";
+			delete $noncom_files{$f};
+			$common_files{$f} = "t";
+		      }
+		    else
+		      {}
+
+		  } # if code is not null
+	      } # foreach $code
+	  }
+      } # until
+
+    if($lcans =~ "quit|exit")
+      { cleanup; }
+
+    print "...continuing\n";
+} # sub user file review
+
+sub get_cmvc_tracklist
+  {
+    my $line;
+    my ($rel, $state);
+    foreach $line (`$Report -general TrackView -select "releasename,state" -where "defectname in '$opt_t'"`)
+      {
+	# print $line;
+	chomp $line;
+
+	($rel, $state) = split(/\|/, $line);
+	# print "r: $rel s: $state\n";
+
+	if($state eq "fix")
+	  { push(@rel_in_track, $rel);}
+
+      } # foreach $line
+
+    $rel_track_count = scalar(@rel_in_track);
+
+  } # sub get_cmvc_tracklist
+
+sub get_file_common_releases  # cmvc activity
+  {
+    my ($file) = @_;
+    my $line;
+    my $cfl_flag;
+    my $rel;
+
+    $file_common_rel = ();
+
+    foreach $line (`$File -view $file -release $opt_r -long`)
+      {
+	# print "L: $line";
+
+	if($cfl_flag)
+	  {
+	    if($line =~ /^\s+releaseName/) { next}
+	    elsif($line =~ /^\s+Note:/) { next}
+	    elsif($line =~ /^\s+-----/) { next}
+	    elsif($line =~ /^\s+$/) { next}
+	    elsif($line =~ /^shared\s+source/)
+	      {
+		last;
+	      }
+	    else
+	      {
+		($rel) = $line =~ /\s+(\S+)/;
+		# print "adding $rel\n";
+		$file_common_rel{$rel} = "t";
+	      }
+
+	    # print $line;
+	  }
+	elsif($line =~ /^common\s+files:/)
+	  {
+	    # print "********common file list located\n";
+	    $cfl_flag = "t";
+	  }
+	else
+	  { next; }
+      } # foreach $line
+
+    $file_common_rel_count = scalar(keys(%file_common_rel));
+    # print "fcrel_cnt: $file_common_rel_count\n";
+
+  } # sub get_file_common_releases
+
+sub build_common_rel_flags
+  {
+    # build the string for cmvc checkin so that files common across several cmvc releases are managed
+
+    my($file) = @_;
+    my $rel;
+    my @common_rels;
+    my $common_string;
+
+    # use the common release list combined with the list of releases the track is applied to to build
+    # the interection.  if it is in common with more releases than there are tracks, add the -force flag
+
+    # populate %file_common_rel, $file_common_rel_count
+    get_file_common_releases($file);
+
+    # print "fcrc: $file_common_rel_count\n";
+
+    if($file_common_rel_count == 0)
+      { return ""; }
+
+    # rel_track_count must be at least 1
+    # releases that are in rel_in_track and also in file_common_rel and not release provided on command line
+    foreach $rel (@rel_in_track)
+      {
+	if($rel eq $opt_r)
+	  {next}
+	elsif(exists($file_common_rel{$rel}))
+	  {
+	    push(@common_rels, $rel);
+	  }
+      }
+
+    $common_rels = join(" ", @common_rels);
+    if ( $common_rels ) { $common_string = " -common $common_rels"; }
+
+    if($file_common_rel_count > $rel_track_count)
+      {
+	$common_string .= " -force";
+      }
+
+    return $common_string;
+  } # sub build_common_rel_flags
+
+
+######################################################################
+# snippet of test code to check hash arrays
+sub print_files
+      {
+	foreach $key (sort(keys(%files)))
+	  {
+	    print "\nk: $key $status_text{$key}\n";
+	    foreach $file (sort(keys(%{$files{$key}})))
+	      {
+		print "\t$file\n";
+		# print "\tin the $file_state{$file}\n";
+	      }
+	  }
+
+	foreach $key (sort(keys(%cl_files)))
+	  {
+	    print "\nChangelist: \'${key}\':\n";
+	    foreach $file (sort(keys(%{$cl_files{$key}})))
+	      {
+		print "\t$file\n";
+	      }
+	  }
+      } # print files
+
+######################################################################
+# begin main
+######################################################################
+
+getopts('F:chil:m:r:t:');
+
+if($opt_h)
+  {
+    help;
+    cleanup;
+  }
+
+if(!$opt_t)
+  {
+    print "\nyou must provide a track with the -t flag\n";
+    help;
+    cleanup;
+  }
+
+if(!$opt_m && !$opt_F)
+  {
+    print "\nyou must provide a message (short abstract) with the -m flag or a commit log with the -F flag\n";
+    help;
+    cleanup;
+  }
+
+# issue an svn status in case the user needs to authenticate
+`$svn status`;
+
+$svn_message = $opt_m;
+$svn_commit_log = $opt_F;
+
+# process the release
+if(!$opt_r)
+  {
+    die "you must provide the release with the -r flag\n";
+  }
+elsif($opt_r =~ /nutsh-(\d+)/)
+  {
+    $maj = $1;
+    $p = "nutshell";
+    $min = "1";
+  }
+elsif($opt_r =~ /\w+-[\d\.]+/)
+  {
+    ($p, $maj, $min) = $opt_r =~ /(\w+)-(\d+)\.(\d+)/;
+  }
+elsif($opt_r =~ /\w+\.\d{4}/)
+  {
+    # parse the release name
+    ($p, $maj, $min) = $opt_r =~ /(\w+)\.(\d{2})(\d{2})/;
+  }
+else
+  {
+    die "get_lh_delta does not understand the release: $opt_r... quitting\n";
+  }
+
+$product = lc $p;
+$zf_version = sprintf("%02d%02d",$maj,$min);
+$dot_version = "$maj.$min";
+$dot_version =~ s/0?(\d+)/$1/g;
+
+# print "p: $product z: $zf_version d: $dot_version\n";
+
+if( ($zf_version ne "1301") && ($zf_version ne "1701") ) # add 1701 for tgsupport
+  {die "cmvc release provided on the command line must be \"1301\" or \"13.1\"...exiting\n"; }
+
+# open a log file
+$logpath = "$ENV{'HOME'}/dmsvn";
+
+if(!-d $logpath)
+  { mkdir $logpath }
+$log = "$logpath/log";
+
+open(LOG,">>$log") or die "cannot open log file for writing: $log\n";
+
+print LOG "\n===========================\n";
+#printf LOG "%4d-%02d-%02d %02d:%02d:%02d\n", $year+1900,$mon+1,$mday,$hour,$min,$sec;
+($sec,$min,$hour,$mday,$mon,$year,$wday, $yday,$isdst)=localtime(time);
+$timestamp = sprintf( "%4d-%02d-%02d_%02d-%02d-%02d", $year+1900,$mon+1,$mday,$hour,$min,$sec);
+print LOG "$timestamp\n";
+
+# test for access to cmvc
+$rc = system("$Report -testS >/dev/null 2>&1");
+if($rc != 0)
+  { die "\nYou do not have access to cmvc from this host at this time\n\n"; }
+
+
+# test for valid release
+foreach $line (`$Report -view releaseview -where \"name in \'$opt_r\'\"`)
+    {
+      if($line =~ /$opt_r/)
+	{ $rel_found = "t";};
+      if($line =~ /0 records/)
+	{ $rel_found = "";}
+    }
+
+if($rel_found)
+    { print "cmvc release $opt_r exists\n"; }
+else
+  {
+    print "cmvc release $opt_r not found...exiting\n";
+    cleanup;
+  }
+
+# get the releases that the provided track is applied to
+get_cmvc_tracklist;
+
+# test for working copy in 14.1/get relative path of current dir ($base_relpath)
+get_svn_info;
+
+# retrieve svn status and parse
+get_svn_status;
+
+if(!exists $files{'M'})
+  { die "\nno modified files found... quitting\n\n";}
+
+if(@files_needing_update)
+    {
+      if($opt_i)
+	{
+	  print "**** WARNING: updates have occured in this subdir of the repository***\n\n";
+	  foreach $file (@files_needing_update)
+	    {
+	      chomp $file;
+	      # print "f: $file fs: $files{'M'}{$file}\n";
+	      if(exists $files{M}{$file})
+		{
+		  print "\t$file modified in working copy and updated in repository... possible conflict\n";
+		  $in_conflict = "t";
+		}
+	    } # foreach
+	  if(!$in_conflict)
+	    { print "files modified in working copy are not on list of files updated in repository... continuing\n"; }
+	} # opt_i set
+      else
+	{
+	  print "\n\tThe following files have been updated in the repository:\n\n";
+	  foreach $file (@files_needing_update)
+	    {
+	      print "\t\t$file\n";
+	    }
+	  $in_conflict = "t";
+	} # else not $opt_i
+    } # files needing updates
+
+if($in_conflict)
+  { die "\nRun \'svn update\' to  make the working copy current and try your checkin again...exiting\n\n"; }
+
+# # test for valid track & correct state
+# foreach $line (`$Report -general trackview -where \"defectname in \'$opt_t\'\" -select \"defectname, state, releasename\"`)
+#     {
+#       # print $line;
+#       ($t, $state, $rel) = $line =~ /(\w+)\|(\w+)\|(\S+)/;
+#       # print "t: $t  s: $state r: $rel\n";
+#       if($state eq "fix" && $rel eq $opt_r)
+# 	{ $valid_track = "t";
+# 	  last;
+# 	}
+#     }
+
+# if($valid_track)
+#     { print "track okay\n"; }
+# else
+#     { print "track not found\n"; }
+
+
+
+# print cached svn status lines for the user
+
+foreach $line (@svn_status)
+  {
+    print $line;
+  }
+# ask the user if they wish to continue at this point
+print "Do you wish to continue? (y/n):";
+$ans = <STDIN>;
+chomp $ans;
+
+if($ans ne "y")
+    { cleanup; }
+
+print "continuing....\n";
+
+# use opt_l for a changelist (or list of changelists)
+# anything in $ARGV is assumed to be a file (test?)
+# no args, retrieve filelist from svn status
+
+if($opt_l) # values in opt_l are a list of changelists
+    {
+      foreach $cl (split(" ", $opt_l))
+	{
+	  print "cl: $cl\n";
+	  # iterate over files in changlist, separate modified from 'the rest'
+	  foreach $file (sort(keys(%{$cl_files{$cl}})))
+	    {
+	      if($file_state{$file} ne 'M')
+		{
+		  print "$file in changlist but in $file_state{$file} state... excluding\n";
+		  push(@excl_files, $file);
+		}
+	      else
+		{
+		  print "$file in changelist & modified\n";
+		  push(@mod_files, $file);
+		} # if file state modified/other
+	    }  #foreach file
+	} # foreach changelist
+    } # opt_l, changelist provided
+elsif(@ARGV) # if ARGV, pump into filelist
+    {
+      foreach $file (@ARGV)
+	{
+	  if(!exists($file_state{$file}))
+	    {
+	      print "$file has no modified status to svn, or does not exist...excluding\n";
+	      # give it a state for final output
+	      $file_state{$file} = "unknown";
+	      push(@excl_files, $file);
+	    }
+	  elsif($file_state{$file} ne 'M')
+	    {
+	      print "$file in changlist but in $file_state{$file} state... excluding\n";
+	      push(@excl_files, $file);
+	    }
+	  else
+	    {
+	      print "$file in changelist & modified\n";
+	      push(@mod_files, $file);
+	    } # if file state modified/other
+	} # foreach file
+    } # files spec'd in argv
+else    # (not opt_l & no argv, get svn_status for files in pwd
+    {
+      foreach $file (sort(keys(%{$files{'M'}})))
+	{
+	  push(@mod_files, $file);
+	}
+    }
+
+# determine which files are still in common
+foreach $file (@mod_files)
+    {
+      # print "mf: $file\n";
+      check_commonality($file);
+    }
+
+# review file list for common/uncommon and get user approval/changes
+user_file_review;
+
+# lock common files in cmvc
+foreach $file (sort(keys(%common_files)))
+  {
+    print LOG "file to lock: $file\n";
+    $lock_release = `$Report -g FilesOutView -w "fileNuPath=\'$file\'" -se RELEASENAME`;
+    chomp($lock_release);
+    #print "lock_releae=$lock_release\n";
+    if ( ${lock_release} eq ${opt_r} ) {
+       print LOG "$file is already locked\n";
+    }
+    else {
+      if($opt_c)
+      {
+	print "$File -lock $file -release $opt_r -defect $opt_t\n";
+      } # if opt_c
+      else
+      {
+	print LOG "$File -lock $file -release $opt_r -defect $opt_t\n";
+	system ("$File -lock $file -release $opt_r -defect $opt_t");
+	$result = $? >> 8;                          # need this because common returncode is in upper byte
+	# print "r: $result\n";
+
+	if($result != 0)
+	  {
+	    die "unable to lock file: $file .... aborting\n";
+	  }
+      } # not opt_c
+    }
+  }
+# commit file changes to svn, retain revision number
+if(!$opt_c)
+  {
+    svn_commit;
+  }
+
+# check common files into cmvc
+# add comment to file into documenting svn rev number
+
+foreach $file (sort(keys(%common_files)))
+  {
+    # build a list of common releases to add to the checkin
+    $common_string = build_common_rel_flags($file);
+
+    #determine where the file locates and cd to the dir for CMVC checkin
+    $cdpath = dirname($file);
+    if ( $base_relpath ) { $cdpath =~ s/$base_relpath\/?//g; }
+    if ( $cdpath ) { print LOG "cd $cdpath\n"; }
+   
+    if($opt_c)
+      {
+	print "$File -checkin $file -release $opt_r -defect $opt_t $common_string -remark \"Also checked into svn revision $new_rev \" \n";
+      }
+    else
+      {
+        if ( $cdpath ) {
+          $cpwd = getcwd;
+          chdir($cdpath) or die "Cannot change dir to $cdpath\n";
+        }  
+	print LOG "$File -checkin $file  -release $opt_r -defect $opt_t $common_string -remark \"Also checked into svn revision $new_rev \" \n";
+
+	system("$File -checkin $file  -release $opt_r -defect $opt_t $common_string -remark \"Also checked into svn revision $new_rev \" ");
+	$result = $? >> 8;                          # need this because common returncode is in upper byte
+	# print "r: $result\n";
+	
+	if($result != 0)
+	  {
+	    print "unable to checkin file: $file into CMVC.... aborting\n";
+            exit 1;
+	  } # result
+         if ($cdpath ) { chdir($cpwd) or die "Cannot change dir to $cpwd\n"; }
+
+	} # else not opt_c
+  } # foreach
+
+
+######################################################################
+# final output of files processed, not processed, & why
+######################################################################
+
+if(%common_files)
+  {
+    print "The following files were checked into svn and cmvc because they are deemed \'in common\':\n";
+    foreach $file (sort(keys(%common_files)))
+      {
+	print "\t$file\n";
+      }
+  }
+
+# files not in common, check in individually
+if(%noncom_files)
+  {
+    print "\nThe following files are NOT in common and still need to be checked in individually to CMVC:\n";
+    foreach $file (sort(keys(%noncom_files)))
+      {
+	print "\t$file\n";
+      }
+  }
+# files added or deleted
+if($files{A})
+  {
+    print "\nThe following files were added and still need to be processed for CMVC:\n";
+
+    foreach $file (sort(keys(%{$files{A}})))
+      {
+	print "\t$file\n";
+      }
+  }
+
+# files excluded from changelist or argv because not 'M'
+if($files{D})
+  {
+    print "\nThe following files were deleted and still need to be processed for CMVC:\n";
+
+    foreach $file (sort(keys(%{$files{D}})))
+      {
+	print "\t$file\n";
+      }
+  }
+
+print "\n\n";
+
+cleanup;

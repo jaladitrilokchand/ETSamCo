@@ -1,0 +1,539 @@
+#!/usr/bin/env perl
+#use warnings;
+#use strict;
+#=============================================================================
+#    FILE: gen_vols_tkrepos
+#
+#    DEPT: AZYX
+#    DATE: 03/09/2011
+#
+# OUTPUTS:
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# Create the AFS volumes and basic infrastructure from the 14.1 definition
+# of a component/release tree (/afs/eda/tk14.1.{n}/{component}/14.1
+#
+#-NOTES---------------------------------------------------------------------
+# (1) This script generate volumes based on a list stored in a file
+#     File format:
+#     EXAMPLE FILE LINE (TK 14.1.0):
+#     vol: tk141_0.{component}  path: tk14.1.0/{component} size: 750000
+#
+# (2) If the component/release directory already exists, a volume mount point
+#     for the requested component will not be created.
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 03/04/11 NH  Initial version
+# 03/09/11 AM  Updated to restructure for production environment and integrate
+#              into eTree flow.
+# 03/11/11 AM  Added -d switch to change from production to development mode.
+#              Development mode calls code from enablement/dev/bin and uses the DEV CM DB.
+# 03/25/11 AM  Added code to skip processing for a component if it already exists.
+# 05/09/11 AM  Updated to use the TkCommon Perl module for runcmd.
+#              Updated scriptPath to use the main DEV and PROD tool development areas.
+# 05/13/11 AM  Changed all references to btv/edainfra to eda/edainfra for SVN migration.
+# 07/19/11 AM  Changed volume creation to coincide with new naming convention
+#              Volume: tk141_{tkVersion}
+#                      Top of TK version tree
+#                      Mounted under /afs/eda
+#                      Created by EFK IT team
+#              Volume: tk141_{tkVersion}.{component}
+#                      Component/release volume
+#                      Mounted under /afs/eda/tk{tkVersion}
+#                      Created by this script
+# 07/22/11 AM  Updated section that creates the $rlse dir under the mount point.
+#              Added more return code checking.
+# 07/25/11 AM  Updated informational and error messages.
+# 08/22/11 AM  Updated to set predefined AFS ACLs at component level and to copy
+#              the component tree ACLs from the refDir (in this case EDA PROD).
+#              Clean up any AFS admin IDs that came over from refDir.
+#              Set up maxRC to handle the return codes.
+# 04/12/12 EH  Changed brtadmin to bradmin in $luciCmd
+# 07/30/12 EH  Disabled setting of permissions
+# 07/30/12 EH  Restored setting of permissions
+#=============================================================================
+#=============================================================================
+#                              FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub process_cmd_line {
+  # --------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+  # -------------------------------------------------------------- 
+	
+	getopts("s:p:b:f:r:t:ghecd");
+	
+	$afs_server    = ${opt_s};
+	$afs_partition = ${opt_p};
+	$base          = ${opt_b};
+	$base_dir      = "/afs/eda/${opt_b}";
+  $infile        = ${opt_f};
+	$ref_rlse      = ${opt_r};
+  $tkVersion     = ${opt_t};
+	
+  # Set DEBUG mode
+	if ( ${opt_g} ) {
+		$DEBUG = 1;
+	}
+	else {
+		$DEBUG = 0;
+	}
+
+	if ( ${opt_h} ) { help(); }
+
+  if ($DEBUG) {
+		print "\n\n------------------------------------------------ \n";
+		print " Parms Read By Program: \n";
+		print " $0\n";
+		print "------------------------------------------------ \n";
+		print "Toolkit Version    = \"$tkVersion\"     \n";
+		print "AFS Server         = \"$afs_server\"    \n";
+    print "AFS Partition      = \"$afs_partition\" \n";
+    print "SRC Reference Base = \"$base\"          \n";
+    print "SRC Reference Dir  = \"$base_dir\"      \n";
+    print "SRC Reference Rlse = \"$ref_rlse\"      \n";
+    print "Definition File    = \"$infile\"      \n\n";
+    if ($opt_c) { print "Copy Quota from Ref   = \"TRUE\" \n"; }
+    if ($opt_e) { print "Create Infrastructure = \"TRUE\" \n"; }
+    print "DEBUG Mode = \"ON\" \n";
+    if ($opt_d) { print "DEV Mode   = \"ON\" \n"; } 
+    else { print "DEV Mode   = \"OFF\" \n"; }
+    print "------------------------------------- \n\n";
+  }
+}
+
+sub max_rc {
+	#
+	# return the rolling maximum return code
+	#
+	my ($rc, $maxrc) = @_;
+	
+	if ($rc > $maxrc) {
+		$maxrc = $rc;
+	}
+	return ($maxrc);
+}
+
+sub create_reldir_acls {
+	#
+	# Create the AFS ACL entries in the tgtDir based on those defined in refDir
+	#
+	my ($refDir, $tgtDir, $debug) = @_;
+  my $rc = 0;
+	my $afsCmd;
+	
+	if (-d $refDir) {
+		# Set the base volume ACLs
+		$afsCmd = "$fs ca $refDir $tgtDir";
+		TkCommon::runcmd ("$afsCmd", "$debug");
+		$rc = $? >> 8;
+		if ($rc) {
+			print "ERROR: Return code $rc from $afsCmd.\n";
+		}
+		else {
+			print "Command was successful for $afsCmd. rc=$rc.\n";
+		}
+	}
+	else {
+		$rc = 8;
+		print "\n\n**** Reference dir, $refDir does not exist, no way to copy ACLs ***\n\n";
+	}
+	return ($rc);
+	
+} # create_reldir_acls
+
+sub clean_reldir_acls {
+	#
+	# Remove ACL access to rlseDir for AFS IDs contained in cleanIDs list
+	#
+	my ($rlseDir, $access, $debug, @cleanIDs);
+	my $rc = 0;
+	my $maxRC = 0;
+	my $id;
+	my $afsCmd;
+	
+	foreach $id (@cleanIDs) {
+		print "Setting access to $access for AFS ID $id in $rlseDir\n";
+		$afsCmd = "$fs sa $rlseDir $id $access";
+		TkCommon::runcmd ("$afsCmd", "$debug");
+		$rc = $? >> 8;
+		if ($rc) {
+			print "ERROR: Return code $rc from $afsCmd.\n";
+      $maxRC = max_rc ($rc, $maxRC);
+		}
+		else {
+			print "Command was successful for $afsCmd. rc=$rc.\n";
+		}
+	}
+	return ($maxRC);
+} # clean_reldir_acls
+
+sub create_vol {
+#
+# Create the component volume in target_dir
+#
+	my ($ref_dir, $target_dir, $vol, $force) = @_;
+  my $rc = 0;
+  my $maxRC = 0;
+
+	print " ref_dir=$ref_dir, target_dir=$target_dir, vol=$vol, force=$force\n";
+	
+	# create volume
+	$volCmd = "$vos create $afs_server $afs_partition $vol";
+  TkCommon::runcmd ("$volCmd", "$DEBUG");
+	$rc = $? >> 8;
+	if ($rc) {
+		print "ERROR: Return code $rc from $volCmd.\n";
+    $maxRC = max_rc ($rc, $maxRC);
+	}
+	else {
+		print "Command was successful for $volCmd. rc=$rc.\n";
+	}
+	
+	# make mount <dir> <volume>
+	$afsCmd = "$fs mkm $target_dir $vol";
+  TkCommon::runcmd ("$afsCmd", "$DEBUG");
+	$rc = $? >> 8;
+	if ($rc) {
+		print "ERROR: Return code $rc from $afsCmd.\n";
+		$maxRC = max_rc ($rc, $maxRC);
+	}
+	else {
+		print "Command was successful for $afsCmd. rc=$rc.\n";
+	}
+	
+	# set quota of volume
+	if ( ${opt_c} && ($force == 0 )) { 
+		# copy ref_dir quota to target_dir
+		foreach $line (`$fs lv $ref_dir`) {
+			if ($line =~ /disk\s+quota\s+is\s+(\S+)/ ) {
+				$newsize = $1;
+				print "Volume quota size, \"$newsize\", determined by reference dir, $ref_dir.\n";
+				#break;
+			}
+		}
+	}
+	else {
+		$newsize = $size;
+		print "Volume quota size, \"$newsize\", determined by input file.\n";
+	}
+	
+	# Set the volume quota size
+	$afsCmd = "$fs sq $target_dir $newsize";
+  TkCommon::runcmd ("$afsCmd", "$DEBUG");
+	$rc = $? >> 8;
+	if ($rc) {
+		print "ERROR: Return code $rc from $afsCmd.\n";
+		$maxRC = max_rc ($rc, $maxRC);
+	}
+	else {
+		print "Command was successful for $afsCmd. rc=$rc.\n";
+	}
+	
+	# -w is a wait time for timeout on command
+	
+  # Register the volume on LUCI
+	$luciCmd = "/afs/eda/proj/luci/bin/luci_cmd -o add_volume -c eda.fishkill.ibm.com -v $vol -q $newsize -m $target_dir -s 0 -d bradmin -w30";
+  TkCommon::runcmd ("$luciCmd", "$DEBUG");
+	$rc = $? >> 8;
+	if ($rc) {
+		print "ERROR: Return code $rc from $luciCmd.\n";
+     $maxRC = max_rc ($rc, $maxRC);
+	}
+	else {
+		print "Command was successful for $luciCmd. rc=$rc.\n";
+	}
+	
+	#
+	# Set the "special" ACLs in the component name dir
+	#	
+	 print "Setting svnlib admin access for $target_dir\n";
+	 $cmdstr = "$scriptPath/set_acl_np $target_dir svnlib rlidwka";
+   TkCommon::runcmd("$cmdstr", "$DEBUG");
+	 $rc = $? >> 8;
+	 if ($rc) {
+	 	print "ERROR: Return code $rc from $cmdstr.\n";
+	 	$maxRC = max_rc ($rc, $maxRC);
+	 }
+	 else {
+	 	print "Command was successful for $cmdstr. rc=$rc.\n";
+	 }
+
+	 print "Setting svnlib:write write access for $target_dir\n";
+	 $cmdstr = "$scriptPath/set_acl_np $target_dir svnlib:write rlidwk";
+   TkCommon::runcmd ("$cmdstr", "$DEBUG");
+	 $rc = $? >> 8;
+	 if ($rc) {
+	 	print "ERROR: Return code $rc from $cmdstr.\n";
+	 	$maxRC = max_rc ($rc, $maxRC);
+	 }
+	 else {
+	 	print "Command was successful for $cmdstr. rc=$rc.\n";
+	 }
+
+	 print "Setting svnlib:read read access for $target_dir\n";
+	 $cmdstr = "$scriptPath/set_acl_np $target_dir svnlib:read rl";
+   TkCommon::runcmd ("$cmdstr", "$DEBUG");
+	 $rc = $? >> 8;
+	 if ($rc) {
+	 	print "ERROR: Return code $rc from $cmdstr.\n";
+	 	$maxRC = max_rc ($rc, $maxRC);
+	 }
+	 else {
+	 	print "Command was successful for $cmdstr. rc=$rc.\n";
+	 }
+	
+	 print "Removing system:authuser read access for $target_dir\n";
+	 $cmdstr = "$scriptPath/set_acl_np $target_dir system:authuser l";
+   TkCommon::runcmd ("$cmdstr", "$DEBUG");
+	 $rc = $? >> 8;
+	 if ($rc) {
+	 	print "ERROR: Return code $rc from $cmdstr.\n";
+	 	$maxRC = max_rc ($rc, $maxRC);
+	 }
+	 else {
+	 	print "Command was successful for $cmdstr. rc=$rc.\n";
+	 }
+
+	 print "Removing system:anyuser access for $target_dir\n";
+	 $cmdstr = "$scriptPath/set_acl_np $target_dir system:anyuser l";
+   TkCommon::runcmd ("$cmdstr", "$DEBUG");
+	 $rc = $? >> 8;
+	 if ($rc) {
+	 	print "ERROR: Return code $rc from $cmdstr.\n";
+	 	$maxRC = max_rc ($rc, $maxRC);
+	 }
+	 else {
+	 	print "Command was successful for $cmdstr. rc=$rc.\n";
+	 }
+  
+	return ($maxRC);	
+} # create_vol
+
+sub help {	
+  print "\nHELP:\nScript to generate volumes based on a list of entries stored in a file.\n";
+  print "\nThe volume quota is based on the reference area.\n";
+  print "\nThe volume name is derived from the TK version and component name.\n";
+  print "\n**File format:\n";
+  print "   EXAMPLE FILE LINE:\n";
+  print "   vol: tk141_0.model  path: model size: 50000\n";
+  print "\n**Usage: gen_vols_tkrepos -t <tkVersion> -s <server> -p < partition> -b <ref_area> -r <ref_rlse> [-g testonly] -f <file> -e -c\n";
+  print "   where, <server> and <partition> info is gathered from the 'space build' command\n";
+  print " -t :  reference area, e.g. prod\n";
+  print " -b :  reference area, e.g. prod\n";
+  print " -r :  reference release, e.g. 14.1. Combined with -b option, a reference location is like /afs/eda/prod/<comp>/14.1\n";
+  print " -e :  the makefile, subdirs, and .owner file will be created.\n";
+  print " -c :  copy quota from reference to destination area. Use size from input file if -c is not specified.\n";
+  print "\n**Usage example: gen_vols_tkrepos -t 14.1.0 -s edaserv07 -p c -b prod -r 14.1 -f tk14_1_0.vols\n\n";
+  exit 1;
+} # help
+#=============================================================================
+#                                   MAIN ROUTINE
+#=============================================================================
+use File::Basename;
+use Getopt::Std;
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TkCommon;
+
+$maxRC = 0;        # this script return code
+$rc = 0;
+$newsize = 0;      # quota size for volume (based on reference dir or input file)
+
+$topCodePath = "/afs/eda/data";
+
+process_cmd_line;
+
+if ( ! ${opt_s} || ! ${opt_p} || ! ${opt_b} || ! ${opt_f} ) {
+  print "\nMissing required input parameters\n";
+  help();
+}
+
+# Ensure tkVersion is in correct format
+$rc = TkCommon::check_tkVersion ($tkVersion);
+if ($rc != 0) {
+  print "\nERROR: Toolkit version specified in an invalid format!\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+} else {
+	# Define the EDA release
+	$rlse = TkCommon::convert_tkVersion ($tkVersion, "release");    # Release, e.g. 14.1
+}
+
+# Set location of enablement code based on DEV or PRODUCTION (default) mode
+if (${opt_d}) {
+	$scriptPath = "${topCodePath}/edainfra/tools/enablement/dev/bin";
+} else {
+	$scriptPath = "${topCodePath}/edainfra/tools/enablement/prod/bin";
+}
+
+$dest = "/afs/eda";
+
+$vos  = "/usr/afsws/etc/vos";
+$fs   = "/usr/afsws/bin/fs";
+$vos_change_hist = "/afs/eda/u/lanadm/afs/vos_change.history";
+
+# Read the specially formatted input file containing the component/release
+# volume definition for a given TK release version.
+open (INPUT, "<$infile") or die "cannot open input file: $infile\n";
+
+foreach $line (<INPUT>) {
+	# print "$line";
+	if($line =~ /^\s*#/) # skip comments
+		{ next }
+	if($line =~ /^\s*$/) # skip whitespace
+		{ next }
+	if ($line =~ /FORCE_SIZE:/ )  { # use FORCE_SIZE even when -c is specified
+		($volume, $path, $size) = $line =~ /vol:\s+(\S+)\s+path:\s+(\S+)\s+FORCE_SIZE:\s+(\S+)/;
+		$force_size = 1;
+	}
+	else {
+		($volume, $path, $size) = $line =~ /vol:\s+(\S+)\s+path:\s+(\S+)\s+size:\s+(\S+)/;
+		$force_size = 0;
+	}
+	chomp($path);
+	chomp($size);
+	
+	print "\n==============================\n";
+	
+	$dest_dir = "$dest/$path";    # path should be the TK version/component name
+	print "dest_dir = $dest_dir\n";
+	
+	# Don't process this component if it already has been created.
+	
+	#if (DESTDIR, $dest_dir) {
+	#  print "[WARN]: The component/release tree, $dest_dir, does not exist...it will be created.";
+	#} else {
+	#	print "[WARN]: The component/release tree, $dest_dir, already exists...it will not be created.";
+	#	next;
+	#}
+	
+	# Volume name length has limitation
+	if (length($volume) > 22 ) {
+		print "ERROR with the following line: $line\nVolume name cannot exceed 22 characters\n";
+		exit 1;
+	}
+	
+	# The path should always be the component in the creation of this TK version tree
+	# We want the volume size from the /afs/eda/prod/{component}/14.1 directory.
+	@dirarray =split(/\//, $path);
+	$level = $#dirarray;
+	$repos_path = shift(@dirarray);
+	$repos_ver = substr ($repos_path, 2, 6);
+	$refdir = join('/', @dirarray);
+	if ( $refdir ) { $src_dir = "$base_dir/$refdir/$ref_rlse"; }
+	else {$src_dir = "$base_dir"; }
+	print "level: $level  repos_ver: $repos_ver\n";
+	print "refdir: $refdir  src_dir: $src_dir\n";
+	print "vol: $volume  path: $path  size: $size\n";
+	
+	# Create the volume for component level, if doesn't already exist
+	if (! -d $dest_dir ) {
+		create_vol ($src_dir, $dest_dir, $volume, $force_size);
+		$rc = $? >> 8;
+		if ($rc) {
+			print "ERROR: Unable to complete the volume creation step. rc=$rc.\n";
+			exit 8;
+		}
+		else {
+			print "Command was successful for \"$cmdstr\". rc=$rc.\n";
+			print "Created volume $volume of size $newsize in location $dest_dir.\n";
+		}
+	} else {
+		print "AFS location $dest_dir already exists...skipping volume creation step!\n"
+	}
+	
+	# Create the release directory under the component directory,
+	# if this "component treetop" doesn't already exist.
+	$rlseDir = "$dest_dir/$rlse";
+	if (! -d $rlseDir) {
+		chdir ($dest_dir) or die "[ERROR]: Can't change directory to $dest_dir.\n";
+		$cmdstr = "mkdir $rlse";
+		TkCommon::runcmd("$cmdstr", "$DEBUG");
+		$rc = $? >> 8;
+		if ($rc) {
+			print "ERROR: Return code $rc from \"$cmdstr\".\n";
+			print "ERROR: Unable to create $rlse directory under $dest_dir.\n";
+			$maxRC = max_rc ($rc, $maxRC);
+		}
+		else {
+			print "Command was successful for \"$cmdstr\". rc=$rc\n";
+			print "Created directory $rlse under $dest_dir.\n";
+		}
+	} else {
+		print "AFS location $rlseDir already exists...will not create!\n"
+	}
+	
+	# Initialize the component/release infrastructure
+	if (-d $rlseDir ) {
+		if ( ${opt_e} && ( $level == 1) ) {
+			
+			# Run setup_dirs and assign system ACLs at component treetop
+			$pref = "${repos_path}";
+			$comp = "${refdir}";
+			$cmdstr = "$scriptPath/setbldenv $rlse $comp $pref";
+			TkCommon::runcmd("$cmdstr", "$DEBUG");
+			$rc = $? >> 8;
+			if ($rc) {
+				print "ERROR: Return code $rc from \"$cmdstr\".\n";
+				$maxRC = max_rc ($rc, $maxRC);
+			}
+			else {
+				print "Command was successful for \"$cmdstr\". rc=$rc.\n";
+				print "Created initialized component tree under $dest_dir/$rlse.\n";
+			}
+			
+			if (-d $src_dir ) {
+				
+				# Create the ACL definition in the release dir based on the
+				# component tree definition in EDA PROD
+				$rc = create_reldir_acls ($src_dir, $rlseDir, $DEBUG);
+				if ($rc == 0) {
+					print "Completed setup of AFS ACLs at \"$rlseDir\" using reference ACLs at \"$src_dir\".\n";
+					# Clean up the ACLs in $rlseDir
+					@cleanIDs = ("mwadmin", "bradmin", "brtadmin");
+					$newAccess = "none";
+					$rc = clean_reldir_acls ($rlseDir, $newAccess, $DEBUG, @cleanIDs);
+					if ($rc == 0) {
+						print "Completed cleanup of AFS ACLs at \"$rlseDir\".\n";
+					}
+					else {
+						print "Unable to complete cleanup of AFS ACLs at \"$rlseDir\".\n";
+					}
+				}
+				else {
+					print "ERROR: Unable to complete AFS ACL setup for component tree. rc=$rc.\n";
+					$maxRC = max_rc ($rc, $maxRC);
+				}
+				
+				if (-f "$src_dir/.owner") {
+					# Copy .owner file from reference location to component treetop
+					$cmdstr = "cp $src_dir/.owner $rlseDir";
+					TkCommon::runcmd ("$cmdstr", "$DEBUG");
+					$rc = $? >> 8;
+					if ($rc) {
+						print "ERROR: Return code $rc from \"$cmdstr\".\n";
+						$maxRC = max_rc ($rc, $maxRC);
+					}
+					else {
+						print "Command was successful for \"$cmdstr\". rc=$rc.\n";
+						print "Copied .owner file under $rlseDir.\n";
+					}
+				}
+				else {
+					$rc = 4;
+					print "ERROR: Unable to find .owner file in \"$src_dir\". rc=$rc\n";
+					$maxRC = max_rc ($rc, $maxRC);
+				}
+			} # if src_dir
+			else {
+				print "\n\n***** Reference directory, $src_dir, does not exist ****\n\n";
+			}
+		} # if opt_e
+	} else {
+		print "\n\n***** Component treetop, $rlseDir, does not exist ****\n\n";
+	} # (-d $rlseDir)
+} # foreach $line
+
+exit ($maxRC);

@@ -1,0 +1,9 @@
+How to update the SVN Access cgi-bin scripts
+---------------------------------------------
+
+1. Telnet to edaw3.fishkill.ibm.com
+2. Cd to /web/cgi-bin
+3. Copy svn_register* scripts from 
+   /afs/eda/data/edainfra/tools/enablement/cgi-bin to /web/cgi-bin
+4. Refresh web page and test changes
+5. Repeat as necessary

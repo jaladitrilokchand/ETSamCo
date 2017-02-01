@@ -1,0 +1,330 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: check.prod2svn
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 02/08/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/08/2012 GS  Initial coding
+# 09/12/2012 GS  Updated to ignore etreetest* components.
+# =============================================================================
+
+use warnings;
+use strict;
+use File::stat;
+use Time::localtime;
+use Sys::Hostname;
+use Cwd;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use File::Copy;
+
+# Program name
+my $appName = "check.prod2svn";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $toolKit    = "";
+my $component  = "";
+my $header     = "";
+my $help       = "";
+my $verbose = 0;
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+# Set the location and name of createFuncUpdate application
+my $SVN = "/afs/eda/tools/bin/svn";
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $GET_COMP = "$BIN/getComponents -q ";
+my $LOG_DIR = "/afs/eda/data/edainfra/checks/";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# Define the current directory
+#
+my $startDir = $ENV{"PWD"};
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    #printSyntax();
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+#
+# Define custom perl libs path and modules depending on the
+# application mode.
+#
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use IcofFile;
+
+
+#
+# Query the database for components in this Tool Kit
+#
+my $command;
+my @results;
+my @components = ();
+if ($component) {
+  push(@components, $component);
+}
+else {
+  $command = $GET_COMP . " -t $toolKit -q ";
+  @results = `$command`;
+  @components = split(/,/, $results[0]);
+}
+
+
+#
+# Ensure the log directory is created
+#
+$LOG_DIR .= $toolKit. "/" . "prod2svn";
+mkpath($LOG_DIR) if (! -d $LOG_DIR);
+print "LOG_DIR: $LOG_DIR\n" if ($verbose);
+
+#
+# For each component determine the build working copy revision and the
+# latest revision in build from the ETREE database
+#
+@tokens = split(/\./, $toolKit);
+pop @tokens;
+my $TK_VER = join(".", @tokens);
+
+foreach $entry (@components) {
+
+  chomp($entry);
+  next if ($entry =~ /etreetest/);
+  next if ($entry =~ /svntest/);
+  print "Checking $entry ...\n";
+
+  my $FAIL = $entry . "_FAIL.html";
+  my $PASS = $entry . "_PASS.html";
+  my $WARN = $entry . "_WARN.html";
+  my $logFile = $PASS;
+
+  # Run the check
+  my $report;
+  $command = "/afs/eda/data/edainfra/tools/enablement/dev/bin/cmpSVN2PROD.141";
+  if ($TK_VER eq "15.1") {
+    $command = "/afs/eda/data/edainfra/tools/enablement/dev/bin/cmpSVN2PROD.151";
+  }
+  $command .= " $entry";
+  print "Running $command\n";
+  my @results = `$command`;
+  my $rc = $? >> 8;
+  if ($rc == 2) {
+    $logFile = $FAIL;
+    $report .= "Status: found differences between SVN and contents of /afs/eda/prod/$TK_VER<br>\n";
+  }
+  else {
+    $report .= "Status: SVN and /afs/eda/prod/$entry/$TK_VER match<br>\n";
+  }
+  $report .= join("", @results). "<br>";
+
+  # Set the log header text.
+  SetHeader($entry);
+
+  # Clean up the old files
+  unlink("$LOG_DIR/$PASS");
+  unlink("$LOG_DIR/$FAIL");
+  unlink("$LOG_DIR/$WARN");
+
+  # Write the log file
+  if (! $verbose) {
+    my $file = "$LOG_DIR/$logFile";
+    open LOG, ">$file" || die("Unable to open file for writing $!");
+    print LOG $header;
+    print LOG $report;
+    close LOG;
+  }
+  else {
+    print "Log: $LOG_DIR/$logFile\n";
+    print $header;
+    print $report;
+  }
+
+  print "Output in $LOG_DIR/$logFile\n";
+
+}
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Determines if /afs/eda/prod/COMPONENT/TK directory is an SVN working copy
+or if it contains .svn directories/files.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  -t Tool Kit [14.1.0, 14.1.1 ...].
+  -c Component (run check for a single component [no mail sent])
+  -h Application help (optional)
+  -y Verbose mode (optional)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tool_kit|t=s'    => \$toolKit,
+              'comp|c=s'        => \$component,
+              'verbose|y'       => \$verbose,
+              'help|h|?'        => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the obsolete file.
+  my $msg = "";
+  if (! $toolKit) {
+    $msg = "ERROR: tool_kit (-t) is a required parameter\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetHeader()
+# Purpose: Create the error log header text
+# RCs    : none
+#------------------------------------------------------------------------------
+sub SetHeader {
+
+  my ($component) = @_;
+
+  # Generate log file data
+  my $date = `date +%Y-%m-%d`;
+  chomp $date;
+  my $time = `date +%H:%M:%S`;
+  chomp $time;
+  $header = "Component: $component<br>\n";
+  $header .= "Date: $date<br>\n";
+  $header .= "Time: $time<br>\n";
+  $header .= "<br>\n";
+
+}

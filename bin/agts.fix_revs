@@ -1,0 +1,414 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: agts.fix_revs
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 11/22/2011
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 10/24/2012 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use File::stat;
+use Time::localtime;
+use Sys::Hostname;
+use Cwd;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use File::Copy;
+
+#
+# Global variables
+#
+my $BUILD   = "/afs/eda/build/";
+
+
+# Program name
+my $appName = "agts.fix_revs";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $toolKit    = "";
+my $debug      = 0;
+my $help       = "";
+my $verbose    = 0;
+my $component  = "";
+my $finalState = "transmitted";
+my $maxRevision = 0;
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+# Set the location and name of createFuncUpdate application
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $SVN_LOG = "$BIN/svnLog";
+my $GET_REV = "$BIN/getRevisionsTk";
+my $CR_SHOW = "$BIN/changeReqShowByStatus";
+my $CR_UPDATE = "$BIN/changeReqUpdateAll";
+my $LOG_DIR = "/afs/eda/data/edainfra/logs/";
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# Define the current directory
+#
+my $startDir = $ENV{"PWD"};
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Create the log dir
+$LOG_DIR .= "$toolKit/agts_crs_not_xmitted";
+mkdir($LOG_DIR) if (! -d $LOG_DIR);
+
+
+# Get the revisions
+my $prodRev1 = GetRevision($component, "prod");
+my $shipbRev1 = GetRevision($component, "shipb");
+my $shipRev1 = GetRevision($component, "ship");
+print "START\n------\n";
+print "prod: $prodRev1\n";
+print "shipb: $shipbRev1\n";
+print "ship: $shipRev1\n";
+
+$maxRevision = $prodRev1 if ($maxRevision == 0);
+
+# Run svnLog if applicable
+if ($prodRev1 > $shipbRev1) {
+  LogEvent($component, "prod", "ADVANCED_TO_SHIPB");
+  #LogEvent($component, "shipb", "ADVANCED_TO_SHIP");
+}
+
+exit 0 if (($prodRev1 == $shipbRev1) && ($shipbRev1 == $shipRev1));
+
+# Get the revisions
+my $prodRev2 = GetRevision($component, "prod");
+my $shipbRev2 = GetRevision($component, "shipb");
+my $shipRev2 = GetRevision($component, "ship");
+print "END\n------\n";
+print "prod: $prodRev2\n";
+print "shipb: $shipbRev2\n";
+print "ship: $shipRev2\n";
+
+
+# Create lists of submitted and approved Change Requests
+my @subCrs = GetChangeReqs("14.1.build", $component, "SUBMITTED",
+			   $shipbRev1, $maxRevision);
+my @appCrs = GetChangeReqs("14.1.build", $component, "APPROVED",
+			   $shipbRev1, $maxRevision);
+
+
+# Update submitted and approved CRs to complete
+UpdateChangeReqs("COMPLETE", @subCrs);
+UpdateChangeReqs("COMPLETE", @appCrs);
+
+
+# Update complete Change Requests that didn't get processed
+my @compCrs = GetChangeReqs("14.1.build", $component, "COMPLETE",
+			    $shipbRev1, $maxRevision);
+UpdateChangeReqs($finalState, @compCrs);
+
+# Show/log missing CRs
+print "\nCOMPLETE CRs not included in xmittal\n---------------------\n";
+print join("\n", @compCrs);
+print "\n\n";
+
+if (scalar(@compCrs) > 0) {
+  my $LOG = "$LOG_DIR/$component";
+  print "Writing CRs to $LOG\n";
+
+  open LOG, ">$LOG" or die $!;
+  print LOG join("\n", @compCrs), "\n";
+  close LOG;
+}
+
+print "\n";
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This special purpose script updates revisions missing from shipb and ship. The
+correct data is already in shipb/ship however the ETREE database needs
+updating.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> <-c component> [-f final_state] [-m max_rev] [-g] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  -t Tool Kit [14.1.0, 14.1.1 ...].
+  -c Component to process
+  -f Final state to mark CRs as (default = transmitted)
+  -m Max revision (defalut = latest revision in prod)
+  -g Debug mode [no actions taken] (optional)
+  -h Application help (optional)
+  -y Verbose mode (optional)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}       # End of printHelp
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tool_kit|t=s'    => \$toolKit,
+              'comp|c=s'        => \$component,
+              'f=s'             => \$finalState,
+              'm=s'             => \$maxRevision,
+              'debug|g'         => \$debug,
+              'verbose|y'       => \$verbose,
+              'help|h|?'        => \$help
+              ) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Verify the required parameters.
+  my $msg = "";
+  if (! $toolKit) {
+    $msg = "ERROR: tool_kit (-t) is a required parameter\n";
+  }
+  if (! $component) {
+    $msg = "ERROR: component (-c) is a required parameter\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetChangeReqs($toolKit, $state, $component, $shipbRev)
+# Purpose: Determines if there are any completed CRs
+# RCs    : Number of CRs completed
+#------------------------------------------------------------------------------
+sub GetChangeReqs {
+
+  my ($tk, $comp, $state, $rev1, $rev2) = @_;
+  print " [GetChangeReqs] ... $tk - $comp $state\n";
+
+  # Find the Change Requests for this state
+  my $command = "$CR_SHOW";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " -s $state";
+  $command .= " -max $rev2";
+  $command .= " -min $rev1";
+  print "  Running ... $command\n";
+
+  my @results = `$command`;
+  my $rc = $? >> 8;
+  print "  Return code: $rc\n";
+
+  my @crs = ();
+  return @crs if ($rc == 2);
+
+  my $list = $results[0];
+  chomp $list;
+  @crs = split(/;/, $list);
+  print "$state CRs: $list\n";
+  print "  Found " . scalar(@crs) . " $state CRs ...\n";
+
+  return @crs;
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : LogEvent($component, $location, $event)
+# Purpose: Logs the specified event
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub LogEvent {
+
+  my ($comp, $loc, $event) = @_;
+  print " [LogEvent] $comp $loc $event\n";
+
+  my $rc = 0;
+  my $command = "$SVN_LOG";
+  $command .= " -l $loc";
+  $command .= " -c $comp";
+  $command .= " -e $event";
+  print "  Running ... $command\n";
+
+  if ($debug) {
+    print "  DEBUG - command NOT actually run\n";
+  }
+  else {
+    my @results = `$command`;
+    $rc = $? >> 8;
+    print "  Return code: $rc\n";
+  }
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetRevision($component, $location)
+# Purpose: Deterimne the revision for this component/location
+# RCs    : revision
+#------------------------------------------------------------------------------
+sub GetRevision {
+
+  my ($comp, $loc) = @_;
+  print " [GetRevision] ... $comp - $loc\n";
+
+  # Find complete Change Requests
+  my $command = "$GET_REV";
+  $command .= " -c $comp";
+  $command .= " -l $loc";
+  $command .= " -latest";
+  print "  Running ... $command\n";
+
+  my @results = `$command`;
+  my $rc = $? >> 8;
+  print "  Return code: $rc\n";
+
+  my $rev = $results[0];
+  chomp $rev;
+
+  return $rev;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateChangeReqs($newState, @crs)
+# Purpose: Updates each Change Request in the list to the newState
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub UpdateChangeReqs {
+
+  my ($state, @crs) = @_;
+
+  print " [UpdateChangeReqs] to $state\n";
+
+  foreach $entry (@crs) {
+
+    my $rc = 0;
+    my $command = "$CR_UPDATE";
+    $command .= " -cr $entry";
+    $command .= " -s $state";
+    print "  Running ... $command\n";
+
+    if ($debug) {
+      print "  DEBUG - command NOT actually run\n";
+    }
+    else {
+      my @results = `$command`;
+      $rc = $? >> 8;
+      print "  Return code: $rc\n";
+    }
+
+  }
+
+}

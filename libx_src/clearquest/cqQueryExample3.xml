@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CqQuery>
+	<login>
+		<username>asuren</username>
+		<password>fake</password>
+		<database>MDCMS</database>
+		<schema>mdcms</schema>
+	</login>
+	<client>
+		<app-name>CQServiceTest</app-name>
+	</client>
+	<query>
+	     <query-name>Personal Queries/Bist CU65HP Verification - not closed</query-name>
+	</query>
+</CqQuery>

@@ -1,0 +1,244 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: findFiles
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 06/23/2014 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use File::Find;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+require TKutils;
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+
+# Program variables
+my $appName = "findFiles";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $toolKit         = "";
+my @components      = ();
+my $component       = "";
+my $startDir = $ENV{"PWD"};
+my $searchDir;
+my $outFile;
+my @textFiles = ();
+my @binaryFiles = ();
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Run the scan
+my $count = 0;
+find({wanted => \&CategorizeFiles,
+      follow => 1,
+      follow_skip => 2},
+     $searchDir);
+
+# Show the results
+print "File counts\n";
+print "Text: " . scalar(@textFiles) . "\n";
+print "Binary: " . scalar(@binaryFiles) . "\n";
+
+
+open (TEXT, ">$outFile.text.out");
+print TEXT join("\n", @textFiles) . "\n";
+close TEXT;
+
+open (BIN, ">$outFile.binary.out");
+print BIN join("\n", @binaryFiles) . "\n";
+close BIN;
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script scans a directory to determine which files are text and which
+are binary.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-d directory> <-o out_file>[-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  directory = Directory to recursively scan
+  out_file  = Name of output file for the results
+  -y        = Verbose mode
+  -h        = Show application usage
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('dir|d=s'    => \$searchDir,
+              'o=s'        => \$outFile,
+	      'y'          => \$verbose,
+	      'help|h|?'   => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $searchDir) {
+    print "ERROR: Search directory (-d) is a required parameter\n";
+    return $ERROR;
+  }
+  if (! $outFile) {
+    print "ERROR: Output file (-o) is a required parameter\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CategorizeFiles()
+# Purpose: Determine the size of the file
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CategorizeFiles {
+
+  return if (-d $File::Find::name); # Exclude directories
+  return if ($File::Find::name =~ /\/\.svn\//);
+  return if ($File::Find::name =~ /\/attachments\//);
+  return if ($File::Find::name =~ /tmp\//);
+  return if ($File::Find::name =~ /\.old$/);
+  return if ($File::Find::name =~ /\_old$/);
+  return if ($File::Find::name =~ /~$/);
+  return if ($File::Find::name =~ /\/daw_2010\//);
+  return if ($File::Find::name =~ /\/daw_backup\//);
+  return if ($File::Find::name =~ /\/output\//);
+  return if ($File::Find::name =~ /\/eftvc_2010\//);
+  return if ($File::Find::name =~ /\/tkpatch_\//);
+  return if ($File::Find::name =~ /\/rlm_backup\//);
+  return if ($File::Find::name =~ /\/2011bak\//);
+  return if ($File::Find::name =~ /\/uploads\//);
+  return if ($File::Find::name =~ /\/st2010\//);
+  return if ($File::Find::name =~ /\/st2009\//);
+  return if ($File::Find::name =~ /\/fms_java\/xmlfiles\//);
+
+  if (-T $File::Find::name) {
+    push(@textFiles, $File::Find::name);
+  }
+  else {
+    push(@binaryFiles, $File::Find::name);
+  }
+
+}
+

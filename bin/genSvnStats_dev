@@ -1,0 +1,389 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: genStats_dev
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 01/09/2015 GS  Initial coding.
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TKutils;
+use IcofFile;
+
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+my $SVN = "/afs/eda/tools/bin/svn";
+my $SVN_URL = "https://greenjiffy.fishkill.ibm.com/eda/tk";
+my $METRICS_DIR = "/afs/eda/data/edainfra/dashboard/statsvn";
+my $SVN_LOGS_DIR = "$METRICS_DIR/logs";
+my $STATSVN_JAR = "/afs/eda/data/edainfra/tools/enablement/dev/libx/" .
+  "statsvn/statsvn.jar ";
+my $ID = "svnlib\@us.ibm.com";
+my $JAVA = "/usr/bin/java";
+
+
+# Program variables
+my $appName = "genStats_dev";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dbMode          = "";  # default is prod if empty
+my $dryRun          = 0;
+my $toolKit         = "";
+my $component       = "";
+my $startDir;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+# Create a list of components for this tool kit
+my @components = SetComponents($toolKit, $component);
+
+# Determine the TK release for this TK
+my $release = TKutils::GetRelease($toolKit, ".");
+
+# Read the last AGTS date
+my $lastAgtsDate = GetAgtsDate();
+print "AGTS: $lastAgtsDate\n" if ($verbose);
+
+# Read the svnlib password
+my $password = GetPassword($ID);
+print "ID: $ID\n" if ($verbose);
+print "PW: $password\n" if ($verbose);
+
+# Generate svn stats for each component
+foreach $component (@components) {
+
+  next if ($component =~ /svntest|etreetest/);
+
+  print "\nComponent: $component\n";
+
+  # Determine latest revision is prod
+  my $revision = GetRevision($component, "prod");
+  print " Rev: $revision\n" if ($verbose);
+
+  # Generate the svn log since last AGTS
+  my $log = GenerateLog($release, $component, $revision, $lastAgtsDate);
+  print " Log: $log\n" if ($verbose);
+  next if ($log eq "");
+
+  # Run statSvn
+  $rc = RunStatSvn($release, $component, $log, $ID, $password);
+  print " StatSvn rc: $rc\n";
+
+}
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  #LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script creates a checked out copy of a component's working copy and
+runs statSvn against the working copy.
+
+This version is intended to generate metrics for the development tool kit
+to see what is new since the last tool kit was created.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tk> [-c component]
+                  [-dryrun] [-y] [-db dbMode] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tk        = Tool Kit version which must exist (ie, 14.1.1 ...)
+  component = Process just this component
+  -dryrun   = Run script in dryrun mode
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('t=s'       => \$toolKit,
+              'c=s'       => \$component,
+	      'db=s'      => \$dbMode,
+	      'y'         => \$verbose,
+	      'help|h|?'  => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) is a required parameter\n";
+    return $ERROR;
+  }
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents()
+# Purpose: Create a list of components ready for this Tool Kit
+# RCs    : List of component names or empty list
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  my ($tk, $comp) = @_;
+  print " Querying for components in $tk ...\n" if ($verbose);
+
+  # Query the DB for tk/components for the src tool kit
+  my @list = TKutils::GetComponents($tk, $comp, "");
+  print "Found " . scalar(@list) . " components\n" if ($verbose);
+
+  return @list;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetPassword($id)
+# Purpose: Read the password for the specified id
+# RCs    : Password
+#------------------------------------------------------------------------------
+sub GetPassword {
+
+  my ($id) = @_;
+  print "Reading $id password ...\n" if ($verbose);
+
+  if ($id =~ /@/) {
+    my @tokens = split(/@/, $id);
+    $id = $tokens[0];
+  }
+
+  my $file = "/afs/eda/u/$id/private/$id" . ".funcid";
+  my @contents = ();
+  IcofFile::ReadFileToList($file, \@contents, 0);
+  my $pw = $contents[0];
+  chomp($pw);
+
+  return $pw;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetAgtsDate()
+# Purpose: Determine the last AGTS date
+# RCs    : Password
+#------------------------------------------------------------------------------
+sub GetAgtsDate {
+
+  print "Reading AGTS date ...\n" if ($verbose);
+
+  return "2014-08-15";;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetRevision($component, location)
+# Purpose: Query the DB for this component's revision at location
+# RCs    : revision
+#------------------------------------------------------------------------------
+sub GetRevision {
+
+  my ($comp, $loc) = @_;
+
+  # Construct the command
+  my $command = "$BIN_DIR/getRevisionsTk";
+  $command .= " -c $comp";
+  $command .= " -l prod";
+  $command .= " -latest";
+
+  # Run the command and show results
+  my $status = "";
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  my $rev = $results[0];
+  chomp $rev;
+
+  return  $rev;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GenerateLog($release, $component, $revision, $date)
+# Purpose: Generate the svn log for the given comp between date and rev
+# RCs    : log name or "" if error
+#------------------------------------------------------------------------------
+sub GenerateLog {
+
+  my ($rel, $comp, $rev, $date) = @_;
+
+  print " Generating svn log ...\n" if ($verbose);
+
+  my $log = "$SVN_LOGS_DIR/$comp.prod.log";
+
+  # Construct the command
+  my $command = "$SVN log ";
+  $command .= " /afs/eda/build/$comp/$rel";
+  $command .= " -v";
+  $command .= " --xml ";
+  $command .= " -r {$date}:$rev";
+  $command .= " > $log";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  if ($rc != 0) {
+    $log = "";
+    print "ERROR: unable to generate SVN log .. \n";
+    print " Command: $command\n";
+    print " Results: " . join("\n", @results) . "\n";
+  }
+
+  return $log;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RunStatSvn($release, $component, $svnLog, $id, $pw)
+# Purpose: Runs statSvn against the build working copy for the given component
+#          and log file.  The results are stored in METRICS_DIR/component
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub RunStatSvn {
+
+  my ($rel, $comp, $log, $id, $pw) = @_;
+
+  print " Generating svn log ...\n" if ($verbose);
+
+  # Create the output dir
+  mkdir("$METRICS_DIR/$comp") if (! -d "$METRICS_DIR/$comp");
+
+  # Construct the command
+  my $command = "$JAVA";
+  $command .= " -jar $STATSVN_JAR";
+  $command .= " -output-dir $METRICS_DIR/$comp";
+  $command .= " -username $id";
+  $command .= " -password $pw";
+  $command .= " -title \"$comp new for 14.1.9\"";
+  $command .= " $log";
+  $command .= " /afs/eda/build/$comp/$rel";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  if ($rc != 0) {
+    $log = "";
+    print "ERROR: unable to run statSvn .. \n";
+    print " Command: $command\n";
+    print " Results: " . join("\n", @results) . "\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+

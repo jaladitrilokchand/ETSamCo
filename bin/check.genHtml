@@ -1,0 +1,792 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: check.genHtml
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#    DATE: 02/08/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/08/2012 EH  Initial coding.
+# 02/16/2012 EH  Changed column headings.
+# 02/16/2012 EH  Updated cell background colors to be less harsh.
+# 02/17/2012 EH  Added percent pass to health check column headings
+# 03/09/2012 GS  Updated to have data file passed in on the command line and
+#                read necessary parameters from that file. Added support to
+#                notify owners and their managers of fails.
+# 03/12/2012 GS  Added support for -t switch to send test emails.
+# 03/14/2012 GS  Changed Team Lead to Owner.
+# 03/19/2012 GS  Updated to preserve the check order.
+# 02/19/2013 GS  Updated to only pull check files for components in the TK.
+#                Now drives off the release and location instead of data file.
+# 05/28/2013 GS  Update the Health Check URL in the email.
+# 07/30/2013 GS  Updated to better deal with situation where owner no
+#                longer in DB or blue pages.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+
+# Required for Blue Pages
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+require BPRecord;
+require BPQuery;
+use IcofFile;
+use TKutils;
+use HealthChecks;
+use email;
+
+# Global variables
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $CHECKS_DIR = "/afs/eda/data/edainfra/checks";
+
+# Program name
+my $appName = "check.genHtml";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Constants
+my $title            = "EDA Tool Kit Health Report";
+my $toolKitVersion   = "";
+my $agtsDate         = "";
+my $fcsDate          = "";
+my $colWidth1        = "100";
+my $colWidth2        = "175";
+my $colWidthOther    = "110";
+my $trTag1           = "style=\"vertical-align: top; text-align: center;\"";
+my $styleDkGrayBG    = "style=\"background-color: rgb(85, 85, 85)\; font-size:14px;\"";
+my $styleGrayBG1     = "style=\"background-color: rgb(220, 220, 220); width: ${colWidth1}px\"";
+my $styleGrayBG2     = "style=\"background-color: rgb(220, 220, 220); width: ${colWidth2}px\"";
+my $styleGrayBGOther = "style=\"background-color: rgb(220, 220, 220); width: ${colWidthOther}px\"";
+my $styleLtGrayBG    = "style=\"background-color: rgb(245, 245, 245); text-align: left;\"";
+my $styleLtGrayBGctr = "style=\"background-color: rgb(245, 245, 245); text-align: center;\"";
+my $styleGreenBG     = "style=\"background-color: #99FF99; text-align: center;\"";
+my $styleRedBG       = "style=\"background-color: #FFB2B2; text-align: center;\"";
+my $styleYellowBG    = "style=\"background-color: #FFFF99; text-align: center; Arial;\"";
+my $outFile          = "";
+my $url              = "https://w3.eda.ibm.com/afs/eda/data/edainfra/checks/html/";
+
+# Program arguments
+my $help          = "";
+my $checkSubDirs  = "";
+my $testEmail;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens       = ();
+my $entry        = "";
+my $component    = "";
+my %compChkHash  = ();
+my $htmlPreamble = "";
+my $verbose      = 0;
+my $release      = "";
+my $location     = "";
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Define the current directory
+my $startDir = $ENV{"PWD"};
+
+# To exit cleanly from a Ctrl+C or an unexpected die()
+$SIG{'INT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{'QUIT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{__DIE__}  = sub { handleInterruption(); };
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Set the health check URL
+$url .= "/health_" . $release . "_" . $location . ".html";
+
+# Read the input file
+my $dataFile  = HealthChecks::GetDataFile($release, $location);
+my @contents = ();
+exit $ERROR if (HealthChecks::ReadDataFile($dataFile, \@contents) != $OK);
+
+# Determine the TK from this location
+my $tk = "";
+exit $ERROR if (HealthChecks::GetToolKit($release, $location, 0, \$tk) != $OK);
+my $altTk = "";
+exit $ERROR if (HealthChecks::GetToolKit($release, $location, 1, \$altTk) != $OK);
+$toolKitVersion = "$tk";
+print "Tool Kit Version: $toolKitVersion\n" if ($verbose);
+
+# Update the checks dir
+$CHECKS_DIR .= "/$tk";
+
+# Set AGTS milestone
+HealthChecks::GetField("AGTS", \@contents, \$agtsDate);
+print "AGTS Date: $agtsDate\n" if ($verbose);
+
+# Set FCS milestone
+HealthChecks::GetField("FCS", \@contents, \$fcsDate);
+print "FCS Date: $fcsDate\n" if ($verbose);
+
+# Set Output file
+exit $ERROR if (HealthChecks::GetField("OUTPUT", \@contents,\$outFile) != $OK);
+print "Output file: $outFile\n" if ($verbose);
+
+# Set Legend data
+my %legend = ();
+if (HealthChecks::GetLegend(\@contents, \%legend) != $OK) {
+  exit $ERROR;
+}
+
+# Put checks into a hash
+my %helpLookupHash = ();
+my %notifyOwner = ();
+my %notifyManager = ();
+my @checkList = ();
+HealthChecks::GetChecks(\@contents, \%helpLookupHash, \%notifyOwner,
+			\%notifyManager, \@checkList);
+print "Found " . scalar(@checkList) . " checks to process\n";
+
+# Create a list of components in this Tool Kit
+my @components = TKutils::GetComponents($tk, "", "");
+
+# Iterate thru each health check directory and collect information
+# on the files contained in each directory.
+my %failures          = ();
+my $checkSubDir       = "";
+my $plainEnglishName  = "";
+my $checkHelpURL      = "";
+my %pctPass = ();
+foreach $checkSubDir (@checkList) {
+
+  print "Processing $checkSubDir\n";
+
+  # Verify directory exists
+  my $checkDir = "$CHECKS_DIR/$checkSubDir";
+  if (! -d $checkDir) {
+    print "ERROR: directory does not exist\n";
+    print "       Dir: $checkDir\n";
+    exit $ERROR;
+  }
+
+  # Get a list of health check file names in the current health check directory
+  my @compChkFiles = ();
+  HealthChecks::GetCheckFiles($checkDir, \@components, \@compChkFiles);
+  print "Found " . scalar(@compChkFiles) . " check files for $checkDir\n";
+
+  # Iterate thru each health check file name and parse component name,
+  # type of check (dir name) and test result state.
+  my $compChkFile = "";
+  my $passCnt = 0;
+  my @failList = ();
+  foreach $compChkFile (@compChkFiles) {
+
+    @tokens = split (/_/, $compChkFile);
+    my $state = pop(@tokens);
+    $state =~ s/.html$//;
+    $component = join("_", @tokens);
+
+    $compChkHash{$component}{$checkSubDir} = $state;
+    if ($state eq "PASS") {
+      $passCnt++;
+    }
+    else {
+      # Save the failures for notification later
+      push(@failList, $component);
+    }
+
+  }
+  $pctPass{$checkSubDir} = sprintf("%3.0f",
+				   ($passCnt / scalar(@compChkFiles) * 100));
+  $failures{$checkSubDir} = [@failList];
+
+}
+
+
+# Open html output file
+open(OUTFILE, ">$outFile") || die "open $outFile failed";
+
+# Calculate table width in pixels
+my $numberOfHealthChks = scalar(keys(%helpLookupHash));
+my $tableWidth = (($colWidth1 + 8) + ($colWidth2 + 8) + 
+		  ($numberOfHealthChks * ($colWidthOther + 8)));
+
+# Write preamble to html output file
+my $currentDateTime = dateTimeStamp();
+$htmlPreamble = getHtmlPreamble($tableWidth, $toolKitVersion,
+				$currentDateTime, $agtsDate);
+print OUTFILE "$htmlPreamble\n";
+
+# Write first few table column headers
+print OUTFILE "<tr style=\"vertical-align: top; text-align: center;\">\n";
+print OUTFILE "<th $styleGrayBG1>Component</th>\n";
+print OUTFILE "<th $styleGrayBG2>Owner<br>(Manager)</th>\n";
+
+# 1. Iterate thru the check subdirectories names previously saved in an array
+# 2. Lookup plain english name and check help URL
+# 3. Apply name and URL to remaining table column headers
+foreach $checkSubDir (keys(%helpLookupHash)) {
+  @tokens = split(/;/, $helpLookupHash{$checkSubDir});
+  $plainEnglishName = $tokens[0];
+  $checkHelpURL = $tokens[1];
+  print OUTFILE "<th $styleGrayBGOther><a href=\"$checkHelpURL\">$plainEnglishName</a>" .
+    "<br><span style=\"font-weight:normal;\">($pctPass{$checkSubDir}\% pass )</th>\n";
+}
+
+#------------------------------------------------------------------------------
+# Iterate thru the health check results saved for each component in the hash of
+# hashes and write the results as html to the output file
+#------------------------------------------------------------------------------
+my $healthCheckDirURL = "https://w3.eda.ibm.com/$CHECKS_DIR";
+my $showComponentResult = "";
+my $owner = "";
+my $manager = "";
+my %componentOwners = ();
+foreach $component (sort(keys %compChkHash)) {
+
+  print OUTFILE "\n<tr $trTag1>\n";
+  print OUTFILE "<td $styleLtGrayBG>$component</td>\n";
+
+  # Get component owner
+  $owner = GetOwner($component);
+  $manager = GetManager($owner);
+
+  print "Component: $component\n" if ($verbose);
+  print "Owner    : $owner\n" if ($verbose);
+  print "Manager  : $manager\n\n" if ($verbose);
+
+  print OUTFILE "<td $styleLtGrayBGctr>$owner<br>($manager)</td>\n";
+
+  # Save the component owner data (will be used later to email them if checks fail)
+  $componentOwners{$component} = $owner;
+
+  # Iterate thru the health check subdirectories captured above.
+  # For each component file:
+  #
+  #   1. Use the test result to determine the status and background color to be
+  #   applied to each cell.
+  #
+  #   2.Create a link in the table cell to the check results file if the test
+  #   result was not PASS.
+  foreach $checkSubDir (keys(%helpLookupHash)) {
+
+    # Handle an undefined hash value
+    if (! defined($compChkHash{$component}{$checkSubDir})) {
+      $compChkHash{$component}{$checkSubDir} = "UNDEFINED";
+    }
+	
+    # File name containing "PASS" translates to "ok" with green background
+    if ($compChkHash{$component}{$checkSubDir} eq "PASS") {
+      print OUTFILE "<td $styleGreenBG>pass</td>\n";
+    }
+
+    # File name containing "FAIL" translates to "error" URL with red background
+    elsif ($compChkHash{$component}{$checkSubDir} eq "FAIL") {
+      print OUTFILE "<td $styleRedBG><a href=\"$healthCheckDirURL/$checkSubDir/" .
+        $component . "_" . "$compChkHash{$component}{$checkSubDir}.html\">fail</a></td>\n";
+    }
+
+    # File name containing "WARN" translates to "warning" URL with 
+    # yellow background
+    elsif ($compChkHash{$component}{$checkSubDir} eq "WARN") {
+      print OUTFILE "<td $styleYellowBG><a href=\"$healthCheckDirURL/$checkSubDir/" .
+        $component . "_" . "$compChkHash{$component}{$checkSubDir}.html\">warning</a></td>\n";
+    }
+    else {
+      print OUTFILE "<td $styleRedBG>?</td>\n";
+    }
+  }
+  print OUTFILE "</tr>\n";
+}
+
+# Add final html lines to output file
+my $htmlPostamble = "";
+$htmlPostamble .= "</td>\n";
+$htmlPostamble .= "</tr>\n";
+$htmlPostamble .= "</tbody>\n";
+$htmlPostamble .= "</table>\n";
+$htmlPostamble .= "</table>\n";
+$htmlPostamble .= "</table>\n";
+$htmlPostamble .= "</body>\n";
+$htmlPostamble .= "</html>\n";
+
+print OUTFILE "$htmlPostamble\n";
+close OUTFILE;
+print "\nCreated file $outFile\n";
+
+# Notify owners and the managers of fails.
+Notify();
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script creates a Health Check Summary report for Health Checks listed in
+the input data file. The report is written to the OUTPUT file read from input file.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-r release> <-l location> [-h] [-y] [-t test_email_addr]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  release  = Tool Kit release name (14.1, 15.1 ...)
+  location = Location to check against (build, shipb or tkb)
+  -h         (optional) application help
+  -y         (optional) verbose mode
+  -t         (optional) email address for sending test emails (will not
+                        send email to real Owners/Managers)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('rel|r=s'    => \$release,
+	      'loc|l=s'    => \$location,
+	      'test|t=s'   => \$testEmail,
+	      'verbose|y'  => \$verbose,
+	      'help|h|?'   => \$help) || return $ERROR;
+
+  # If help requested, show usage
+   if ($help) {
+     printHelp();
+     return $ERROR;
+   }
+
+  # Validate required input
+  if (! $release) {
+    print "ERROR: Release (-r) is a required parameter\n";
+    return $ERROR;
+  }
+  if (! $location) {
+    print "ERROR: Location (-l) is a required parameter\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : dateTimeStamp()
+# Purpose: Return datetime stamp in mm/dd/yyyy at hh:mm:ss format
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub dateTimeStamp {
+
+  my $date = `date +%m/%d/%C%y`;
+  chomp $date;
+  my $time = `date +%H:%M:%S`;
+  chomp $time;
+  my $datetime = "$date at $time";
+  return $datetime;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : getHtmlPreamble()
+# Purpose: Return datetime stamp in mm/dd/yyyy at hh:mm:ss format
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub getHtmlPreamble {
+
+  my ($tableWidth, $toolKitVersion, $currentDateTime, $agtsDate) = @_;
+
+my $html = "<!DOCTYPE html PUBLIC \"-//W3C//DTD HTML 4.01 Transitional//EN\">
+<html>
+<head>
+<meta content=\"text/html; charset=ISO-8859-1\" http-equiv=\"content-type\">
+<title>$title</title>
+</head>
+
+<body>
+<table style=\"width: 100%; font-family: Arial;\" border=\"0\" cellpadding=\"1\" cellspacing=\"1\">
+<tr align=\"center\">
+<td>
+
+<table style=\"width: ${tableWidth}px; font-size:20px\" border=\"0\" cellpadding=\"1\" cellspacing=\"1\">
+<tbody>
+
+<tr style=\"text-align: center;\">
+<td colspan=\"0\"><b>$title</b></td>
+</tr>
+
+<tr style=\"text-align: center;\">
+<td colspan=\"0\"><b>Tool Kit: $toolKitVersion</b></td>
+</tr>
+
+<tr style=\"text-align: center; font-size:16px\">
+<td colspan=\"0\">Last updated: $currentDateTime<br> <br></td>
+</tr>
+
+<tr style=\"text-align: left; color: rgb(0, 0, 0); font-size:16px; font-weight:bold;\">
+
+";
+
+  # Add AGTS or FCS date to the table row
+  if ($agtsDate ne "") {
+    $html .= "<td style=\"colspan=\"0\";\">All Groups to Ship: <span style='color: #E60000;'>$agtsDate</span>";
+    $html .= "<span style='font-weight:normal; color: #E60000;'> (all components must pass all checks before AGTS can start)</span><br> <br></td>";
+  }
+  else {
+    $html .= "<td style=\"colspan=\"0\";\">First Customer Ship: <span style='color: #E60000;'>$fcsDate</span>";
+    $html .= "<span style='font-weight:normal; color: #E60000;'></span><br> <br></td>";
+  }
+
+
+  $html .= "</tr>
+
+<tr style=\"text-align: left; color: rgb(0, 0, 0); font-size:16px;\">
+
+<td style=\"colspan=\"0\">
+
+<table style=\"font-size:16px\" border=\"0\" cellpadding=\"0\" cellspacing=\"0\">
+
+";
+
+  # Add the dynamic legend entries
+  foreach $entry (keys(%legend)) {
+    $html .= "<tr>";
+    $html .= "<td>";
+    $html .= "<span style='font-weight:bold;'>$entry</span>";
+    $html .= "</td>";
+    $html .= "<td>";
+    $html .= "&nbsp;= $legend{$entry}";
+    $html .= "</td>";
+    $html .= "</tr>";
+  }
+
+
+  $html .= "<tr>
+<td>
+&nbsp;
+</td>
+</tr>
+
+</table>
+
+</tr>
+
+<table $styleDkGrayBG border=\"0\" cellpadding=\"3\" cellspacing=\"1\">
+";
+
+  return $html;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : Notify
+# Purpose: Notify owners and their manager of fails
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub Notify {
+
+  # Hash defn ==> key = email address, value = list of failed check/component
+  my %owners = ();
+  my %managers = ();
+
+  # Create a list of fails for each owner/manager
+  my $check;
+  my $myComp;
+  foreach $check (keys(%failures)) {
+    my @failedComps = @{$failures{$check}};
+
+    print "Fails for $check: " . join(",", @failedComps) . "\n" if ($verbose);
+    foreach $myComp (@failedComps) {
+
+      print "Component: $myComp\n" if ($verbose);
+
+      my $owner;
+      if (uc($notifyOwner{$check}) eq "YES") {
+	$owner = $componentOwners{$myComp};
+	print " Owner: $owner\n" if ($verbose);
+      }
+      else {
+	print " Not saving Owner - $check (notify = OFF)\n" if ($verbose);
+      }
+
+      my $manager;
+      if (uc($notifyManager{$check}) eq "YES") {
+	$manager = GetManager($owner);
+	print " Manager: $manager\n" if ($verbose);
+      }
+      else {
+	print " Not saving Manager - $check (notify = OFF)\n" if ($verbose);
+      }
+
+      # Load the owners hash
+      my @list = ();
+      $entry = "$myComp##$check";
+      print " Entry: $entry\n" if ($verbose);
+      if ($owner) {
+	@list = @{$owners{$owner}} if (exists($owners{$owner}));
+	push(@list, $entry);
+	$owners{$owner} = [@list];
+      }
+
+      # Load the managers hash
+      @list = ();
+      if ($manager) {
+	@list = @{$managers{$manager}} if (exists($managers{$manager}));
+	push(@list, $entry);
+	$managers{$manager} = [@list];
+      }
+
+    }
+
+  }
+
+  SendEmail("owner", %owners);
+  SendEmail("manager", %managers);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SendEmail()
+# Purpose: Send email to owners/managers regarding check fails
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub SendEmail {
+
+  my ($emailType, %errors) = @_;
+
+  # Define the email salutation
+  my $role = "Manager";
+  $role = "Owner" if ($emailType eq "owner");
+
+  my $base = "Hello,\n\n";
+  $base .= "Our records indicate you are the $role of a Tool Kit component\n";
+  $base .= "listed below. These components did not pass required EDA Tool Kit\n";
+  $base .= "health checks which could impact delivery milestones and/or Tool\n";
+  $base .= "Kit quality.\n";
+  $base .= "\n";
+  $base .= "To view specific errors visit the EDA TK health report page at\n";
+  $base .= "$url\n";
+  $base .= "and click on the \"fail\" link for your component. Information\n";
+  $base .= "on the specific check is available by clicking the check's\n";
+  $base .= "column heading. That web page also contains suggestions on how\n";
+  $base .= "to resolve and prevent these errors.\n";
+  $base .= "\n";
+  $base .= "You will continue to receive these emails daily until these\n";
+  $base .= "errors have been resolved. If you received this email in error\n";
+  $base .= "please contact Naveen Chandrappa.\n";
+  $base .= "\n";
+  $base .= sprintf("%-20s%-20s\n", "Component", "Failed Check(s)");
+  $base .= sprintf("%-20s%-20s\n", "------------", "-----------------");
+
+  # Add the errors and send the email to each Owner / Manager
+  my $from = "EDA-TK-admin";
+  my $address;
+  my $sendOne = 0;
+  foreach $address (keys(%errors)) {
+    my @list = @{$errors{$address}};
+    my $errorBody = "";
+    foreach $entry (sort(@list)) {
+      my($component, $check) = split("##", $entry);
+      my $colInfo = $helpLookupHash{$check};
+      my ($colText, $colUrl) = split(";", $colInfo);
+      $errorBody .= sprintf("%-20s%-20s\n", $component, $colText);
+    }
+
+    # Define the email closing
+    my $body = $base . $errorBody . "\n";
+    $body .= "Thank you,\n";
+    $body .= "EDA Software Release Team\n";
+
+    # Send the email
+    if ($testEmail) {
+      $body .= "\n\nIf not TEST would be send to $address\n";
+      $address = $testEmail;
+    }
+    $address =~ s/\@/\\\@/;
+    print "Sending test emails ... $address\n" if ($testEmail);
+
+    my $subject = "EDA TK $toolKitVersion health check errors";
+# `/bin/mailx -s $subject $address << EOF
+#$body
+#`;
+
+    my %emailObj;
+    email::createobj(\%emailObj, "plain");
+
+    email::addto(\%emailObj, $address);
+    email::addfrom(\%emailObj, $from);
+    email::addsubject(\%emailObj, $subject);
+    email::addbody(\%emailObj, $body);
+
+    my $reply = email::sendit(\%emailObj);
+    if ($reply == 0) {
+      print "Email sent successfully!\n";
+    }
+    else {
+      print "ERROR: unable to send email ... $reply\n";
+    }
+
+  }
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetOwner()
+# Purpose: Look up the Component owner from the database
+# RCs    : owner's name
+#------------------------------------------------------------------------------
+sub GetOwner {
+
+  my ($component) = @_;
+
+  print "\nComponent: $component\n";
+  print "ToolKit  : $release\n";
+
+  # Construct the command
+  my $command = "$BIN/showComponent";
+  $command .= " -r $release";
+  $command .= " -c $component";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  return "" if ($rc != $OK);
+
+
+  # Determine the owner
+  my $owner = "";
+  my $entry;
+  foreach $entry (@results) {
+    next if ($entry !~ /OWNER/);
+    my @tokens = split(":", $entry);
+    my $myOwner = TKutils::Trim($tokens[1]);
+    $owner .= "," if ($owner ne "");
+    $owner .= "$myOwner";
+  }
+
+  print "Owner    : $owner\n";
+
+  return $owner;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetManager()
+# Purpose: Determine the owner's manager
+# RCs    : manager's name
+#------------------------------------------------------------------------------
+sub GetManager {
+
+  my ($owner) = @_;
+
+  return "" if ($owner eq "");
+
+  # Create a list of owners in case there are more than 1
+  my @owners = ();
+  if ($owner =~ /,/) {
+    @owners = split(",", $owner);
+  }
+  else {
+    push(@owners, $owner);
+  }
+
+  # Determine the managers for each owner .. create a unique list
+  my @managers = ();
+  foreach $owner (@owners) {
+
+    # Query BluePages for owners email address
+    my $query = new BPQuery('byInternetAddr', $owner);
+    my ($recordKey) = ($query->recordKeys());
+
+    next if (! $recordKey);  # Skip looking for mgr if owner ! found
+
+    # Get serial number and country code for owners manager
+    my $mgrnum = $query->record($recordKey)->valueOf('MGRNUM');
+    my $mgrcc  = $query->record($recordKey)->valueOf('MGRCC');
+
+    # Query Bluepages for managers serial number and country code (CNUM)
+    $query = new BPQuery('byCnum', "$mgrnum$mgrcc");
+    ($recordKey) = ($query->recordKeys());
+    my $mgr = $query->record($recordKey)->valueOf('INTERNET');
+
+    # Add mgr to list if not already present
+    if (! grep(/^$mgr$/, @managers)) {
+      push(@managers, $mgr);
+    }
+
+  }
+
+  print "Mgrs     : " . join(",", @managers) . "\n";
+
+  return join(",", @managers);
+
+}

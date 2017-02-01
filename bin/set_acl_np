@@ -1,0 +1,50 @@
+#!/bin/ksh
+# 
+# This is a copy of the /afs/eda/@sys/contrib/bin/set_acl file, but with 
+# the promp removed so that it can be used in script
+#
+# This shell will recursively set the ACL for any given AFS directory
+# for which the user has administrative authority
+#
+# find <dir> -type d -print -exec fs sa -dir {} -acl <acl-list> \;
+#                      -OR-
+# find <dir> -type d -print | xargs fs seta -acl someuser read -dir
+#
+# Modified 4/28/94	add command line options		pdf 
+#			add real_dir call to follow links	pdf
+#
+#
+
+PATH=$PATH:/afs/edapd.fishkill.ibm.com/@sys/contrib/bin
+
+if [ $# = 3 ]
+  then 
+    DIR=$1
+    GROUP=$2
+    ACCESS=$3
+ #   echo "Press <Enter> to perform this command recursively."
+    echo "  Run 'fs sa $DIR $GROUP $ACCESS' recursively..."
+ #   read ch
+  else
+    echo "This will recursively set the Access Control List for all the "
+    echo "sub-directories of a given AFS directory..."
+    echo " "
+    echo "Enter the AFS directory : \c"
+    read DIR
+    echo "Enter a user or a group name: \c"
+    read GROUP
+    echo "Access rights: l,i,d,a,r,w,k, write(rlidwk),read(rl),all,none."
+    echo "Enter access right: \c"
+    read ACCESS
+fi
+
+DIR=`real_dir $DIR`
+
+find $DIR -type d -print >> /tmp/list_dirs.$$
+
+while read DIR_NAME
+do
+   /usr/afsws/bin/fs setacl "$DIR_NAME" $GROUP $ACCESS
+done < /tmp/list_dirs.$$
+
+rm /tmp/list_dirs.$$

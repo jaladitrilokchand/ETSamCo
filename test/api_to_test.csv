@@ -1,0 +1,27 @@
+API,Test Type,Syntax
+addRole,manual,addRole -db GTEST -r <SOME_ROLE> -d perf_testing -t EdaTkRole
+addRole,manual,addRole -db GTEST -r <SOME_ROLE> -d perf_testing -t CompTkRelRole
+branchCheck,auto,branchCheck -db GTEST -c ess -b trunk
+changeReqCheckState,auto,changeReqCheckState -db GDEV -cq TEST000000101 -t 14.1.0 -c ess -s APPROVED
+changeReqCreate,manual,changeReqCreate -db GDEV -t 14.1.0 -c ess -cq <SOME_CQ_ID> -d perf_testing
+changeReqCreate,manual,changeReqCreate -db GDEV -t 14.1.0 -c ess -auto -d perf_testing
+changeReqUpdate,auto,changeReqUpdate -db GDEV -cq TEST000000101 -t 14.1.0 -s DEV_COMPLETE
+compStatus,auto,compStatus -db GTEST -t 14.1.0
+cr.getByCQ,auto,cr.getByCQ -db GDEV -cqid TEST000000101 -output test1.xml
+cr.getUpdated,auto,cr.getUpdated -db GDEV -startdate '2011-01-01 00:00:00' -enddate '2011-06-01 00:00:00' -output test2.xml
+createCodeUpdate,manual,createCodeUpdate -db GTEST -f ../test/post_commit.test (EDIT INPUT FILE)
+generateLevelHist,auto,generateLevelHist -db GTEST -t 14.1.0 -c ess -last
+getComponents,auto,getComponents -db GTEST -t 14.1.0
+getRevisions,auto,getRevisions -db GTEST -t 14.1.0 -c ess -l build -latest
+getToolKits,auto,getToolKits -db GTEST -r 14.1 -s DEVELOPMENT -q
+showComponent,auto,showComponent -db GTEST -r 14.1 -c ess
+showRelComps,auto,showRelComps -db GTEST -r 14.1 -q
+svnLog,auto,svnLog -db GTEST -t 14.1.0 -c einstimer -l build -e EXTRACT_START -m perf_testing
+svnLog,auto,svnLog -db GTEST -t 14.1.0 -c einstimer -l build -e EXTRACTED -m perf_testing
+svnLog,auto,svnLog -db GTEST -t 14.1.0 -c einstimer -l build -e ADVANCED_TO_DEV -m perf_testing
+updateComponent,auto,updateComponent -db GTEST -t 14.1.0 -c ess -b stadtlag@us.ibm.com
+updateTkComp,auto,updateTkComp -db GTEST -t 14.1.0 -c ess -s PREVIEW
+updateToolKit,auto,updateToolKit -db GTEST -t 14.1.0 -s PREVIEW
+userAdd,manual,userAdd -db GTEST -a <SOME_AFS_ID> -i <SOME_INTRANET_ID>
+userUpdate,auto,userUpdate -db GTEST -u stadtlag@us.ibm.com -a stadtlag
+validateRelComp,auto,validateRelComp -db GTEST -r 14.1 -c ess

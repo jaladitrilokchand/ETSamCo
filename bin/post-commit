@@ -1,0 +1,460 @@
+#!/usr/bin/env tclsh
+
+##################################
+##################################
+# Post-Commit Hook History
+# yy/mm/dd   author rel  comment
+#=============================================================================================
+# 11/12/06   SET    3.0  New tags to denote abstract field in transacation file
+# 11/08/03   SET    2.1  Remove -t parm from commit.ready call
+# 11/07/26   SET    2.1  Remove Release and Toolkit from transaction file
+# 11/06/29   SET    2.0  Redirect STDERR from hook extensions so that RC=0 unless explictly set otherwise
+# 11/06/22   SET    2.0  Do not generate mail for failure to identify branch (pre-commit catches it)
+# 11/06/07   SET    2.0  Bluejiffium operations now use same repos name style as greeniffy
+# 11/06/06   SET    2.0  Support for component specific hook extensions
+# 11/05/12   SET    1.9  temporarily deactivate attempts to use hdplib and propset
+# 11/05/11   SET    1.9  Update command dir and log dir for edasvn server
+# 11/05/06   SET    1.9  Check branch requirment for change control, fail safe with N/A
+# 11/04/26   SET    1.9  Optional Change Request Number Support
+# 11/03/28   SET    1.9  URL name built based on what server (name conventions changed)
+# 11/03/24   SET    1.9  allow for space in file names in change records
+# 11/03/11   SET    1.8  hostname used to adjust the db_mode value to pass to createFuncUpdate
+# 11/03/09   SET    1.8  hostname used to switch SVN URL prefix (hostname doesn't always match SSL)
+# 11/01/21   SET    1.7  reduce number of mails sent for one failing commit
+# 10/12/16   SET    1.7  turn off STDERR output for bad DB_ID property handling
+# 10/12/09   SET    1.7  Define $STAGE as part of repos name prior to release (i.e. eda vs edadev)
+# 10/11/05   SET    1.7  userid and pwd on propset command, switch to "no_msg" for message cntl
+# 10/10/22   SET    1.7  format timestamp in file names as date.time
+# 10/10/21   SET    1.7  setting new release number following bump of prod code
+# 10/09/23   SET    1.4  error conditions generate mail
+# 10/09/22   SET    1.4  move logdir for dev mode
+# 10/09/13   SET    1.4  all_ok set at top of proc
+# 10/08/16   SET    1.4  revprop URL change
+# 10/07/29   SET    1.2  column alignment in transaction file for readability
+# 10/07/20   SET    1.2  single run_mode switch controls pointers
+# 10/06/16   SET    1.0  change of directory for writing files
+# 10/05/27   SET    1.0  call to createFuncUpdate activated
+# 10/05/25   SET    1.0  create history and release tracking
+
+set hook_rel 3.0
+
+# keep track of when mail is sent, to reduce number of mail sent for one commit
+set no_mail_sent 1
+
+# if switched on (1), this causes a log file to be written
+set write_log 1
+
+# optimistic setting,  reset if any problems detected
+# some problems allow continued processing, but need a non-zero return at the end for message handling
+set no_msg 1
+
+# Passed parms are the Repository name, and the Revision number
+set REPOS [ lindex $argv 0 ]
+set REV   [ lindex $argv 1 ]
+
+
+set WHEREDAT  [exec hostname]
+switch -- $WHEREDAT {
+        "bluejiffium.btv.ibm.com" {
+          # it's on the bluejiffium SSL certificate
+           set URLPREFIX "bluejiffium.btv.ibm.com"
+           set primary_server 0
+        }
+        default {
+           # Assume on edasvn machine (aka greenjiffy) the SSL certificate for edasvn is for greenjiffy
+           set URLPREFIX "greenjiffy.fishkill.ibm.com"
+           set primary_server 1
+        }
+}
+
+# Where to find the ETree infrastructure code
+set INFRAPATH "/afs/eda/data/edainfra/tools"
+
+# What to prefix log file names in e-mail with, so that they are clickable URLs
+set LOGURLPREFIX "http://w3.eda.ibm.com"
+
+#####
+##  Using last directory in REPOS as Component Name
+##  2nd to last directory will determine whether this is a Prod or Dev commit
+set repos_split [split $REPOS /]
+set COMPONENT [lindex $repos_split end]
+set STAGE     [lindex $repos_split end-1]
+
+####################################################
+### Release and Toolkit now determined with the DB api calls based on branch
+###
+#set TOOL_KIT 14.1.0
+#set RELEASE   14.1
+
+
+
+switch -- $STAGE {
+        "eda" {
+          set run_mode PROD
+        }
+        "tk" {
+          set run_mode PROD
+        }
+        default {
+          # Assume DEVelopment mode (safe) for all other cases
+          set run_mode DEV
+        }
+}
+
+#set run_mode PROD
+#set run_mode MIXED
+#set run_mode DEV
+
+switch -- $run_mode {
+        "PROD" {
+           set cmd_path  "$INFRAPATH/enablement/prod/bin"
+           set hookextension_path  "$INFRAPATH/component/prod/hue/$COMPONENT/"
+           set db_mode PROD
+           set logdir "$INFRAPATH/user/logs"
+        }
+        "MIXED" {
+           # Run production level command scripts, but direct updates to DEV db2 database
+           set cmd_path  "$INFRAPATH/enablement/prod/bin"
+           set hookextension_path  "$INFRAPATH/component/dev/hue/$COMPONENT/"
+           set db_mode DEV
+           set logdir "$INFRAPATH/user/logs/dev"
+        }
+        default {
+          # Assume DEVelopment mode (safe) for all other cases
+           set cmd_path  "$INFRAPATH/enablement/dev/bin"
+           set hookextension_path  "$INFRAPATH/component/dev/hue/$COMPONENT/"
+           set db_mode DEV
+           set logdir "$INFRAPATH/user/logs/dev"
+        }
+} ; # end of run_mode switches
+
+if { $primary_server } {
+  # a "G" prefix on the db_mode switch to the DB2 API
+  set db_mode "G$db_mode"
+} else {
+  # On alternate server, a "B" prefix on the db_mode switch to the DB2 API
+  set db_mode "B$db_mode"
+}
+
+
+
+set WHODAT  [exec whoami]
+
+set UUID [ exec svnlook uuid     $REPOS ]
+
+## Delimiter to be used in generating the transaction file
+set delim "|"
+
+set file "$logdir/post_commit_${UUID}_[clock format [clock seconds] -format %Y%m%d.%H%M%S]"
+set logfile $file\_log
+if { [catch {open $logfile w 0755} logfile_fid] } {
+      set no_msg 0
+      puts stderr "SVN post-commit hook: Cannot open log file $logfile for write."
+      puts stderr "The commit has been performed, but there is no ETree DB2 or log record of it."
+      puts stderr "The ETRee enablement team has been notified by mail."
+      if { [ catch {exec echo "Unable to create/write $logfile" | mail -s "SVN $db_mode Hook Post-Commit Logfile Error Detected" sturnbul@us.ibm.com } sm_result] } {
+      }
+      set write_log 0
+} else {
+  puts $logfile_fid "Post-commit SVN Hook processing log"
+  puts $logfile_fid "REPOS: $REPOS"
+  puts $logfile_fid "Running as $WHODAT"
+  puts $logfile_fid "Running on $WHEREDAT"
+  puts $logfile_fid "Run Mode set as $run_mode"
+}
+
+###############
+##
+## Component Specific Early Hook Extension Support
+##
+##
+###############
+if { [ file exists $hookextension_path/post-commit-early ] } {
+   if { $write_log } {
+     puts $logfile_fid "Early Hook Extension: $hookextension_path/post-commit-early"
+   }
+   if { [catch {exec $hookextension_path/post-commit-early $REPOS $REV 2>@1 }  ext_out] } {
+     puts stderr "Post-Commit Early Extension for $COMPONENT returned the following messages."
+     puts stderr $ext_out
+     if { $write_log } {
+       puts $logfile_fid "Post-Commit Early Extension for $COMPONENT returned the following messages."
+       puts $logfile_fid $ext_out
+     }
+     set no_msg 0
+   }
+}
+###############
+## End of Component Specific Early Hook Extension Support
+###############
+
+
+set author [exec svnlook author $REPOS]
+set logmsg [ exec svnlook log  $REPOS ]
+
+####
+##
+## Open the transaction file and start writing out data for DB api
+##
+####
+
+if { [catch {open $file w 0755} file_fid] } {
+      set no_msg 0
+      puts stderr "ERROR: Cannot open transaction file for write, $file"
+      puts stderr "The commit has been performed, but the ETree DB2 will have no record of it."
+      puts stderr "The ETRee enablement team has been notified by mail."
+      if { $write_log } {
+        puts $logfile_fid "ERROR: Cannot open/create transaction file for write, $file"
+      }
+      if { [ catch {exec echo "$LOGURLPREFIX/$logfile" | mail -s "SVN $db_mode Hook Post-Commit Transaction File Error Detected" sturnbul@us.ibm.com } sm_result] } {
+        if { $write_log } {
+          puts $logfile_fid "ERROR: Transaction File Mail fail"
+          puts $logfile_fid $sm_result
+        }
+      }
+    } else {
+      puts $file_fid    "HOOKREL     $delim $hook_rel $delim"
+      puts $file_fid    "REPOS       $delim $REPOS $delim"
+      puts $file_fid    "STAGE       $delim $STAGE $delim"
+      puts $file_fid    "COMPONENT   $delim $COMPONENT $delim"
+#      puts $file_fid    "RELEASE     $delim $RELEASE $delim"
+#      puts $file_fid    "TOOL_KIT    $delim $TOOL_KIT $delim"
+
+      ###
+      ##        adjust cr_string if needed to N/A
+      ##  extract the branch name (or trunk) from the change list
+      ##  check if that branch requires the use of change control numbers
+      ##  expecting each change entry to have a target of
+      ##      trunk/file
+      ##      branches/branchname/file
+      ##      tags/file  <--- we're ignoring these at this time
+      ##  adjust cr_string to N/A for all unexpected results, and send mail to ETree team
+      ##
+      ####
+      set the_branch ""
+      set cr_string "N/A"
+      foreach changerec [split [ exec svnlook changed $REPOS ] "\n"] {
+         set mod [lindex $changerec 0]
+         set filename [ string trim [string range $changerec [string first " " $changerec] end] ]
+         if { [ string equal -length 6 "trunk/" $filename ] } {
+           set the_branch trunk
+           break
+         } elseif { [ string equal -length 8 "branches/" $filename ] } {
+           set splitname [split $filename "/"]
+           set the_branch [lindex $splitname 1]
+           break
+         }
+      } ; # end of foreach change record loop
+
+      if { $the_branch != "" } {
+
+        if { $write_log } {
+          puts $logfile_fid "Target Branch : $the_branch"
+        }
+
+        # make the api call to check if a commit to this branch of the component requires change numbers
+        set cr_query_cmd  $cmd_path/branchCheck
+        if { [catch {exec $cr_query_cmd  -c $COMPONENT -b $the_branch -db $db_mode }  need_cr] } {
+          # all was not well, send some mail about branch change query fail
+          if { $write_log } {
+            puts $logfile_fid "Output from branchCheck : $need_cr"
+          }
+          if { [ catch {exec echo "$LOGURLPREFIX/$logfile" | mail -s "SVN $db_mode Hook Post-Commit Error Detected in branchCheck" "sturnbul@us.ibm.com" } sm_result] } {
+          } else {
+            set no_mail_sent 0
+          }
+        } else {
+          if { $need_cr == 1 } {
+
+            ####
+            ##
+            ##  parse log message to extract change request number
+            ##     --  ":" marks the end of the change request number
+            ##     --  strip off the ":" for checking
+            ##
+            ####
+            set cr_string [ string trimright [ string range $logmsg 0 [string first ":" $logmsg] ] ":" ]
+
+            if { $cr_string == "" } {
+              # all was not well - no change request string found
+              set cr_string "N/A"
+              if { [ catch {exec echo "$LOGURLPREFIX/$logfile" | mail -s "SVN $db_mode Hook Post-Commit- Missing Required  Change Number" "sturnbul@us.ibm.com" } sm_result] } {
+              } else {
+                set no_mail_sent 0
+            }
+            } else {
+            set cr_cmd  $cmd_path/commit.ready
+            if { [catch {exec $cr_cmd -c $COMPONENT -b $the_branch -cq $cr_string -db $db_mode }  db_result] } {
+                # all was not well,   CR Num is not in status Approve
+                set cr_string "N/A"
+                if { [ catch {exec echo "$LOGURLPREFIX/$logfile" | mail -s "SVN $db_mode Hook Post-Commit- Change Number, $cr_string, not in Approve state" "sturnbul@us.ibm.com" } sm_result] } {
+                } else {
+                  set no_mail_sent 0
+                }
+              }
+            }  ; # end of got a cr_string else case
+
+          } else {
+           # change number not required for this branch... carry on.
+           set cr_string "N/A"
+          }
+        } ; # end of change record need determined else case
+
+      } else {
+        # couldn't figure out what branch to ask about... carry on.
+          set cr_string "N/A"
+          if { $write_log } {
+            puts $logfile_fid "Target Branch : Unknown"
+          }
+      }  ; # end of branch specific work
+
+      puts $file_fid    "CHANGE_REQ  $delim $cr_string $delim"
+
+      puts $file_fid    "REVISION    $delim $REV $delim"
+      ##
+      ##11/12/06 - use <key> </key> structure to denote abstract content
+      ##
+      puts $file_fid    "<ABSTRACT>"
+      puts $file_fid    $logmsg
+      puts $file_fid    "</ABSTRACT>"
+
+      puts $file_fid    "USER        $delim $author $delim"
+      set lookdate [ exec svnlook date $REPOS ]
+      puts $file_fid    "COMMIT_DATE $delim [ lindex $lookdate 0 ] $delim"
+      puts $file_fid    "COMMIT_TIME $delim [ lindex $lookdate 1] $delim"
+      foreach changerec [split [ exec svnlook changed $REPOS ] "\n"] {
+         set mod [lindex $changerec 0]
+         set filename [ string trim [string range $changerec [string first " " $changerec] end] ]
+         puts $file_fid "CHANGED     $delim $mod $delim $filename $delim"
+      }
+      close $file_fid
+
+      #############
+      ## Call DB app to create Code Update Record
+      #############
+      #set func_cmd  $cmd_path/createFuncUpdate
+      set func_cmd  $cmd_path/createCodeUpdate
+      puts $logfile_fid "DB Command $delim $func_cmd -db $db_mode -f $file"
+      if { [catch {exec $func_cmd  -db $db_mode -f $file}  db_result] } {
+         # all was not well
+         # set no_msg 0
+         puts $logfile_fid "ERROR: DB Update Failed by $func_cmd"
+         puts $logfile_fid $db_result
+         if { [ catch {exec echo "$LOGURLPREFIX/$logfile" | mail -s "SVN $db_mode Hook Post-Commit Error Detected in $func_cmd" "sturnbul@us.ibm.com" } sm_result] } {
+           puts $logfile_fid "ERROR: Create DB Update Mail fail"
+           puts $logfile_fid $sm_result
+         } else {
+           set no_mail_sent 0
+         }
+
+      } else {
+      }
+
+      # get DB ID from temp file
+      if { [catch {exec grep DB_ID $file} grep_result] } {
+         puts $logfile_fid "ERROR: Unable to locate DB_ID in $file"
+         puts $logfile_fid $grep_result
+         if { $no_mail_sent } {
+           if { [ catch {exec echo "$LOGURLPREFIX/$logfile" | mail -s "SVN $db_mode Hook Post-Commit DB_ID not Generated" sturnbul@us.ibm.com } sm_result] } {
+             puts $logfile_fid "ERROR: DB_ID Grep Mail fail"
+             puts $logfile_fid $sm_result
+           } else {
+             set no_mail_sent 0
+           }
+         }
+      } else {
+        set DB_ID_LINE [exec grep DB_ID $file]
+        if { [string length $DB_ID_LINE] > 0 } {
+          set delim_index [string first "$delim" $DB_ID_LINE]
+          set delim_index_end [string last "$delim" $DB_ID_LINE]
+          set DB_ID [string range $DB_ID_LINE [expr $delim_index+1] [expr $delim_index_end-1] ]
+          puts $logfile_fid "DB ID:  $DB_ID"
+          #####
+          ##
+          ## Get the authentication information from the server
+          ##
+          #####
+##
+## 11/12/06 - SET - no longer back annotatiing DB_ID back as revision property per agreement with Greg Stadtlander that it's not required/used.
+##
+#         if { [ file exists /home/hdplib/pwd ] } {
+#           set funcid_pwd [exec cat /home/hdplib/pwd]
+#          } else {
+#            # cannot find the authentication file... messages generated below
+#          }
+#
+#         if { [ info exists funcid_pwd ] && [string length $funcid_pwd ] > 0 } {
+#           set URL_name "$URLPREFIX/eda/$STAGE/$COMPONENT"
+#
+# use dummy call for propset_cmd until hdplib functional ID is back online
+#           set propset_cmd "exec /afs/btv/data/subversion/bin/svn propset --revprop -r $REV TK_func_update_id $DB_ID https://$URL_name --non-interactive --no-auth-cache --username hdplib@us.ibm.com --password $funcid_pwd"
+#           set propset_cmd "exec pwd"
+#           if { [catch $propset_cmd propset_result] } {
+#            set no_msg 0
+#            if { [ catch {exec echo "$LOGURLPREFIX/$logfile" | mail -s "SVN $db_mode Hook Post-Commit Propset Error Detected" "sturnbul@us.ibm.com, amagnan@us.ibm.com" } sm_result] } {
+#              puts $logfile_fid "ERROR: Propset Mail fail"
+#              puts $logfile_fid $sm_result
+#            } else {
+#              set no_mail_sent 0
+#            }
+#            puts $logfile_fid "WARNING: Unable to set TK_func_update_id property"
+#            # trim the password off the end of the propset_cmd for normal log processing
+#            puts $logfile_fid [string trimright $propset_cmd $funcid_pwd]
+#            puts $logfile_fid [string trimright $propset_cmd ]
+#            puts $logfile_fid $propset_result
+#           }
+#         } else {
+#           # didn't get authentication information
+#           puts $logfile_fid "WARNING: Unable to Obtain PWD Needed for TK_func_update_id propset"
+#           if { [ catch {exec echo "$LOGURLPREFIX/$logfile" | mail -s "SVN $db_mode Hook Post-Commit PWD not Retrieved" "sturnbul@us.ibm.com, amagnan@us.ibm.com" } sm_result] } {
+#             puts $logfile_fid "ERROR: PWD Fetch Mail fail"
+#             puts $logfile_fid $sm_result
+#           }
+#         }
+        } else {
+           # no DB_ID found in commit hook file
+           if { $no_mail_sent} {
+             if { [ catch {exec echo "$LOGURLPREFIX/$logfile" | mail -s "SVN $db_mode Hook Post-Commit DB_ID not Generated" "sturnbul@us.ibm.com"  } sm_result] } {
+               puts $logfile_fid "ERROR: DB_ID Mail fail"
+               puts $logfile_fid $sm_result
+            } else {
+              set no_mail_sent 0
+            }
+          }
+           puts $logfile_fid "ERROR: No DB_ID returned in $file by $func_cmd"
+        } ; # end of no DB_ID string 0 length case
+      } ; # end of no DB_ID found else case
+
+    } ; # end of case for successful transaction file creation
+
+###############
+##
+## Component Specific Late Hook Extension Support
+##
+##
+###############
+if { [ file exists $hookextension_path/post-commit-late ] } {
+   if { $write_log } {
+     puts $logfile_fid "Early Hook Extension: $hookextension_path/post-commit-late"
+   }
+   if { [catch {exec $hookextension_path/post-commit-late $REPOS $REV 2>@1 }  ext_out] } {
+     puts stderr "Post-Commit Late Extension for $COMPONENT returned the following messages."
+     puts stderr $ext_out
+     if { $write_log } {
+       puts $logfile_fid "Post-Commit Late Extension for $COMPONENT returned the following messages."
+       puts $logfile_fid $ext_out
+     }
+     set no_msg 0
+   }
+}
+###############
+## End of Component Specific Early Hook Extension Support
+###############
+
+if { $write_log } { close $logfile_fid }
+
+if { $no_msg } {
+exit 0
+} else {
+  exit 1
+}
+

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CqQuery>
+	<login>
+		<username>asuren</username>
+		<password>fake</password>
+		<database>TRYIT</database>
+		<schema>mdcms</schema>
+	</login>
+	<client>
+		<app-name>CQServiceTest</app-name>
+	</client>
+		<query>
+	     <query-name>Personal Queries/Submitted_by_a_user_and_state</query-name>
+	     <filters>
+	     	<filter name="submitter_fullname" operator="Equals" value="Suren, Aydin" />
+	        <filter name="State" operator="In" value="InProcess, Submitted" />
+	     </filters>
+	</query>
+</CqQuery>

@@ -1,0 +1,468 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: fixTkQuota
+#  SYNTAX: Run with -h
+#
+# CREATOR: Naveen Chandrappa
+#    DATE: 13/04/2016
+#
+#  INPUTS: See application help message.
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: n/a
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# Script to increase afs volume quota size for few large components in toolkit.
+# Should be run on an AIX machine and using 'bradmin' user id.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 13/04/2016 NMC  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use FindBin qw($RealBin);
+
+
+use lib "$RealBin/../libperl";
+use TKutils;
+
+
+# Global variables
+my $BIN_DIR = $RealBin;
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+
+# Program variables
+my $appName = "fixTkQuota";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dryRun          = 0;
+my $tkPatchLevel    = "";
+my $toolKit         = "";
+my $release         = "";
+my $component       = "";
+my $startDir;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+my $MAX_QUOTA = 15000;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+# Get the components to process
+my @components = TKutils::GetComponents($toolKit, $component, "");
+
+# Verify /afs/eda/tk<patch> HLQ exists
+if (! -e "/afs/eda/patchTk/tk$tkPatchLevel") {
+  CleanExit("\nMissing /afs/eda/patchTk/tk$tkPatchLevel AFS HLQ", $ERROR);
+}
+
+# Is user authorized to run this script?
+if (! TKutils::IsAuthorized("bradmin", $dryRun)) {
+  print "ERROR: user not authorized to run this application\n";
+  exit $ERROR;
+}
+
+# Run 'fs sq' with required quota size to increase.
+my @warnings = ();
+
+  # Construct the command
+  my $cmd_bonntools = "fs sq /afs/eda/patchTk/tk$tkPatchLevel/bonntools/$release -max 10000000";
+  # Run the command and show results
+  my @results1;
+  print "$cmd_bonntools\n";
+  my $rc1 = TKutils::RunCommand($cmd_bonntools, \@results1, 0, $verbose);
+  if ($rc1 == 0) {
+    print " * Quota increased for 'bontools' to 10000000\n";
+  }
+  
+  # Construct the command
+  my $cmd_einstimer = "fs sq /afs/eda/patchTk/tk$tkPatchLevel/einstimer/$release -max 15000000";
+  # Run the command and show results
+  my @results2;
+  print "$cmd_einstimer\n";
+  my $rc2 = TKutils::RunCommand($cmd_einstimer, \@results2, 0, $verbose);
+  if ($rc2 == 0) {
+    print " * Quota increased for 'einstimer' to 15000000\n";
+  }
+  
+  # Construct the command
+  my $cmd_hdp = "fs sq /afs/eda/patchTk/tk$tkPatchLevel/hdp/$release -max 15000000";
+  # Run the command and show results
+  my @results3;
+  print "$cmd_hdp\n";
+  my $rc3 = TKutils::RunCommand($cmd_hdp, \@results3, 0, $verbose);
+  if ($rc3 == 0) {
+    print " * Quota increased for 'hdp' to 11000000\n";
+  }
+  
+  # Construct the command
+  my $cmd_mar = "fs sq /afs/eda/patchTk/tk$tkPatchLevel/mar/$release -max 50000000";
+  # Run the command and show results
+  my @results4;
+  print "$cmd_mar\n";
+  my $rc4 = TKutils::RunCommand($cmd_mar, \@results4, 0, $verbose);
+  if ($rc4 == 0) {
+    print " * Quota increased for 'mar' to 50000000\n";
+  }
+  
+  # Construct the command
+  my $cmd_mar2 = "fs sq /afs/eda/patchTk/tk$tkPatchLevel/mar2/$release -max 40000000";
+  # Run the command and show results
+  my @results5;
+  print "$cmd_mar2\n";
+  my $rc5 = TKutils::RunCommand($cmd_mar2, \@results5, 0, $verbose);
+  if ($rc5 == 0) {
+    print " * Quota increased for 'mar2' to 40000000\n";
+  }
+
+  # Construct the command
+  my $cmd_mar2_2243 = "fs sq /afs/eda/patchTk/tk$tkPatchLevel/mar2_2243/$release -max 50000000";
+  # Run the command and show results
+  my @results6;
+  print "$cmd_mar2_2243\n";
+  my $rc6 = TKutils::RunCommand($cmd_mar2_2243, \@results6, 0, $verbose);
+  if ($rc6 == 0) {
+    print " * Quota increased for 'mar2_2243' to 50000000\n";
+  }
+  
+  # Construct the command
+  my $cmd_pds = "fs sq /afs/eda/patchTk/tk$tkPatchLevel/pds/$release -max 10000000";
+  # Run the command and show results
+  my @results7;
+  print "$cmd_pds\n";
+  my $rc7 = TKutils::RunCommand($cmd_pds, \@results7, 0, $verbose);
+  if ($rc7 == 0) {
+    print " * Quota increased for 'pds' to 10000000\n";
+  }
+  
+  # Construct the command
+  my $cmd_modelutil = "fs sq /afs/eda/patchTk/tk$tkPatchLevel/modelutil/$release -max 3000000";
+  # Run the command and show results
+  my @results8;
+  print "$cmd_modelutil\n";
+  my $rc8 = TKutils::RunCommand($cmd_modelutil, \@results8, 0, $verbose);
+  if ($rc8 == 0) {
+    print " * Quota increased for 'modelutil' to 3000000\n";
+  }
+    
+
+ print "Increasing volume for customtk (ignore if you are setting up patch level toolkit)";
+  # Construct the command
+  my $cmd_oa = "fs sq /afs/eda/customtk/tk$tkPatchLevel/oa/$release -max 9000000";
+  # Run the command and show results
+  my @results9;
+  print "$cmd_oa\n";
+  my $rc9 = TKutils::RunCommand($cmd_oa, \@results9, 0, $verbose);
+  if ($rc9 == 0) {
+    print " * Quota increased for 'customtk/tk$tkPatchLevel/oa/$release' to 9000000\n";
+  }
+
+   print "Increasing volume for customtk (ignore if you are setting up patch level toolkit)";
+  # Construct the command
+  my $cmd_oa_2243 = "fs sq /afs/eda/customtk/tk$tkPatchLevel/oa_2243/$release -max 9000000";
+  # Run the command and show results
+  my @results10;
+  print "$cmd_oa_2243\n";
+  my $rc10 = TKutils::RunCommand($cmd_oa_2243, \@results10, 0, $verbose);
+  if ($rc10 == 0) {
+    print " * Quota increased for 'customtk/tk$tkPatchLevel/oa_2243/$release' to 9000000\n";
+  }
+
+
+if (scalar(@warnings) > 0) {
+  print "WARNINGS\n=============\n";
+  print join("", @warnings) . "\n";   
+}
+else {
+  print "\n\nNo warnings to report\n";
+}
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  #LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Script to increase afs volume quota size for few large components in a tool kit.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tk or tk_patch> [-y] [-h]
+  #$appName <-t tk_patch> [-c component] [-dryrun] [-y] [-h]
+                     
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  #component = Process just this component
+  #-dryrun   = Run script in dryrun mode
+  
+  my $where ="
+WHERE:
+  -t        = Tool Kit or toolkit patch (ie, 14.1.11, 14.1.12, 14.1.11.6, 14.1.11.7 ...)
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('t=s'       => \$tkPatchLevel,
+              'c=s'       => \$component,
+	      	  'dryrun'    => \$dryRun,
+	      	  'y'         => \$verbose,
+	      	  'help|h|?'  => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $tkPatchLevel) {
+    print "ERROR: Tool Kit patch (-t) is a required parameter\n";
+    return $ERROR;
+  }
+  @tokens = split(/\./, $tkPatchLevel);
+  #if (scalar(@tokens) != 4) {
+  #   print "ERROR: Tool Kit patch format is x.y.z.a (ie, 14.1.2.3)\n";
+  #   return $ERROR;
+  # }
+  
+  if (scalar(@tokens) == 4){
+     pop(@tokens);
+     $toolKit = join(".", @tokens);
+     pop(@tokens);
+     $release = join(".", @tokens);
+     print "Its a patch level toolkit";
+     print "\ntoolKit: $toolKit";
+     print "\nrelease: $release";
+
+  }
+elsif (scalar(@tokens) == 3){
+     $toolKit = join(".", @tokens);
+     pop(@tokens);
+     $release = join(".", @tokens);
+     print "Its a regular toolkit";
+     print "\ntoolKit: $toolKit";
+     print "\nrelease: $release";
+ 
+  }
+  
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetQuota($dir)
+# Purpose: Returns the AFS quota in MB for the given directory
+# RCs    : size or -1 if error
+#------------------------------------------------------------------------------
+sub GetQuota {
+
+  my ($dir) = @_;
+
+  print " Reading AFS quota - $dir\n" if ($verbose);
+
+  # Construct the command
+  my $command = "/usr/afsws/bin/fs lq";
+  $command .= " -path $dir";
+
+  # Run the command and show results
+  my $size = -1;
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  if ($rc == 0) {
+    my @tokens = split(/ +/, $results[1]);
+    $size = $tokens[1] / 1000;
+  }
+
+  print "  Size: $size\n" if ($verbose);
+
+  return $size;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateAfsVolume($dir, $volName, $volSize)
+# Purpose: Returns the AFS quota in MB for the given directory
+# RCs    : size or -1 if error
+#------------------------------------------------------------------------------
+sub CreateAfsVolume {
+
+  my ($dir, $volName, $volSize) = @_;
+
+  print " Creating new AFS volume at $dir\n" if ($verbose);
+
+  # If volSize is greater than $MAX_QUOTA then reset size to $MAX_QUOTA
+  $volSize = $MAX_QUOTA if ($volSize > $MAX_QUOTA);
+
+  # Construct the command
+  my $command = "/afs/eda/projects/luci/bin/luci_cmd";
+  $command .= " -o create ";
+  $command .= " -u svnlib";
+  $command .= " -c eda";
+  $command .= " -v $volName";
+  $command .= " -q $volSize";
+  $command .= " -m $dir";
+  $command .= " -w 30";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  print join("\n", @results) . "\n";
+  return(-1) if ($rc != 0);
+
+  # Verify the new quota size
+  my $size = GetQuota($dir);
+
+  return $size;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CopyACLs($srcDir, $tgtDir)
+# Purpose: Copies the ACLs from srcDir to tgtDir
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub CopyACLs {
+
+  my ($srcDir, $tgtDir) = @_;
+
+  print " Copying ACLs $srcDir -> $tgtDir\n" if ($verbose);
+
+  # Construct the command
+  my $command = "/usr/afsws/bin/fs ca";
+  $command .= " -fromdir $srcDir";
+  $command .= " -todir $tgtDir";
+  $command .= " -clear";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ConfigDirs($toolKit, $release, $dir)
+# Purpose: Run setup dirs for this dir
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub ConfigDirs {
+
+  my ($tk, $rel, $dir) = @_;
+
+  print " Running setup_dirs on $dir\n" if ($verbose);
+
+  # Construct the command
+  my $command = "/afs/eda/tk$tk/tools/$rel/scripts/setup_dirs";
+  $command .= " --all";
+  $command .= " --no_32bit";
+  $command .= " --makefiles";
+  $command .= " $dir";
+
+  # Run the command and show results
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+
+  return $rc;
+
+}

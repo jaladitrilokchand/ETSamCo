@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CqCreate>
+	<login>
+		<username>asuren</username>
+		<password>fake</password>
+		<database>PROT0</database>
+		<schema>mdcms</schema>
+	</login>
+	<client>
+		<app-name>CQServiceTest</app-name></client>
+	<record>
+		<record_type>Problem</record_type>
+		<title>Sample record from RSA</title>
+	    <problem_class>Defect</problem_class>
+		<customerid>ALL</customerid>
+		<severity>4-Minor</severity>
+		<technology>All</technology>
+		<library_version>N/A</library_version>
+		<operating_system>All</operating_system>
+		<problem_description>Auto generated via a java application...</problem_description>
+		<problem_type>Design Kit</problem_type>
+		<subtype_a>Tool Kit Documentation</subtype_a>
+		<submitter_fullname>Suren, Aydin</submitter_fullname>
+		<development_only>No</development_only>
+	</record>
+</CqCreate>

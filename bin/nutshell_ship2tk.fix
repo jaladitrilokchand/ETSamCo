@@ -1,0 +1,28 @@
+cd /afs/eda/tk/nutshell/14.1/.bin-aix64
+ln -sf nutsh-O   nutsh
+
+cd /afs/eda/tk/nutshell/14.1/.bin-linux64
+ln -sf nutsh-O   nutsh
+
+mkdir -p /afs/eda/tk/nutshell/14.1/.bin-aix
+cd /afs/eda/tk/nutshell/14.1/.bin-aix
+cp /afs/eda/tkb/nutshell/14.1/.bin-aix/nutsh-O  /afs/eda/tk/nutshell/14.1/.bin-aix
+ln -sf nutsh-O   nutsh
+cp /afs/eda/tkb/nutshell/14.1/.bin-aix/cidoc    /afs/eda/tk/nutshell/14.1/.bin-aix
+cp /afs/eda/tkb/nutshell/14.1/.bin-aix/apidoc   /afs/eda/tk/nutshell/14.1/.bin-aix
+cp /afs/eda/tkb/nutshell/14.1/.bin-aix/catcomp  /afs/eda/tk/nutshell/14.1/.bin-aix
+cp /afs/eda/tkb/nutshell/14.1/.bin-aix/catxref  /afs/eda/tk/nutshell/14.1/.bin-aix
+cp /afs/eda/tkb/nutshell/14.1/.bin-aix/mkci     /afs/eda/tk/nutshell/14.1/.bin-aix
+cp /afs/eda/tkb/nutshell/14.1/.bin-aix/mkexp    /afs/eda/tk/nutshell/14.1/.bin-aix
+cp /afs/eda/tkb/nutshell/14.1/.bin-aix/link_dll /afs/eda/tk/nutshell/14.1/.bin-aix
+
+cd /afs/eda/tk/nutshell/14.1
+ln -sf .bin-aix .bin-rs_aix53
+ln -sf .bin-aix .bin-rs_aix61
+ln -sf .bin-aix .bin-rs_aix71
+ln -sf .bin-linux .bin-amd64_linux26
+ln -sf .bin-linux .bin-amd64_linux26_RH5
+ln -sf .bin-linux .bin-amd64_linux26_RH6
+ln -sf .bin-linux .bin-i386_linux26
+ln -sf .bin-linux .bin-i386_linux26_RH5
+ln -sf .bin-linux .bin-i386_linux26_RH6

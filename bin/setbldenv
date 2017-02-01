@@ -1,0 +1,78 @@
+#!/usr/bin/ksh
+#=============================================================================
+# FILE: setbldenv
+#
+# OUTPUTS: Initialized component/release infrastructure 
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# This script initializes the Make environment and standard component/release
+# infrastructure for each Toolkit versioned component/release tree:
+#            (/afs/eda/tk14.1.{n}/{component}/14.1)
+# The main infrastructure initialization is performed through the setup_dirs script. 
+# It also initializes those structures with read authority for system:authuser. 
+#
+#-NOTES---------------------------------------------------------------------
+# (1)
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 04/04/2011 AM  Initial 14.1 version
+# 07/22/2011 AM  Updated destination area comment
+# 07/30/2012 EH  Disabled setting of permissions
+#=============================================================================
+
+RLSE=$1  #release
+COMP=$2  #component name
+PREF=$3  #destination area e.g. tk{release version}
+
+case $RLSE in
+  14.1) # The base 14.1 platforms are 64-bit AIX and Linux
+        PLATS="aix64 linux64"
+        BIT_TYPE="--no_32bit"
+        ;; 
+     *) # No other releases supported at this time.
+        print "\nERROR: The release value passed to the setbldenv script is INVALID.\n"
+        print "       This value was passed by the gen_vols_tkrepos script.\n"
+        ;;
+esac
+
+BTOOLS="/afs/eda/prod/tools/$RLSE/bin"
+MOUNT="/afs/eda/$PREF/$COMP/$RLSE"
+
+# Create the Make file environment
+[[ $PREF != @(prod_l1|prod_l2|ship|tk) ]] && MF="--makefiles" || MF=
+set -x
+$BTOOLS/setup_dirs --all $BIT_TYPE $MF $MOUNT
+set +x
+
+# Initialize system permissions for directories containing the executables
+#for DIR in bin dll lib
+#do
+#  for PLAT in $PLATS
+#  do
+#    set -x
+#    fs sa $MOUNT/.$DIR-$PLAT system:authuser rl
+#    set +x
+#  done
+#done
+
+# Initialize system permissions for the standard component/release directories
+#for DIR in html include private perl pixmaps tcl testcases
+#do
+#  set -x
+#  [[ -d $MOUNT/$DIR ]] && fs sa $MOUNT/$DIR system:authuser rl
+#  set +x
+
+#  for SDIR in $(find $MOUNT/$DIR/* -type d 2>/dev/null)
+#  do
+#    set -x
+#    fs sa $SDIR system:authuser rl
+#    set +x
+#  done
+#done
+
+#set -x
+#fs sa $MOUNT system:authuser rl
+  

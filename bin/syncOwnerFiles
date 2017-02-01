@@ -1,0 +1,689 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: syncOwnerFiles
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/15/2013 GS  Initial coding
+# 05/23/2013 NB  Added support for additional roles
+# =============================================================================
+
+use warnings;
+use strict;
+use File::stat;
+use Time::localtime;
+use Sys::Hostname;
+use Cwd;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use File::Copy;
+
+# Program name
+my $appName = "syncOwnerFiles";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $toolKit    = "";
+my $singleComp = "";
+my $help       = "";
+my $verbose    = 0;
+my $debug      = 0;
+my $component  = "";
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+# Set the location and name of createFuncUpdate application
+my $SVN = "/afs/eda/tools/bin/svn";
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $GET_COMP = "$BIN/getComponents -q ";
+my $UPDATE_COMP = "$BIN/updateComponent";
+my $SHOW_COMP = "$BIN/showComponent";
+my $EDA = "/afs/eda/build";
+my $BUILDER = "BUILDER";
+my $BACKUP_BUILDER = "BACKUP BUILDER";
+my $TRANSMITTER = "TRANSMITTER";
+my $BACKUP_TRANSMITTER = "BACKUP TRANSMITTER";
+my $INJECTOR = "INJECTOR";
+my $BACKUP_INJECTOR = "BACKUP INJECTOR";
+my $OWNER = "OWNER";
+my $BACKUP_OWNER = "BACKUP OWNER";
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Define the current directory
+my $startDir = $ENV{"PWD"};
+
+# To exit cleanly from a Ctrl+C or an unexpected die()
+$SIG{'INT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{'QUIT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{__DIE__}  = sub { handleInterruption(); };
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+  #printSyntax();
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+
+# Define custom perl libs path and modules
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use IcofFile;
+use TKutils;
+
+
+# Create a list of components.
+my @components = TKutils::GetComponents($toolKit, $singleComp, "");
+my $release = TKutils::GetRelease($toolKit, ".");
+
+
+# For each component read the .owner file and compare its contents
+# to the ETREE database.  Update database so they match
+my %owners;
+my %ownersBackup;
+my %builders;
+my %buildersBackup;
+my %transmitters;
+my %transmittersBackup;
+my %injectors;
+my %injectorsBackup;
+
+foreach $component (@components) {
+
+  print "\nSyncing $component ...\n\n";
+
+  # Read .owner file and corresponding DB role data
+  my %ownerFileHash;
+  my %ownerDbHash;
+  my $ownerFile = "$EDA/$component/$release/.owner";
+  my $ownerFileFound = ReadOwnerFile($ownerFile, \%ownerFileHash);
+  ReadDb($release, $component, \%ownerDbHash);
+  
+  #print "Contents of Owner File\n";
+  #foreach my $r (keys(%ownerFileHash)){
+  #  my $list = $ownerFileHash{$r};
+  #  print "Role $r .. " . join(",", @$list) . "\n";
+  #}
+  #
+  #print "Contents of Database\n";
+  #foreach my $r (keys(%ownerDbHash)){sync
+  #  my $list = $ownerDbHash{$r};
+  #  print "Role $r .. " . join(",", @$list) . "\n";
+  #}
+  
+  # Compare the .owner file contents with DB contents and create a list
+  # of role/intranet ids that need to be added/removed from DB
+  my %dbAdds;
+  my %dbDeletes;
+  GetDifferences(\%ownerFileHash, \%ownerDbHash, $ownerFileFound,
+		 \%dbAdds, \%dbDeletes);
+
+  # Perform any DB adds/deletes
+  UpdateDatabase($toolKit, $component, "add", %dbAdds);
+  UpdateDatabase($toolKit, $component, "delete", %dbDeletes);
+
+  # Create a collection of roles/components to be displayed ... use the
+  # database data if no .owner file found
+  my $ref_ownerHash;
+  if (! $ownerFileFound) {
+    $ref_ownerHash = \%ownerDbHash;
+  }
+  else {
+    $ref_ownerHash = \%ownerFileHash;
+  }
+  UpdateRoleHash($OWNER, $component, $ref_ownerHash, \%owners);
+  UpdateRoleHash($BUILDER, $component, $ref_ownerHash, \%builders);
+  UpdateRoleHash($TRANSMITTER, $component, $ref_ownerHash, \%transmitters);
+  UpdateRoleHash($INJECTOR, $component, $ref_ownerHash, \%injectors);
+  UpdateRoleHash($BACKUP_OWNER, $component, $ref_ownerHash, \%ownersBackup);
+  UpdateRoleHash($BACKUP_BUILDER, $component, $ref_ownerHash, \%buildersBackup);
+  UpdateRoleHash($BACKUP_TRANSMITTER, $component, $ref_ownerHash, \%transmittersBackup);
+  UpdateRoleHash($BACKUP_INJECTOR, $component, $ref_ownerHash, \%injectorsBackup);
+
+
+
+}
+
+# Display role/component data
+ShowRoleComponents($OWNER, %owners);
+ShowRoleEmails($OWNER, %owners);
+ShowRoleComponents($BACKUP_OWNER, %ownersBackup);
+ShowRoleEmails($BACKUP_OWNER, %ownersBackup);
+ShowRoleComponents($BUILDER, %builders);
+ShowRoleEmails($BUILDER, %builders);
+ShowRoleComponents($BACKUP_BUILDER, %buildersBackup);
+ShowRoleEmails($BACKUP_BUILDER, %buildersBackup);
+ShowRoleComponents($TRANSMITTER, %transmitters);
+ShowRoleEmails($TRANSMITTER, %transmitters);
+ShowRoleComponents($BACKUP_TRANSMITTER, %transmittersBackup);
+ShowRoleEmails($BACKUP_TRANSMITTER, %transmittersBackup);
+ShowRoleComponents($INJECTOR, %injectors);
+ShowRoleEmails($INJECTOR, %injectors);
+ShowRoleComponents($BACKUP_INJECTOR, %injectorsBackup);
+ShowRoleEmails($BACKUP_INJECTOR, %injectorsBackup);
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Synchronizes data in /afs/eda/build/COMP/14.1/.owner files with
+ETREE database.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-h] [-y] [-d]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit   EDA Tool Kit name [14.1.0, 14.1.1 ...].
+  component  Tool Kit component .. rocess only this component
+  -d         Debug mode .. don't make updates in DB
+  -y         Verbose mode
+  -h         Application help
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tool_kit|t=s'    => \$toolKit,
+              'comp|c=s'        => \$singleComp,
+              'verbose|y'       => \$verbose,
+              'help|h|?'        => \$help,
+              'debug|d'         => \$debug
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Verify the tool kit
+  my $msg = "";
+  if (! $toolKit) {
+    $msg = "ERROR: tool_kit (-t) is a required parameter\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ReadOwnerFile($file, \%hash)
+# Purpose: Read the specified .owner file and load the hash with role/intranet
+#          pairs
+# RCs    : 0 = no .owner file
+#          1 = .owner file found
+#------------------------------------------------------------------------------
+sub ReadOwnerFile {
+
+  my ($file, $ref_hash) = @_;
+
+  # Return if .owner file not found
+  return 0 if (! -f $file);
+  print "File: $file\n" if ($verbose);
+
+  # Read the .owner file
+  my @contents = ();
+  if (! IcofFile::ReadFileToList($file, \@contents, 0)) {
+    print "WARNING: .owner file exists but unable to read it\n";
+    print "         File: $file\n";
+    return 0;
+  }
+
+  my $line;
+  foreach $line (@contents) {
+    next if ($line !~ m/\w+/); # ignore empty lines
+    chomp $line;
+    $line = TKutils::Trim($line);
+    my @tokens = split(/:/, $line);
+    if (scalar(@tokens) == 2) {
+      my $role = TKutils::Trim($tokens[0]);
+      my $user = TKutils::Trim($tokens[1]);
+      next if ($user eq "");
+      $role = GetMatchingDbRole($role); # Convert file role to db role
+      next if ($role eq "");
+
+      if ($user =~ /,/) {
+	my @toks = split(/,/, $user);
+	foreach $user (@toks) {
+	  $user = TKutils::Trim($user);
+	  print " File: $role ==> $user\n";
+	  AddToHashedList($role, $user, $ref_hash);
+	}
+      }
+      else {
+	print " File: $role ==> $user\n";
+	AddToHashedList($role, $user, $ref_hash);
+      }
+    }
+  }
+  print "\n";
+  return 1;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ReadDb($release, $component, \%hash)
+# Purpose: Read roles from the ETREE DB for the specified release and component
+#          and load the hash with role/intranet id pairs
+# RCs    : 0 = component not in DB
+#          1 = component found in DB
+#------------------------------------------------------------------------------
+sub ReadDb {
+
+  my ($rel, $comp, $ref_hash) = @_;
+
+  # Read roles from DB
+  my $command = "$SHOW_COMP";
+  $command .= " -r $rel";
+  $command .= " -c $comp";
+
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  return 0 if ($rc != 0);
+
+  # Parse roles
+  my $line;
+  foreach $line (@results) {
+    next if ($line !~ m/\w+/); # ignore empty lines
+    chomp $line;
+    @tokens = split(/:/, $line);
+    my $role = TKutils::Trim($tokens[0]);
+    my $user = TKutils::Trim($tokens[1]);
+    AddToHashedList($role, $user, $ref_hash);
+    print " DB: $role ==> $user\n";
+  }
+
+  return 1;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateDatabase($toolKit, $component, $action, %hash)
+# Purpose: Update the database with by adding/delete role/intranet pairs in
+#          the hash.  The action variable will be either "add" or "delete"
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub UpdateDatabase {
+
+  my ($tk , $comp, $action, %hash) = @_;
+
+  # return if the hash is empty
+  return 0 if (scalar(keys(%hash)) < 1);
+  print "\nUpdating database ...\n\n" if ($verbose);
+
+  # Construct the base updateComponent command
+  my $baseCommand = "$UPDATE_COMP -t $tk -c $comp";
+  $baseCommand .= " -remove" if ($action eq "delete");
+
+  # Perform updates ... append base command with correct switch for each role
+  #  -l component owner(team lead)
+  #  -t transmitter
+  #  -b builder(primary)
+  my $role;
+  my $id;
+  my $rc = $OK;
+  foreach $role (keys(%hash)) {
+    my $switch = SetSwitch($role);
+    next if ($switch eq "");  # Skip this role if not recognized
+
+    my $ids = $hash{$role};
+    foreach $id (@$ids) {
+      my $command .= "$baseCommand $switch $id";
+      my @results;
+      $rc = TKutils::RunCommand($command, \@results, $debug, $verbose);
+      if ($rc != $OK) {
+	print "ERROR: unable to update database\n";
+	print "       \nCommand: $command\n\n";
+	last;
+      }
+    }
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetSwitch($role)
+# Purpose: Determine the DB update command switch based on the role
+# RCs    : "" if role not recognized
+#          -l, -t or -b if role recognized
+#------------------------------------------------------------------------------
+sub SetSwitch {
+
+  my ($role) = @_;
+  #print "Role passed into switch is: $role\n";
+  my $switch = "";
+  if (lc($role) eq "owner") {
+    $switch = "-o";
+  }
+  elsif (lc($role) eq "backup owner") {
+    $switch = "-bo";
+  }
+  elsif (lc($role) eq "builder") {
+    $switch = "-b";
+  }
+  elsif (lc($role) eq "backup builder") {
+    $switch = "-bb";
+  }
+  elsif (lc($role) eq "transmitter") {
+    $switch = "-x";
+  }
+  elsif (lc($role) eq "backup transmitter") {
+    $switch = "-bx";
+  }
+  elsif (lc($role) eq "injector") {
+    $switch = "-i";
+  }
+  elsif (lc($role) eq "backup injector") {
+    $switch = "-bi";
+  }
+  #print "Switch is: $switch\n";
+  return $switch;
+
+}
+
+
+
+#------------------------------------------------------------------------------
+# Name   : ShowRoleComponents($role, %hash)
+# Purpose: Display a list of component $role and components they own, build
+#          or transmit
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub ShowRoleComponents {
+
+  my ($role, %hash) = @_;
+
+  print "\n\n";
+  print "$role and components they own/build/xmit\n";
+  print "------------------------------------------\n";
+
+  my $person;
+  foreach $person (sort(keys(%hash))) {
+    my $ref_list = $hash{$person};
+   print "$person --> " . join(",", @$ref_list) . "\n";
+  }
+  print "\n";
+
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ShowRoleEmails($role, %hash)
+# Purpose: Display a list of component $role email addresses
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub ShowRoleEmails {
+
+  my ($role, %hash) = @_;
+
+  print "$role - email addresses\n";
+  print "------------------------------\n";
+  print join(",", (sort(keys(%hash)))) . "\n\n";
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetDifferences(%refOwnerFile, %refOwnerDb, $ownerFileFound,
+#                         $ref_adds, $ref_deletes)
+# Purpose: Compare the owner file and db hashes.  Look for role/ids found in
+#          file but missing from DB (adds).  Also look for role/ids found in
+#          DB but missing from file(deletes).
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetDifferences {
+
+  my ($refOwnerFile, $refOwnerDb, $ownerFileFound, $refAdds, $refDels) = @_;
+  print "\nComparing file/DB contents ...\n" if ($verbose);
+
+  # return if no .owners file .. nothing to do
+  return $OK if (! $ownerFileFound);
+
+  # The owner* hashes are role/id lists pairs.  Process the file list hash
+  # first only processing recognized roles
+  my $id;
+  my $role;
+  foreach $role (keys(%$refOwnerFile)) {
+    print "\nRole: $role\n";
+
+    # Get the file id and db id lists for this role
+    my $fileIds = $$refOwnerFile{$role};
+    my $dbIds = [];
+    $dbIds = $$refOwnerDb{$role} if (exists($$refOwnerDb{$role}));
+    print "File ids: " . join("|", @$fileIds) . "\n";
+    print "DB ids  : " . join("|", @$dbIds) . "\n";
+
+    # Find ids that are in the .owner file but not in the DB
+    foreach $id (@$fileIds) {
+      if (! grep(/^$id$/, @$dbIds)) {
+	print " DB ADD1: $role -> $id\n";
+	#cd print "R: $role  ID: $id  Reference: $refAdds\n";
+	AddToHashedList($role, $id, $refAdds);
+      }
+    }
+
+    # Find ids that are in the DB but not in the .owner file
+    foreach $id (@$dbIds) {
+      if (! grep(/^$id$/, @$fileIds)) {
+	print " DB DEL1: $role -> $id\n";
+	#print "R: $role  ID: $id  Reference: $refDels\n";
+	AddToHashedList($role, $id, $refDels);
+      }
+    }
+
+  }
+
+  # Process the DB hash
+  foreach $role (keys(%$refOwnerDb)) {
+    #print "Second Role: $role\n";
+    # Get the file id and db id lists for this role
+    my $dbIds = $$refOwnerDb{$role};
+    my $fileIds = [];
+    $fileIds = $$refOwnerDb{$role} if (exists($$refOwnerFile{$role}));
+
+    # Find ids in DB that should be deleted
+    # Don't delete these ids if there wasn't a .owner file
+    foreach $id (@$dbIds) {
+      #print "DB ID: $id\n" if ($verbose);
+      #print "File ID's: " . join (",", @$fileIds) . "\n" if ($verbose);
+      if (!grep(/^$id$/, @$fileIds)) {
+	print " DB DEL2: $role -> $id\n";
+	#print "R: $role  ID: $id  Reference: $refDels\n";
+	AddToHashedList($role, $id, $refDels);
+      }
+    }
+
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateRoleHash($role, $componentm $ref_fileHash, $ref_hash);
+# Purpose: Add this component's role data to the specified role hash
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub UpdateRoleHash {
+
+  my ($role, $comp, $ref_fileHash, $ref_hash) = @_;
+
+  my $myRole;
+  foreach $myRole (keys(%$ref_fileHash)) {
+    next if ($myRole ne $role);
+
+    my $ids = $$ref_fileHash{$myRole};
+    my $id;
+    foreach $id (@$ids) {
+      AddToHashedList($id, $comp, $ref_hash);
+    }
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : AddToHashedList($key, $value, $ref_hash)
+# Purpose: The hash is a key/ref_list pair, add the new value to the list
+#          defined by key
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub AddToHashedList {
+
+  my ($key, $value, $ref_hash) = @_;
+
+  #print "Adding $key/$value to ref_hash\n" if ($verbose);;
+
+  if (! exists($$ref_hash{$key})) {
+    my $ref_list = [ $value ];
+    #print " list1 = " . join("|", @$ref_list) . "\n" if ($verbose);
+    $$ref_hash{$key} = $ref_list;
+  }
+  else {
+    my $ref_list = $$ref_hash{$key};
+    #print " list2a = " . join("|", @$ref_list) . "\n" if ($verbose);
+    if (! grep(/^$value$/, @$ref_list)) { # add value if not in list
+      #print "  ... adding $value\n" if ($verbose);
+      push(@$ref_list, $value);
+    }
+    #print " list2b = " . join("|", @$ref_list) . "\n" if ($verbose);
+    $$ref_hash{$key} = $ref_list;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetMatchingDbRole($role)
+# Purpose: Find the matching DB role for file roles and/or vice versa
+# RCs    : role name
+#------------------------------------------------------------------------------
+sub GetMatchingDbRole {
+
+  my ($role) = @_;
+  
+  my $match = "";
+  
+  $role = lc($role);
+  if ($role eq "owner") {
+    $match = $OWNER;
+  }
+  elsif ($role eq "backup"){
+    $match = $BACKUP_OWNER;
+  }
+  elsif ($role eq "primary-builder") {
+    $match = $BUILDER;
+  }
+  elsif ($role eq "backup-primary-builder"){
+    $match = $BACKUP_BUILDER;
+  }
+  elsif ($role eq "transmitter") {
+    $match = $TRANSMITTER;
+  }
+  elsif ($role eq "backup-transmitter"){
+    $match = $BACKUP_TRANSMITTER;
+  }
+  elsif ($role eq "inject-builder") {
+    $match = $INJECTOR;
+  }
+  elsif ($role eq "backup-inject-builder"){
+    $match = $BACKUP_INJECTOR;
+  }
+  return $match;
+
+}
+
+
+

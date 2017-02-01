@@ -1,0 +1,387 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: svn.revision_verify
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/13/2014 GS  Initial coding.
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use FindBin qw($RealBin);
+
+use lib "$RealBin/../libperl";
+use TKutils;
+
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+
+# Program variables
+my $appName = "svn.revision_verify";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dbMode          = "";  # default is prod if empty
+my $dryRun          = 0;
+my $toolKit         = "";
+my $component       = "";
+my $startDir;
+my $release;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+# Create a list of components to process
+my @components = SetComponents($toolKit, $component);
+
+# Set the location for the tool kit
+my $location = "build";
+if ($toolKit !~ "build") {
+  $location = "tk" . $toolKit;
+}
+my $svnDir = "/afs/eda/$location";
+print "Directory: $svnDir\n" if ($verbose);
+
+# Examine each component
+foreach my $comp (@components) {
+
+  next if ($comp =~ /^etreetest/);
+  next if ($comp =~ /svntest/);
+  print "Processing $comp ...\n";
+
+  # Get the revision from SVN
+  my $svnRevision = "";
+  if (GetSvnRevision($toolKit, $comp, $svnDir, \$svnRevision) != $OK) {
+    print "WARNING: unable to get revision from SVN\n";
+    next;
+  }
+
+  # Get the revision from the database
+  my $dbRevision = "";
+  if (GetDbRevision($toolKit, $comp, \$dbRevision) != $OK) {
+    print "WARNING: unable to get revision from ETREE database\n";
+    next;
+  }
+
+  # Compare the revisions
+  if ($svnRevision ne $dbRevision) {
+    print "ERROR: revisions do NOT match ...\n";
+    print " SVN Revision: $svnRevision\n";
+    print " DB Revision : $dbRevision\n";
+  }
+  else {
+    print " Revisions match -- SVN: $svnRevision & DB: $dbRevision\n";
+  }
+
+}
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  #LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Verify the revision in svn matches the revision in the database for each
+component in the tool kit.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tk> [-c component]
+                      [-dryrun] [-y] [-db dbMode] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tk        = Tool Kit version which must exist (ie, 14.1.1 ...)
+  component = Component to verify (ie, 14.1.1 ...)
+  -dryrun   = Run script in dryrun mode
+  dbMode    = Database mode [default = PROD] (PROD, DEV, TEST)
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('t=s'       => \$toolKit,
+	      'c=s'       => \$component,
+	      'db=s'      => \$dbMode,
+	      'dryrun'    => \$dryRun,
+	      'y'         => \$verbose,
+	      'help|h|?'  => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) is a required parameter\n";
+    return $ERROR;
+  }
+  $release = TKutils::GetRelease($toolKit, ".");
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents()
+# Purpose: Create a list of components ready for this Tool Kit
+# RCs    : List of component names or empty list
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  my ($tk, $comp) = @_;
+  print " Querying for components in $tk ...\n" if ($verbose);
+
+  # Query the DB for tk/components for the src tool kit
+  my @list = TKutils::GetComponents($tk, $comp, "");
+  print "Found " . scalar(@list) . " components\n" if ($verbose);
+
+  return @list;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetDbRevision($toolKit, $component, $refRev)
+# Purpose: Query the DB for this component's revision
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetDbRevision {
+
+  my ($tk, $comp, $refRev) = @_;
+
+  print " Reading revision from database ...\n" if ($verbose);
+
+  # Get the location
+  my $location = "";
+  TKutils::GetTkLocation($tk, \$location);
+  if ($location eq "prod") {
+    $location = "build";
+  }
+  elsif ($location !~ /custom/) {
+    $location .= "b";
+  }
+  else {
+    $location = "customtkb/tk" . $tk;
+  }
+
+  # Construct the command
+  my $command = "$BIN_DIR/getRevisionsTk";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " -l $location";
+  $command .= " -latest";
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command and show results
+  $$refRev = "";
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  if ($rc == 0) {
+    $$refRev = "r" . $results[0];
+    chomp($$refRev);
+  }
+  else {
+    return $ERROR;
+  }
+
+  print " Revision1: $$refRev\n" if ($verbose);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetSvnRevision($toolKit, $component, $svnDir, $refRev)
+# Purpose: Query the DB for this component's revision
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetSvnRevision {
+
+  my ($tk, $comp, $svnDir, $refRev) = @_;
+
+  print " Reading revision from SVN ...\n" if ($verbose);
+
+  my $dir = "$svnDir/$comp/$release";
+
+  # Construct the command
+  my $command = "/afs/eda/tools/bin/svn log";
+  $command .= " -v ";
+  $command .= " -l 20";
+  $command .= " $dir";
+
+  # Run the command and show results
+  $$refRev = "";
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  if ($rc == 0) {
+    $$refRev = GetLatestSvnRevision(\@results);
+  }
+  else {
+    return $ERROR;
+  }
+
+  print " Revision2: $$refRev\n" if ($verbose);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetLatestSvnRevision($refList)
+# Purpose: Parse the latest revision from the svn log results in refList
+# RCs    : revision
+#------------------------------------------------------------------------------
+sub GetLatestSvnRevision {
+
+  my ($refList) = @_;
+
+  print " Parsing revision from svn log results ...\n" if ($verbose);
+
+  my $start = 0;
+  my $foundReal = 0;
+  my $rev;
+  foreach my $line (@$refList) {
+
+    print " LINE >>> $line\n" if ($verbose);
+
+    # Handle info line
+    if ($line =~ /\|/) {
+      my @tokens = split(/\|/, $line);
+      $rev = TKutils::Trim($tokens[0]);
+      $start = 1;
+      print " ++ Found revision $rev\n" if ($verbose);
+      next;
+    }
+
+    # Handle record separator
+    if ($start && ($line =~ /----/)) {
+      $start = 0;
+      next;
+    }
+
+    # Handle start of changed files
+    next if ($line =~ /^Changed/);
+
+    # Handle changed files .. looking from trunk or branches/tk1*
+    if (($line !~ /\(from \//) &&
+        (($line =~ /\/trunk/) || ($line =~ /\/branches\/tk14/))) {
+      $foundReal = 1;
+      print " ++ Read data line ..\n" if ($verbose);
+      last;
+    }
+
+  }
+
+  print " Revision3: $rev\n" if ($verbose);
+
+  return $rev
+
+}
+
+

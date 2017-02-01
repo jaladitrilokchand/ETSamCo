@@ -1,0 +1,86 @@
+#!/bin/ksh
+
+# Script Name: specialsb_check
+# Function: Checks to make sure there are no mismatches in developer sandbox
+#           i.e. specify -n but sb is partial
+#           i.e. specify build but sb indicated dev
+#
+# Used by : Dotted in by specialsb_setup
+#
+# 12/06/10 Created from cm_chksb to support /afs/eda/special temp area for 
+#          14.1 development. 
+#
+goodbye()
+{
+  RC=$1
+  [[ -n $2 ]] && print "$2"
+  exit "${RC:-0}"
+}
+
+# Cannot do this in a "build" tree
+#  the usage of csh handles the case where sandbox is symlink to build tree!
+#
+[[ $(print "pwd" | /bin/csh | sed "s/.fishkill.ibm.com//") = /afs/eda/@(build|dev|prod|special)* ]] && goodbye 1 "\n*** You are not running from sandbox."
+
+# Ensure we are at the sandbox top
+#
+[[ $SANDBOX != *+([0-9]).+([0-9])*(-)*([0-9]) ]] && goodbye 1 "\n*** You must be at sandbox top (sandbox/product/v.r)."
+
+[[ ${PART_SB}${DLL_SB} = TRUETRUE ]] && { help; goodbye 3 "\n*** The '-f|-n' flags are mutually exclusive."; }
+
+if [[ -r $SANDBOX/Make.config.partial ]]
+then
+  PART_SB=TRUE;SBOX_TYPE="partial"
+elif [[ -r Make.config && ! -L Make.config ]] then
+  DLL_SB=TRUE;SBOX_TYPE="dll-named"
+else
+  [[ -z ${PART_SB}${DLL_SB} ]] && { help; goodbye 3 "\n*** One of '-f' (partial) or '-n' (dll-named) is required."; }
+fi
+[[ ${PART_SB}${DLL_SB} = TRUETRUE ]] && { help; goodbye 3 "\n*** You specified $SBOX_FLAG but you appear to be in a $SBOX_TYPE sandbox."; }
+
+[[ -n $REPLACE && -n $PART_SB ]] && { help; goodbye 2 "\n*** Option '-R' is not used with the partial sandbox."; }
+
+#  S_LEVEL - determined by sandbox name (null if not special)
+#  B_LEVEL - determined by area sandbox was created against
+#  LEVEL   - specified via command line option
+S_LEVEL=$(basename $(dirname $(dirname $SANDBOX)))
+[[ $S_LEVEL != @(special) ]] && S_LEVEL=
+
+if [[ -n $DLL_SB ]]
+then
+  B_LEVEL=$(grep -h "^[ 	]*TOP =" $SANDBOX/*/Makefile 2>/dev/null | sort -u | awk '{print $NF}' | cut -f4 -d/ | sed 's/[$()]//g')
+else
+  B_LEVEL=$(ls -l $SANDBOX/Make.config 2>/dev/null | awk '{print $NF}' | cut -f4 -d/)
+fi
+[[ -z $B_LEVEL ]] && B_LEVEL=$S_LEVEL
+
+[[ -n $CMDEBUG ]] && print "   [D] (1) S_LEVEL: $S_LEVEL, B_LEVEL: $B_LEVEL, LEVEL: $LEVEL"
+if [[ -z ${S_LEVEL}${B_LEVEL}${LEVEL} ]]
+then
+  LEVEL=special
+  print "\n...Defaulting sandbox to be built against special.\n"
+else
+  # Check for mismatches: sandbox directory, sandbox make files, flags entered
+  case $B_LEVEL in
+      special) MATCH=$(print "$S_LEVEL\n$B_LEVEL\n$LEVEL" | sort -u)
+               if [[ $(print $MATCH | wc -w) -gt 1 ]]
+               then
+                 if [[ -z $LEVEL ]]
+                 then
+                   goodbye 1 "\n*** Sandbox directory indicates '$S_LEVEL', but sandbox Make files indicate '$B_LEVEL'."
+		 else
+                   [[ -n $S_LEVEL && $LEVEL != $S_LEVEL ]] && goodbye 1 "\n*** You specified '$LEVEL', but sandbox directory indicates '$S_LEVEL'."
+                   [[ -n $B_LEVEL && $LEVEL != $B_LEVEL ]] && goodbye 1 "\n*** You specified '$LEVEL', but sandbox Make files indicate '$B_LEVEL'."
+                   [[ $S_LEVEL != $B_LEVEL ]] && goodbye 1 "\n*** Sandbox directory indicates '$S_LEVEL', but sandbox Make files indicate '$B_LEVEL'."
+                   goodbye 99 "\n*** Unexpected Condition!  Contact Build Team.  S_LEVEL=$S_LEVEL; B_LEVEL=$B_LEVEL; LEVEL=$LEVEL"
+                 fi
+               fi
+               LEVEL=$(print $MATCH)
+               ;;
+      ET_AREA) [[ -z $LEVEL ]] && LEVEL=$ET_AREA
+	       [[ -z $LEVEL ]] && LEVEL=prod
+               ;;
+            *) [[ -z $LEVEL ]] && goodbye 1 "Could not determine the level you want to build against"
+               ;;
+  esac
+fi

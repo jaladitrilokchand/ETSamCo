@@ -1,0 +1,448 @@
+#!/usr/bin/env perl
+use warnings;
+#use strict;
+#=============================================================================
+#    FILE: cleanAGTS
+#
+# CREATOR: Art Magnan
+#    DEPT: AZYX
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# For one defined component in a given Toolkit version:
+#   1) Remove the SVN branch for that TK version.
+#   2) Remove the EDA SHIPB component/release symlink to TK Version Tree.
+#   3) Initialize the component tree, removing all data content, reestablishing
+#      the default component treetop structures.
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 12/01/2011 AM  Initial version
+# 12/20/2011 EH  Updated for Change Management requirements
+#=============================================================================
+#=============================================================================
+#            FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub help {
+        print "Script to clean AGTS flow structures as part of Dry Run Test setup/initialization.\n";
+        print "Cleans one component defined for a specific Toolkit version and a particular set of attribute types.\n";
+        print "\n>>>> WARNING <<<<: Do NOT use this script after the 14.1.0 PREVIEW toolkit has been through the AGTS milestone!!!\n";
+        print "\nUsage:  cleanAGTS -t <Toolkit version> -c <component> [-d] [-g] [-h]\n";
+        print "\nInput parameters:\n";
+        print "  -t <EDA Toolkit release version> e.g. 14.1.{n}\n";
+        print "  -c <component>   e.g. hdp \n";
+        print "  -d [Development Mode ON]\n";
+        print "  -g [Test mode ON - will see what would execute.]\n";
+        print "  -h This help\n";
+        print "\nNOTES:\n";
+        print "Do NOT use this script after the 14.1.0 PREVIEW toolkit has been through the AGTS milestone!!!\n";
+        exit 1;
+} # end help
+
+sub process_cmd_line {
+  #
+  # ---------------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+  # Parms defined:  -t <Toolkit version>  e.g. 14.1.0
+  #                 -c <component>
+  #                 -d [Development Mode ON - using code from DEV area]
+  #                 -g [Test mode ON - will see what would execute.]
+  #                 -h [help]
+  # ---------------------------------------------------------------------
+  getopts('c:dght:');
+
+  $tkVersion = "$opt_t";
+  $compName  = "$opt_c";
+
+  # Set DEVMODE
+  if ( ${opt_d} ) {
+    $devMode = 1;
+  }
+  else {
+    $devMode = 0;
+  }
+
+  # Set DEBUG mode
+  if ( ${opt_g} ) {
+    $DEBUG = 1;
+    $dbgHdr = "[DEBUG ON]:";
+  }
+  else {
+    $DEBUG = 0;
+    $dbgHdr = "";
+  }
+
+  # Display help if requested
+  if ( ${opt_h} ) { help(); }
+
+} # end process_cmd_line
+
+sub check_userID {
+  #
+  # AFS ID svnlib must be used to execute this script
+  #
+  my ($userID, $debug, @authID) = @_;
+  my ($found) = 1;
+
+  foreach $id (@authID) {
+    if ($debug) {
+      print "userID: \"$userID\"  authID: \"$id\"\n";
+    }
+    if ( $userID eq $id ) {
+      $found = 0;
+      last;
+    }
+  }
+  return ($found);
+} # end check_userID
+
+sub create_timestamp {
+  #
+  # Get date and time info from system
+  #
+
+  @months = qw(jan feb mar apr may jun jul aug sep oct nov dec);
+
+  ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+
+  $year = $year + 1900;
+
+  $month = $mon + 1;
+  $monthName = $months[$mon];
+  $monthDay = $monthName . $mday;
+
+  $date_now = $month . "/" . $mday . "/" . $year;
+
+  if ($min < 10) {
+    $newmin = "0" . $min;
+  }
+  else {
+    $newmin = $min;
+  }
+  $time_now = $hour . ":" . $newmin;
+} # end create_timestamp
+
+sub log_execution {
+  #
+  # Define the logging, execution timestamps
+  #
+  my ($when, $compType) = @_;
+  my $tkVer = "";
+
+  if ($when eq "start") {
+
+    # Convert tkVersion for use in log file name
+    $tkVer = TkCommon::convert_tkVersion ($tkVersion, "selfstore");
+
+    # Set up the log file
+    create_timestamp;
+    $datetime = "$date_now at $time_now";
+
+    $logTop  = "/afs/eda/u/svnlib/logs/${monthName}";
+    if (! -d $logTop) {
+      `mkdir -p $logTop`;
+    }
+    $logFile = "$logTop/${monthDay}.${compType}.${tkVer}.${scriptName}";
+    unless (open(STDOUT, "| tee -ai $logFile")) {
+      die ("Output file $logFile cannot be opened.\n");
+    }
+
+    # Log the start time
+    print ("#\n");
+    print ("# $fullScrName started at $datetime by $userID\n");
+    print ("#\n");
+
+  } elsif ($when eq "end") {
+
+    create_timestamp;
+    $datetime = "$date_now at $time_now";
+
+    # Log the end time
+    print ("#\n");
+    print ("# $fullScrName ended at $datetime by $userID\n");
+    print ("#\n");
+
+  } else {
+    print "ERROR: log_execution: Can't figure out when I need to log!\n";
+  }
+} # end log_execution
+
+sub create_change_record {
+  #
+  # Create a Change Record for use in the SVN branch creation.
+  #
+  my ($compName, $tkVersion) = @_;
+  my $rc = 0;
+  my @chgRecData = ();
+  my $chgRec = "";
+  my $sevLevel = 4;
+  my $chgRecCmd = "";
+  my $line;
+  my $newLine;
+
+
+  my $opName = "Create a change record for the SVN branch creation";
+  print "\n*** $opName started for $compName...\n";
+
+  $chgRecCmd = "$scriptPath/cr.create -t $tkVersion -c $compName -d \"Creating branch for TK version $tkVersion.\" -feature -sev $sevLevel $dbType";
+
+  if ($DEBUG) {
+    print "\n[DEBUG MODE ON]: Command, \"$chgRecCmd\", will not be executed.\n";
+  }
+  else {
+    # Execute the command
+    @chgRecData = `$chgRecCmd`;
+    $rc = $? >> 8;
+    $errMsg = "";
+    process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+    # Parse the chgRecData to get the CR number
+    foreach $line (@chgRecData) {
+      print "Line: $line\n";
+      chomp ($line);
+      $newLine = trimStr ($line);
+      if ($newLine =~ /^Change Request: /) {
+        # Get the CR number
+        $chgRec = substr ($newLine, 16, 13);
+      }
+    }
+
+    if ($chgRec eq "") {
+      $rc = 4;
+    }
+  }
+  print "  *******\n\n" ;
+  return ($rc, $chgRec);
+
+} # end create_change_recor
+
+
+
+sub change_record_complete {
+  #
+  # Complete the Change Record used in the SVN branch creation.
+  #
+  my ($compName, $chgRec) = @_;
+  my $rc = 0;
+  my $chgRecCmd = "";
+  my $chgMsg = "";
+
+  my $opName = "Complete the change record used for the SVN branch creation";
+  print "\n*** $opName started for $compName...\n";
+
+  $chgRecCmd = "$scriptPath/cr.complete -cr $chgRec -y $dbType";
+
+  if ($DEBUG) {
+    print "\n[DEBUG MODE ON]: Command, \"$chgRecCmd\", will not be executed.\n";
+  }
+  else {
+    # Execute the command
+    $chgMsg = `$chgRecCmd`;
+    $rc = $? >> 8;
+
+    if ($chgMsg ne "") {
+      print "CR complete message from CM DB: $chgMsg\n";
+    }
+
+    $errMsg = "";
+    process_rc ($opName, $errMsg, $stopOnFail, $rc);
+  }
+  print "  *******\n\n" ;
+  return ($rc);
+
+} # end change_record_complete
+
+sub process_rc {
+  #
+  # Handle return code processing from TK common
+  #
+  my ($opName, $errMsg, $doExit, $rc) = @_;
+
+  if ($rc == 0) {
+    print "Operation successful for \"$opName\". rc=$rc\n";
+  }
+  else {
+    print "[ERROR]: Return code $rc from \"$opName\".\n";
+    if ($errMsg ne "") {
+      print "$errMsg\n";
+    }
+    if ($doExit) {
+      exit $rc;
+    }
+  }
+} # end process_rc
+
+sub trimStr {
+  my ($string) = @_;
+  $string =~ s/^\s+//;
+  $string =~ s/\s+$//;
+  return ($string);
+} # end trimStr
+
+sub max_rc {
+  #
+  # return the rolling maximum return code
+  #
+  my ($rc, $maxrc) = @_;
+
+  if ($rc > $maxrc) {
+    $maxrc = $rc;
+  }
+  return ($maxrc);
+} # end max_rc
+
+#============================================================================================
+#         MAIN ROUTINE
+#============================================================================================
+use Env;
+use Getopt::Std;
+use File::Path qw(mkpath) ;
+use Cwd;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+$codePath = "/afs/eda/data";
+#$codePath = "/afs/eda/u/ehull";
+
+our $scriptName = "cleanAGTS";
+our $fullScrName = $0;
+our $rc = 0;
+our $maxRC = 0;
+our $dbType="";
+
+our $opt_c = "";
+our $opt_t = "";
+
+my $comp;
+my $compRel;
+my $tkVersion = "14.1.0";  # <<< FOR NOW, HARDCODE. REMOVE AFTER AGTS TK VERSION 14.1.0 COMPLETED!!!!
+my $stopOnFail = 0;
+
+# Only AFS ID svnlib should run this script!!!
+our $rlseID = "svnlib";
+our $userID = $LOGNAME;
+my (@authID) = ($rlseID);
+$rc = check_userID ($userID, 0, @authID);
+if ($rc) {
+  print "\nERROR: You MUST run this script as AFS ID \"@authID\" to perform the AGTS cleaning operation!!!\n\n";
+  exit 8;
+} else {
+  print "\nINFO: Running script using authorized AFS ID.\n\n";
+}
+
+# Process parms from command line
+process_cmd_line;
+
+# Make sure the required parameters are provided
+if ($tkVersion eq "") {
+  print "\nERROR: Missing Toolkit version.\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+# Ensure tkVersion is in correct format
+$rc = TkCommon::check_tkVersion ($tkVersion);
+if ($rc != 0) {
+  print "\nERROR: Toolkit version specified in an invalid format!\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+if ($compName eq "") {
+  print "\nERROR: You must specify the component name using the -c switch.\n\n";
+  exit 8;
+}
+
+#
+# Set up the SVN code path
+#
+$SVN = "/afs/eda/tools/bin/svn";
+
+#
+# Set up program parameters
+#
+if ($devMode) {
+  our $scriptPath = "${codePath}/edainfra/tools/enablement/dev/bin";
+} else {
+  our $scriptPath = "${codePath}/edainfra/tools/enablement/prod/bin";
+}
+
+# Start the logging
+log_execution ("start", "$compName");
+
+#
+# Process commands against a single component
+#
+
+#
+# STEP 1a Create a Change Record for use in the SVN branch creation.
+#
+$opName = "Step 1a";
+($rc, $chgRec) = create_change_record ($compName, $tkVersion);
+$maxRC = max_rc ($rc, $maxRC);
+
+$errMsg = "Unable to get a change record value for $compName in TK version $tkVersion.";
+process_rc ($opName, $errMsg, $stopOnFail, $maxRC);
+print "chgRec: $chgRec  maxRC: $maxRC\n";
+
+# STEP 1b: Remove the SVN TK version branch
+$stepName1 = "remove SVN branch";
+$validCmd1 = "$SVN delete --force -m \"$chgRec: deleting AGTS branch prior to rerun of testing.\" https://greenjiffy.fishkill.ibm.com/eda/tk/$compName/branches/tk$tkVersion/";
+
+# Execute the command
+TkCommon::runcmd("$validCmd1", "$DEBUG");
+$rc = $? >> 8;
+
+if ($rc) {
+  print "\n[ERROR]: $compName;fail step:$stepName1\n";
+  print "\n[ERROR]: Command, \"$validCmd1\", did NOT execute successfully.\n\n";
+}
+else {
+  print "$dbgHdr Removed the SVN branch for $compName/14.1.\n\n";
+}
+
+#
+# Step 1c Complete the change record when SVN branch is created.
+#
+$opName = "Step 1c";
+$rc = change_record_complete ($compName, $chgRec);
+$maxRC = max_rc ($rc, $maxRC);
+
+$errMsg = "Unable to complete the change record $chgRec for $compName in TK version $tkVersion.";
+process_rc ($opName, $errMsg, $stopOnFail, $maxRC);
+
+# STEP 2: Delete the SHIPB release symlink
+$stepName2 = "delete the SHIPB release symlink";
+$validCmd2  = "${scriptPath}/update_lc_linktree -t 14.1.0 -c $compName -s shipb -O delete";
+
+# Execute the command
+TkCommon::runcmd("$validCmd2", "$DEBUG");
+$rc = $? >> 8;
+
+if ($rc) {
+  print "\n[ERROR]: $compName;fail step:$stepName2\n";
+  print "\n[ERROR]: Command, \"$validCmd2\", did NOT execute successfully.\n\n";
+}
+else {
+  print "$dbgHdr Deleted the SHIPB release symlink for $compName/14.1.\n\n";
+}
+
+# STEP 3: Clean the component treetop; initialize
+$stepName3 = "clean the component tree";
+$validCmd3  = "${scriptPath}/clean_tkversion_tree -t $tkVersion -c $compName";
+
+# Execute the command
+TkCommon::runcmd("$validCmd3", "$DEBUG");
+$rc = $? >> 8;
+
+if ($rc) {
+  print "\n[ERROR]: $compName;fail step:$stepName3\n";
+  print "\n[ERROR]: Command, \"$validCmd3\", did NOT execute successfully.\n\n";
+}
+else {
+  print "$dbgHdr Cleaned and initialized the $compName/14.1 directory.\n\n";
+}
+
+log_execution ("end", "");
+print "\nLOG file located at $logFile.\n\n";
+close (STDOUT);
+exit $rc;

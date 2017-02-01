@@ -1,0 +1,157 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: SVNutils_tester
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 04/03/2013
+#
+# PURPOSE ---------------------------------------------------------------------
+# Test rig for SVNutils.pm
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 04/03/2013 GFS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use FindBin qw($RealBin);
+
+use lib "$RealBin/../libperl";
+use SVNutils;
+
+# Variables
+my $toolKit   = "";
+my $component = "";
+my $verbose   = 0;
+my $dryRun    = 0;
+my $help      = 0;
+
+# Globals
+my $OK = 0;
+my $ERROR = 8;
+my $appName = "SVNutils_tester";
+# Read the command line arguments
+if (ProcessArgs() == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Test GetSVN
+my $svn = SVNutils::GetSVN();
+print "SVN = $svn\n";
+
+# Test IsSvnTkBranch($component, $branch)
+my $branch = "tk" . $toolKit;
+my $answer = SVNutils::IsSvnTkBranch($component, $branch);
+print "Is $branch a SVN branch for $component: $answer\n\n";
+
+# Test GetBranch($toolKit, $component, $location, \$branch)
+SVNutils::GetBranch($toolKit, $component, "build", \$branch);
+my $release = TKutils::GetRelease($toolKit, ".");
+print "SVN Branch $component in /afs/eda/build/$component/$release: $branch\n\n";
+
+# Test GetBranch($toolKit, $component, $location, \$branch)
+SVNutils::GetBranchDb($toolKit, "wss", "187", \$branch);
+print "DB Branch for $toolKit/wss at 187: $branch\n\n";
+
+SVNutils::GetBranchDb($toolKit, "wss", "188", \$branch);
+print "DB Branch for $toolKit/wss at 188: $branch\n\n";
+
+# Test GetURL($toolKit, $component, $location, \$branch)
+my $url = "";
+SVNutils::GetURL($toolKit, $component, "build", \$url);
+print "URL for $component in /afs/eda/build/$component/$release: $url\n\n";
+
+# Test GetLastRevision($component, $branch)
+my $revision = "";
+$branch = "trunk";
+$answer = SVNutils::GetLastRevision($component, $branch, \$revision);
+print "Last rev for $component/$branch: $revision\n";
+
+$branch = "tk14.1.4";
+$answer = SVNutils::GetLastRevision($component, $branch, \$revision);
+print "Last rev for $component/$branch: $revision\n\n";
+
+
+# Test CopyTkBranch()
+$url = "https://greenjiffy.fishkill.ibm.com/eda/tk/svntest1";
+my $src = "tk14.1.4";
+my $tgt = "tk14.1.4z";
+my $rev = "No revisions found for 14.1.4 svntest1 in TKB";
+my $DRY = 1;
+my $VER = 1;
+#$answer = SVNutils::CopyTkBranch($url, $src, $tgt, $rev, $DRY, $VER);
+#print "CopyTkBranch: $answer\n\n";
+
+
+#------------------------------------------------------------------------------
+# Name   : PrintHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub PrintHelp {
+
+  my $progDescription = "
+This script tests functions in SVNutils.pm";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-dryrun] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit  = An EDA Tool Kit (ie, 14.1.1 ...)
+  component = Component name to be processed (e.g., einstimer)
+  -dryrun     (optional) Dry run (disables commands that write to CM DB)
+  -h          (optional) application help
+  -y          (optional) Verbose (print the invocation of each command)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ProcessArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub ProcessArgs {
+
+  # Parse command line arguments
+  GetOptions ('t=s'         => \$toolKit,
+              'comp|c=s'    => \$component,
+              'dryrun|g'    => \$dryRun,
+              'y'           => \$verbose,
+              'help|h|?'    => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    PrintHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) must be specified\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}

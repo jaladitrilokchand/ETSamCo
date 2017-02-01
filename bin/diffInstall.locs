@@ -1,0 +1,391 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: diffInstall
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/25/2014 GS  Initial coding
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+use Cwd;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+#use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TKutils;
+
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+my $INSTALL = "/afs/btv/data/edatools/ptn/lin64b_x86/tk18.1.8e/tk18.1.8e.8_lin64b_x86";
+my $INSTALL2 = "/afs/austin/data/edatools/ptn/lin64b_x86/tk18.1.8e/tk18.1.8e.8_lin64b_x86";
+my @PLATS = ( "lin64b_x86");
+#my @PLATS = ( "aix64b", "lin64b_x86");
+my $PLUS = "__PLUS__";
+
+# Program variables
+my $appName = "diffInstall";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dbMode          = "";  # default is prod if empty
+my $dryRun          = 0;
+my $startDir;
+my $srcPath         = "";
+my $destPath        = "";
+my $component       = "";
+my $srcLoc          = "";
+my $destLoc         = "";
+my $srcTkLevel      = "";
+my $destTkLevel     = "";
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+# Determine the release and tool kit names
+@tokens = split(/\./, $srcTkLevel);
+my $release = $tokens[0] . "." . $tokens[1];
+my $toolKit = $release . "." . $tokens[2];
+
+# Read the components
+my @components = SetComponents($toolKit, $component);
+
+
+# Verify each component
+my @mismatchComps = ();
+foreach my $comp (sort(@components)) {
+
+  foreach my $plat (sort(@PLATS)) {
+
+    print "\nProcessing $comp ($plat) ..\n";
+
+    # Create a list of files for srcTkLevel, comp and platfrom
+    $srcLoc = CreatePath($srcTkLevel, $comp, $plat);
+    my @srcFiles = GetFiles($srcLoc);
+    print " Source file count: " . scalar(@srcFiles) . "\n";
+
+    # Create a list of files for destTkLevel, comp and platfrom
+    $destLoc = CreatePath($destTkLevel, $comp, $plat);
+    my @destFiles = GetFiles($destLoc);
+    print " Destination file count: " . scalar(@destFiles) . "\n";
+
+    # Compare lists both directions to see what's missing or new
+    my @newFiles = DiffList(\@srcFiles, \@destFiles);
+    my @missingFiles = DiffList(\@destFiles, \@srcFiles);
+
+    # Display any differences
+    print " Component: $comp\n";
+    print " Platform : $plat\n";
+    print " Src      : $srcLoc\n";
+    print " Dest     : $destLoc\n";
+    if (scalar(@newFiles) > 0 || scalar(@missingFiles) > 0) {
+      push(@mismatchComps, "$comp ($plat)");
+      if (scalar(@newFiles) > 0) {
+        print " New Files\n";
+        print " " . join("\n ", @newFiles) . "\n";
+      }
+      if (scalar(@missingFiles) > 0) {
+        print " Missing Files\n";
+        print " " . join("\n ", @missingFiles) . "\n";
+      }
+    }
+    else {
+      print " >> No missing or new files\n";
+    }
+
+  }
+
+}
+
+
+# Display summary
+print "\n";
+if (scalar(@mismatchComps) > 0) {
+  print "Components with differences\n---------------------------\n";
+  print join("\n", @mismatchComps) . "\n";
+}
+else {
+  print "All components had NO differences\n";
+}
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  #LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Compare files in one install location against another install location
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-s src_tk> <-d dest_tk> [-c component]
+              [-dryrun] [-y] [-db dbMode] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  src_tk    = Source TK patch level (ie, 14.1.6.8)
+  dest_tk   = Destination TK patch level (ie, 14.1.6z.0)
+  component = Process this component only
+  -dryrun   = Run script in dryrun mode
+  dbMode    = Database mode [default = PROD] (PROD, DEV, TEST)
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('db=s'      => \$dbMode,
+	      's=s'       => \$srcTkLevel,
+	      'd=s'       => \$destTkLevel,
+	      'c=s'       => \$component,
+	      'dryrun'    => \$dryRun,
+	      'y'         => \$verbose,
+	      'help|h|?'  => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $srcTkLevel) {
+    print "ERROR: Source TK patch level (-s) is a required parameter\n";
+    return $ERROR;
+  }
+  if (! $destTkLevel) {
+    print "ERROR: Destination TK patch level (-d) is a required parameter\n";
+    return $ERROR;
+  }
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents($tk, $comp)
+# Purpose: Create a list of components ready for this Tool Kit
+# RCs    : List of component names or empty list
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  my ($tk, $comp) = @_;
+  print " Querying for components in $tk ...\n" if ($verbose);
+
+  # Query the DB for tk/components for the src tool kit
+  my @list = TKutils::GetComponents($tk, $comp, "DELIVERED");
+  print "Found " . scalar(@list) . " components\n" if ($verbose);
+
+  return @list;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetFiles($loc)
+# Purpose: Create a list of all files in the loc
+# RCs    : list of files
+#------------------------------------------------------------------------------
+sub GetFiles {
+
+  my ($dir) = @_;
+
+  print " Finding files ...\n" if ($verbose);
+
+  # Return empty list if dir not found
+  my @list = ();
+  if (! -e $dir) {
+    return @list;
+  }
+
+  my $startDir = getcwd();
+  chdir($dir);
+
+  print "  in $dir\n" if ($verbose);
+  my $command = "find .";
+  my @results = ();
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc != 0) {
+    print "ERROR: unable to read files from $dir\n";
+    @results = ();
+  }
+
+  foreach my $line (@results) {
+    next if ($line =~ /\.package/); # Skip control directory
+    chomp $line;
+    next if ($line eq ".");
+    if ($line =~ /\+/) {
+      $line =~ s/\+/$PLUS/s;
+    }
+    push(@list, $line);
+  }
+
+  if ($verbose) {
+    print "\nFiles in $dir\n";
+    print join("\n", @list) . "\n";
+  }
+
+  chdir($startDir);
+  return @list;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : DiffList($refList1, $refList2)
+# Purpose: Compare the contents of list1 to list 2 .. return a list of lines
+#          in list 1 that are not in list 2
+# RCs    : List of files
+#------------------------------------------------------------------------------
+sub DiffList {
+
+  my ($rList1, $rList2) = @_;
+
+  print " Diffing files ...\n" if ($verbose);
+
+  my @new = ();
+
+  for my $line (@$rList1) {
+    if (! grep(/^$line$/, @$rList2)) {
+      $line =! s/$PLUS/\+/g if ($line =~ /$PLUS/);
+      push(@new, $line);
+    }
+
+  }
+
+  return @new;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreatePath($tkLevel, $comp, $platform)
+# Purpose: Create the path to this tkLevel/comp/plat deliverables
+# RCs    : Path
+#------------------------------------------------------------------------------
+sub CreatePath {
+
+  my ($tkLevel, $comp, $platform) = @_;
+
+  # Parse tkLevel to get release, and tk name
+  my @tokens = split(/\./, $tkLevel);
+  my $rel = "14.1";
+  my $tk = $release . "." . $tokens[2];
+
+  # path = $INSTALL/tk$TK/$PLAT/tk$TK/tk$TKPL_$PLAT/$COMP/$REL
+  # or 
+  # for tgsupport $INSTALL/tk$TK/$PLAT/tk$TK/theguide_support
+  my $path = "$INSTALL/";
+  if ($comp ne "tgsupport") {
+    $path .= "$comp/$rel";
+  }
+  else {
+    $path .= "theguide_support";
+  }
+
+  print "PATH: $path\n" if ($verbose);
+
+  return $path;
+
+}
+
+

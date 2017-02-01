@@ -1,0 +1,206 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: xmit_preview
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 02/01/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/01/2012 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+
+# Program name
+my $appName = "xmit_preview";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $toolKit    = "";
+my $component  = "";
+my $help       = "";
+my $verbose    = 0;
+my $debug      = 0;
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Program's global return code - initialize to ERROR
+my $progRc  = $ERROR;
+
+# Set the location and name of createFuncUpdate application
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $XMIT = "$BIN/transmit";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+
+#
+# Read the command line arguments
+#
+$progRc = processArgs();
+if ($progRc == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+#
+# Build and execute the transmit command
+#
+my $command = "$XMIT -s -v $toolKit -c $component";
+$command .= " -g" if ($debug);
+
+print "Running $command" if ($verbose);
+system($command);
+$progRc = $? >> 8;
+
+exit $progRc;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Executes the transmit process for TK Patches.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> <-c component> [-g] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  -t     Tool Kit [14.1.0, 14.1.1 ...].
+  -c     Component to transmi
+  -g     Debug mode - view what would be xmitted but do NOT xmit anything (optional)
+  -h     Application help (optional)
+  -y     Verbose mode (optional)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('toolkit|t=s' => \$toolKit,
+              'comp|c=s'    => \$component,
+              'verbose|y'   => \$verbose,
+              'help|h|?'    => \$help,
+              'debug|g'     => \$debug
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Verify the required parameters
+  my $msg = "";
+  if (! $toolKit) {
+    $msg .= "ERROR: Tool Kit (-t) is a required parameter\n";
+  }
+  if (! $component) {
+    $msg .= "ERROR: Component (-c) is a required parameter\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+

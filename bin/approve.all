@@ -1,0 +1,94 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: approve.all
+#  SYNTAX: Run with -h
+#
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# Processes Injection Requests
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 10/07/2014 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+
+use Getopt::Long;
+Getopt::Long::Configure ("pass_through");
+
+use English;
+use Cwd;
+use File::Basename;
+use FindBin qw($RealBin);
+
+use lib "$RealBin/../libperl";
+use EdaJavaEnv;
+
+
+# Application constants.
+my $CLASS_NAME    = "ApproverUI";
+my $CLASS_SUB_DIR = "etree/inject_approver_ui";
+my $OK = 0;
+my $ERROR = 8;
+
+my @tokens = split("/", $RealBin);
+pop @tokens;
+my $rootDir = join("/", @tokens) . "/";  
+
+
+# Get application data.
+my $wrapperName = basename($PROGRAM_NAME);
+
+# Get the correct java executable
+my $javaExec = EdaJavaEnv::getJavaExec("1.6");
+
+# Set the classpath
+my $classpath = $rootDir . "java/classes";
+$classpath .= ":" . EdaJavaEnv::getEtreeJars($rootDir);
+$classpath .= ":" . EdaJavaEnv::getLevelHistJars($rootDir);
+$classpath .= ":" . EdaJavaEnv::getUtilJars($rootDir);
+$classpath .= ":" . EdaJavaEnv::getJFaceJars($rootDir);
+$classpath .= ":" . EdaJavaEnv::getClearQuestJars($rootDir);
+$classpath .= ":" . EdaJavaEnv::getMailJars($rootDir);
+
+
+# Get the application args
+my $appArgs = EdaJavaEnv::getArgs(@ARGV);
+
+# Prepare to handle system/user interruptions.
+$SIG{'INT'} = sub { handleInterruption("INT"); };
+$SIG{'QUIT'} = sub { handleInterruption("QUIT"); };
+$SIG{__DIE__}  = sub { handleInterruption("DIE"); };
+
+
+# Construct the command to execute
+my $javaCall = "$javaExec -classpath $classpath ";
+$javaCall .= "com.ibm.stg.eda.app.$CLASS_SUB_DIR.$CLASS_NAME";
+$javaCall .= " $appArgs";
+
+
+# Execute the application.
+#print("Calling     : $javaCall\n");
+#print("-------------------------------------------------\n");
+
+my $rc = system $javaCall;
+
+$rc = $? >> 8;
+exit $rc;
+
+
+# ------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle user/system interruptions.
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub handleInterruption {
+  my ($type) = @_;
+  print("\n[$wrapperName] Caught $type interruption - exiting neatly.\n");
+  exit $ERROR;
+}

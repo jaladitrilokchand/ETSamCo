@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CqUpdate>
+	<login>
+		<username>asuren</username>
+		<password>fake</password>
+		<database>PROT0</database>
+		<schema>mdcms</schema>
+	</login>
+	<client>
+		<app-name>CQServiceTest</app-name>
+	</client>
+	<update>
+		<record_type>Problem</record_type>
+		<record_id>PROT000004085</record_id>
+		<action>Modify</action>
+		<fields>
+			<field
+				name="assigned_to_fullname"
+				value="Suren, Aydin" />
+			<field
+				name="need_by_date"
+				value="2009-09-20" />
+			<field
+				name="comment"
+				value="Assigning to Aydin again." />
+		</fields>
+	</update>
+</CqUpdate>

@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CqQuery>
+	<login>
+		<username>asuren</username>
+		<password>fake</password>
+		<database>TRYIT</database>
+		<schema>mdcms</schema>
+	</login>
+	<client>
+		<app-name>CQServiceTest</app-name>
+	</client>
+		<query>
+	     <query-name>null</query-name>
+	</query>
+</CqQuery>

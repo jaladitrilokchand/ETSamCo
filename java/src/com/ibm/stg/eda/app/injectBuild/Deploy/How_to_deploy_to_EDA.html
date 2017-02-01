@@ -1,0 +1,67 @@
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html>
+<head>
+
+
+
+  
+  
+  <meta http-equiv="Content-Type" content="text/html; charset=windows-1252">
+
+
+
+  
+  
+  <title>Notes on how to deploy updates to install_dk</title>
+</head>
+
+
+<body style="" lang="EN-US">
+
+
+
+
+<div class="Section1">
+
+<h2>How to deploy the <span style="text-decoration: underline;">injectBuild</span> application to EDA</h2>
+
+<span style="font-weight: bold;">Source location</span>: /afs/btv/data/aes/apps/prod/iipmds (or test)<br>
+
+<span style="font-weight: bold;">Target location</span>: /afs/eda/u/einslib/bin/iipmds<br>
+
+<ol>
+
+
+
+ <li>In RSA, find a control file called&nbsp;InjectBuild_package_for_EDA.txt in the iipmds/java/src/.../TkInject folder.
+ </li>
+
+
+  <li>Extract that file and InjectBuild_package.pl to any directory (I use $HOME/FOR_EDA)</li>
+
+  <li>Cd to the directory you extracted files to (cd $HOME/FOR_EDA)</li>
+
+  <li>Run InjectBuild_package.pl. &nbsp;It will produce a tar file called injectBuild_&lt;YYYYMMDD&gt;.tar</li>
+
+  <li>Copy the tar file to /afs/eda/u/einslib/bin</li>
+
+  <li>Extract the tar file contents (tar -xvf injectBuild_&lt;YYYYMMDD&gt;.tar)</li>
+
+  <li>Cd to /afs/eda/u/einslib/bin/iipmds/bin</li>
+
+  <li>Copy injectBuild.last to injectBuild</li>
+
+  <li>Cd to /afs/eda/u/einslib/bin</li>
+
+  <li>Test the application by running ./injectBuild</li>
+
+</ol>
+
+
+
+
+</div>
+
+
+</body>
+</html>

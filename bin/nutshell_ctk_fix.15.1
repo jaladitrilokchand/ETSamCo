@@ -1,0 +1,11 @@
+tk=$1
+print "ToolKit: $tk"
+if [[ -z $tk ]]
+then
+  print "Missing tool kit"
+  print "Usage: nutshell_ctk_fix15.1 <tk>"
+  exit 8
+fi
+
+cd /afs/eda/customtk/tk$tk/nutshell/15.1/.bin-linux64
+ln -sf nutsh-O   nutsh

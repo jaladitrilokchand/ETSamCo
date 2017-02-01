@@ -1,0 +1,369 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: tk.size
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 04/10/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 06/05/2014 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use File::Find;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+# Required for Blue Pages
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+require TKutils;
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+
+# Program variables
+my $appName = "tk.size";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $toolKit         = "";
+my @components      = ();
+my $component       = "";
+my $startDir = $ENV{"PWD"};
+my $stage;
+my $location;
+my $serverTk;
+my $asicsTk;
+my %sizes;
+my %counts;
+my %types;
+my $size;
+my $count;
+my $asicSize = 0;
+my $serverSize = 0;
+my $asicCount = 0;
+my $serverCount = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Create lists for server/ASICs components
+my @asics = GetBomComponents("asics");
+my @server = GetBomComponents("server");
+
+
+# Create list of components to process
+@components = TKutils::GetComponents($toolKit, $component, "");
+if (scalar(@components) < 1) {
+  CleanExit("No components to process ... exiting\n", $ERROR);
+}
+
+# Set the location - shipb, tkb ...
+TKutils::GetTkStage($toolKit, \$stage);
+if ($stage eq "DEVELOPMENT") {
+  $location = "build";
+}
+elsif ($stage eq "PREVIEW") {
+  $location = "ship";
+}
+elsif ($stage eq "PRODUCTION") {
+  $location = "tkb";
+}
+else {
+  $location = lc($stage);
+}
+
+# Process each component
+my $testCount = 0;
+foreach $component (@components) {
+
+  # Skip the etreetest components
+  next if ($component =~ /etreetest/);
+  print "\nProcessing ... $component\n";
+  $testCount++;
+
+  # Determine the tk type
+  my $isAsics = 0;
+  my $isServer = 0;
+  my $type;
+  if (grep(/^$component$/, @asics)) {
+    if (grep(/^$component$/, @server)) {
+      $type = "ASICs/Server";
+      $isAsics = 1;
+      $isServer = 1;
+    }
+    else {
+      $type = "ASICs";
+      $isAsics = 1;
+    }
+  }
+  elsif (grep(/^$component$/, @server)) {
+    $type = "Server";
+    $isServer = 1;
+  }
+  else {
+    $type = "ASICs/Server";
+    $isAsics = 1;
+    $isServer = 1;
+  }
+
+  # Set the top level directory
+  my $topDir = "/afs/eda/$location/$component/14.1";
+  print " dir: $topDir\n";
+
+  # Get the size
+  $size = 0;
+  $count = 0;
+  my $sizeMb = 0;
+  if ($component ne "oa") {
+    find(\&GetSize, $topDir);
+    find({ wanted => \&GetSize,
+           follow => 1,
+           follow_skip => 2},
+         $topDir);
+    $sizeMb = sprintf("%.02f", $size / 1024 / 1024);
+  }
+  $sizes{$component} = $sizeMb;
+  $counts{$component} = $count;
+  $types{$component} = $type;
+  print " size(Mb): $sizeMb\n";
+
+  $asicSize += $sizeMb if ($isAsics);
+  $serverSize += $sizeMb if ($isServer);
+  $asicCount += $count if ($isAsics);
+  $serverCount += $count if ($isServer);
+
+  # Uncomment for testing
+  #last if ($testCount > 20);
+
+}
+
+# Display the results
+my $totalSize = 0;
+my $totalCount = 0;
+print "\n\n";
+printf("%-15s%15s%15s%15s\n", 
+       "Component", "Size (Mb)", "Num Files", "TK Content");
+printf("%-15s%15s%15s%15s\n", 
+       "---------", "---------", "---------", "----------");
+
+foreach $component (sort(keys(%sizes))) {
+
+  my $line = sprintf("%-15s%15s%15s%15s\n", $component,
+                     $sizes{$component}, $counts{$component},
+                     $types{$component});
+  $totalSize += $sizes{$component};
+  $totalCount += $counts{$component};
+  print $line;
+}
+
+printf("\n%-15s%15s%15s%15s\n", "TOTAL", $asicSize, $asicCount, "ASICs");
+printf("%-15s%15s%15s%15s\n", "TOTAL", $serverSize, $serverCount, "Server");
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script determines the size of the tool kit in question.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-server | -asics] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit   = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+  -asics     = Process only ASIC TK components (default = both TKs)
+  -server    = Process only server TK components (default = both TKs)
+  -y         = Verbose mode
+  -h         = Show application usage
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'     => \$toolKit,
+	      'server'     => \$serverTk,
+	      'asics'      => \$asicsTk,
+              'c=s'        => \$component,
+	      'y'          => \$verbose,
+	      'help|h|?'   => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) is a required parameter\n";
+    return $ERROR;
+  }
+
+  # Set TK type
+  if (! $serverTk && ! $asicsTk) {
+    $serverTk = 1;
+    $asicsTk = 1;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetSize()
+# Purpose: Determine the size of the file
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub GetSize {
+
+  return if (-d $File::Find::name); # Exclude directories
+
+  $count++;
+  $size += -s $File::Find::name if (-e $File::Find::name);
+  #printf("%-10s%s\n", $size, $File::Find::name);
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : GetBomComponents($type)
+# Purpose: Create a list of components in a BOM file
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub GetBomComponents {
+
+  my ($type) = @_;
+
+  # Set the file name
+  my $bom = "/afs/eda.fishkill.ibm.com/edadist/tools/install/";
+  if ($type eq "server") { 
+    $bom .= "Ext_BOM/Ext_BOM_toolkit181_";
+  }
+  else {
+    $bom .= "SERVER_BOM/BOM_Server_toolkit141_";
+  }
+  $bom .= "aix61_64";
+
+  # Read it and parse the comp names
+  my @list = ();
+  open FILE, $bom or die $!;
+  while (my $line = <FILE>) {
+    chomp $line;
+    next if ($line =~ /:/ || $line eq "");
+    my @tokens = split(/\./, $line);
+    my $compName = TKutils::Trim($tokens[0]);
+    push(@list, $compName);
+  }
+  close FILE;
+
+  return @list;
+
+}
+
+
+

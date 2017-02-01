@@ -1,0 +1,351 @@
+#!/usr/bin/env perl
+use warnings;
+#use strict;
+#=============================================================================
+#    FILE: doTK_check
+#
+# CREATOR: Art Magnan
+#    DEPT: AZYX
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# Perform checks against EDA PROD for all components defined in CM DB:
+#   1) Locks created during AGTS process.
+#   2) Latest revision in CM DB
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 12/19/2011 AM  Initial version
+#=============================================================================
+#=============================================================================
+#			       FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub help {
+	print "\nScript to check 14.1 release flow for various issues.\n";
+	print "\nUsage:  doTK_check -t <Toolkit version> [-g] [-h]\n";
+	print "\nInput parameters:\n";
+	print "  -t <EDA Toolkit release version> e.g. 14.1.0\n";
+	print "  -g [Test mode ON - will see what would execute.]\n";
+	print "  -h This help\n";
+	print "\nNOTES:\n";
+	print "  1) The EDA Toolkit version is required.\n";
+	exit 1;
+}
+
+sub process_cmd_line {
+  # ---------------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+	# Parms defined:  -t <Toolkit version>  e.g. 14.1.0
+  #                 -g [Test mode ON - will see what would execute.]
+  #                 -h [help]
+  # ---------------------------------------------------------------------
+	$opt_t = "";
+
+  getopts('ght:');
+	
+  $tkVersion = "$opt_t";
+	
+	# Set DEBUG mode
+	if ( ${opt_g} ) {
+		$DEBUG = 1;
+	}
+	else {
+		$DEBUG = 0;
+	}
+	
+	# Display help if requested
+	if ( ${opt_h} ) { help(); }
+	
+}
+
+sub max_rc {
+	#
+	# return the rolling maximum return code
+	#
+	my ($rc, $maxrc) = @_;
+	
+	if ($rc > $maxrc) {
+		$maxrc = $rc;
+	}
+	return ($maxrc);
+} # end max_rc
+
+sub get_latest_revision {
+	#
+	# Retrieve latest revision for component from EDA PROD
+  #
+	my ($compName, $tkVersion, $debug) = @_;
+	my $rc = 0;
+	my $getrevCmd = "";
+	my $revision = -1;
+
+  my $opName = "Component revision retrieval from EDA PROD";
+
+	$getrevCmd = "$scriptPath/getRevisions -t $tkVersion -c $compName -l prod -latest > /tmp/revID_latest";
+
+	# Execute the command
+	TkCommon::runcmd("$getrevCmd", "$DEBUG");
+	$rc = $? >> 8;
+
+	if (($rc == 0) && (! $debug)) {	
+    $revision = `cat /tmp/revID_latest`;
+	  chomp $revision;
+		print "revision: $revision\n";
+	}
+
+	return ($rc, $revision);
+
+} # end get_latest_revision
+
+sub create_timestamp {
+	#
+	# Get date and time info from system
+	#
+	
+	my @months = qw(jan feb mar apr may jun jul aug sep oct nov dec);
+  my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+	my $newmin;
+
+	$year = $year + 1900;
+	
+	my $month = $mon + 1;
+  my $monthName = $months[$mon];
+	my $monthDay = $monthName . $mday;
+	
+  my $date_now = $month . "/" . $mday . "/" . $year;
+	
+  if ($min < 10) {
+    $newmin = "0" . $min;
+  }
+  else {
+    $newmin = $min;
+  }
+  my $time_now = $hour . ":" . $newmin;
+
+  return ($date_now, $time_now, $monthName, $monthDay);
+	
+} # end create_timestamp
+
+sub execute_check_01 {
+	#
+	# Check to identify components with no latest revision in PROD
+	#
+	my ($tkVersion, $comp, $debug) = @_;
+	my $rc = 0;
+	my $revision = -1;
+	
+	if (! $debug) {
+		# Do the latest revision check on EDA PROD
+		($rc, $revision) = get_latest_revision ($comp, $tkVersion, $debug);
+		if ($rc) {
+			print CHECK01 "$comp/14.1\n";
+			print "[ERROR]: Unable to get a valid latest revision in EDA PROD for component $comp/14.1. Revision: $revision\n";
+		}
+	}
+	else {
+		print "DEBUG mode: No CM DB revision check being performed!!\n";
+		return $rc;
+	}
+	return ($rc);
+	
+}  # end execute_check_01
+
+sub execute_check_02 {
+	#
+	# Check to identify components with locks in EDA PROD
+	#
+	my ($tkVersion, $comp, $debug) = @_;
+	my $rc = 0;
+	
+  my $lockFile = "/afs/eda/prod/$comp/14.1/.lock_prodLockMgr";
+	
+	if (! $debug) {
+		# Check for lock on component tree in EDA PROD
+		if (-f $lockFile) {
+			print CHECK02 "$comp/14.1\n";
+			print "[WARN]: Found lock in EDA PROD for component $comp/14.1.\n";
+			$rc = 4;
+		}
+	}
+	else {
+		print "DEBUG mode: No lock check being performed!!\n";
+	}
+	return ($rc);
+	
+}  # end execute_check_02
+
+#============================================================================================
+#					MAIN ROUTINE
+#============================================================================================
+use Env;
+use Getopt::Std;
+use File::Path qw(mkpath) ;
+use Cwd;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+$chk01 = "ON";      # REVISION CHECK
+$chk02 = "ON";      # LOCKED PROD CHECK
+
+our $opt_g = "";
+our $opt_h = "";
+
+our $userID = $LOGNAME;
+our $rc = 0;
+our $maxRC = 0;
+
+our $tkVersion = "";
+our $compName = "";
+
+our $compDef = "DELIVERED,BUILD_SUPPORT,TEST_SUPPORT";
+
+my $compList;
+my $compCnt = 0;
+my $lockCnt = 0;
+my $noRevCnt = 0;
+
+my $datetime;
+
+our $scriptName = "doTK_check";
+
+our $codePath = "/afs/eda/data";
+our $scriptPath = "${codePath}/edainfra/tools/enablement/prod/bin";
+my $dbType = "";
+
+# Get the command line parameters
+process_cmd_line;
+
+# Make sure the required parameters are provided
+if ($tkVersion eq "") {
+  print "\nERROR: Missing Toolkit version.\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+
+# Ensure tkVersion is in correct format
+$rc = TkCommon::check_tkVersion ($tkVersion);
+if ($rc != 0) {
+  print "\nERROR: Toolkit version specified in an invalid format!\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+
+#
+# Get the TK version-specific component definition
+#
+print "Using component definition: \"$compDef\"\n";
+my $cmdbCmd = "${scriptPath}/getComponents -t $tkVersion -ct $compDef -q $dbType";
+$compList = `$cmdbCmd`;
+chomp ($compList);
+$rc = $? >> 8;
+
+if ($rc) {
+	print "ERROR: Return code $rc from $cmdbCmd.\n";
+	exit $rc;
+} else {
+	print " \n";
+	print "Component list created. rc=$rc\n";
+	if ($DEBUG) {
+		print "Results:\n";
+		$compCnt = 0;
+		foreach $comp (sort split(/,/, $compList)) {
+			$compCnt++;
+			print "$compCnt) $comp\n";	
+		}
+	}
+}
+
+# Convert tkVersion for use in log file name
+my $tkVer = TkCommon::convert_tkVersion ($tkVersion, "underscore");
+
+# Get time/date info
+($date_now, $time_now, $monthName, $monthDay) = create_timestamp;
+$datetime = "$date_now at $time_now";
+
+# Set up the execution log
+my $logTop  = "/afs/eda/u/svnlib/logs/${monthName}";
+if (! -d $logTop) {
+	`mkdir -p $logTop`;
+}
+our $logFile = "$logTop/${monthDay}.fullTK.${tkVer}.${scriptName}.log";
+unless (open(STDOUT, "| tee -ai $logFile")) {
+	die ("Output file $logFile cannot be opened.\n");
+}
+
+# Log the start time
+print ("\n#\n");
+print ("# $scriptName started on $datetime by $userID\n");
+print ("#\n\n");
+
+if ((! $DEBUG) && ($chk01 eq "ON")) { 
+	# Set up the log file to capture component names with no revisions in CM DB
+	our $noRevsFile = "/afs/eda/u/svnlib/checks/$monthDay.comps.no_prod_revisions";
+	open (CHECK01, ">$noRevsFile") or die "cannot open output file: $noRevsFile\n";
+}
+
+if ((! $DEBUG) && ($chk02 eq "ON")) {
+	# Set up the log file to capture component names with no revisions in CM DB
+	our $locksOnFile = "/afs/eda/u/svnlib/checks/$monthDay.comps.prod_locks_on";
+	open (CHECK02, ">$locksOnFile") or die "cannot open output file: $locksOnFile\n";
+}
+
+foreach $comp (sort split(/,/, $compList)) {
+	$compCnt++;
+	print "\n$compCnt) $comp\n";
+	
+	#
+	# CHECK 01 - Missing SVN revisions in EDA PROD as recorded in CM DB
+	#
+	#
+	if ($chk01 eq "ON") {
+		$rc = execute_check_01 ($tkVersion, $comp, $DEBUG);
+		if ($rc) {
+			$noRevCnt++;
+		}
+	}
+	
+	#
+	# CHECK 02 - Comonent trees in EDA PROD that are locked by prodLockMgr
+	#
+	if ($chk02 eq "ON") {
+		$rc = execute_check_02 ($tkVersion, $comp, $DEBUG);
+		if ($rc) {
+			$lockCnt++;
+		}
+	}
+
+	#
+	# CHECK 03 - New files identified via SVN status codes upon source code overlay
+	#
+	# Run SVN status code check against files produced in runAGTS step 4
+	#
+	
+} # end comp loop
+
+if ((! $DEBUG) && ($chk01 eq "ON")) {
+	print "\nThe script, $scriptName, finished with $noRevCnt out of $compCnt components having no revisions in EDA PROD.\n";
+	if ($noRevCnt > 0) {
+		print "\nComponents with no PROD revisions in CM DB can be found in file, $noRevsFile\n";
+	}
+	close (CHECK01);
+}
+if ((! $DEBUG) && ($chk02 eq "ON")) {
+	print "\nThe script, $scriptName, finished with $lockCnt out of $compCnt components having locks ON in EDA PROD.\n";
+	if ($lockCnt > 0) {
+		print "\nComponents with locks ON can be found in file, $locksOnFile\n";
+	}
+	close (CHECK02);
+}
+
+# Get time/date info
+($date_now, $time_now, $monthName, $monthDay) = create_timestamp;
+$datetime = "$date_now at $time_now";
+
+# Log the completion time
+print ("\n#\n");
+print ("# $scriptName ended on $datetime\n");
+print ("#\n\n");
+
+exit ($rc);
+

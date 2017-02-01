@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<xsd:schema xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+	<xsd:element name="password" type="nonBlankString" />
+	<xsd:element name="database" type="cqDatabaseNames" />
+	<xsd:element name="schema" type="cqSchemaNames" />
+	<xsd:element name="username" type="nonBlankString" />
+	<xsd:element name="app-name" type="nonBlankString" />
+	<xsd:element name="record_type" type="nonBlankString" />
+	<xsd:element name="record_id" type="nonBlankString" />
+	<xsd:element name="action" type="nonBlankString" />
+
+    <xsd:element name="fields">
+		<xsd:complexType>
+			<xsd:sequence>
+				<xsd:element name="field" minOccurs="0"
+					maxOccurs="unbounded">
+					<xsd:complexType>
+						<xsd:attribute name="name" type="xsd:string"
+							use="required" />
+						<xsd:attribute name="value" type="xsd:string"
+							use="required" />
+					</xsd:complexType>
+				</xsd:element>
+			</xsd:sequence>
+		</xsd:complexType>
+	</xsd:element>
+	
+
+	<xsd:element name="CqUpdate">
+		<xsd:complexType>
+			<xsd:sequence>
+				<xsd:element ref="login" />
+				<xsd:element ref="client" />
+				<xsd:element ref="update" />
+			</xsd:sequence>
+		</xsd:complexType>
+	</xsd:element>
+	
+	<xsd:element name="login">
+		<xsd:complexType>
+			<xsd:sequence>
+				<xsd:element ref="username" />
+				<xsd:element ref="password" />
+				<xsd:element ref="database" />
+				<xsd:element ref="schema" />
+			</xsd:sequence>
+		</xsd:complexType>
+	</xsd:element>
+	
+	<xsd:element name="client">
+		<xsd:complexType>
+			<xsd:sequence>
+				<xsd:element ref="app-name" />
+			</xsd:sequence>
+		</xsd:complexType>
+	</xsd:element>
+
+	<xsd:element name="update">
+		<xsd:complexType>
+			<xsd:sequence>			
+				<xsd:element ref="record_type" />
+				<xsd:element ref="record_id" />
+				<xsd:element ref="action" />
+				<xsd:element ref="fields" minOccurs="0" maxOccurs="1" />
+			</xsd:sequence>
+		</xsd:complexType>
+	</xsd:element>
+
+	<xsd:simpleType name="nonBlankString">
+		<xsd:restriction base="xsd:string">
+			<xsd:minLength value='1' />
+		</xsd:restriction>
+	</xsd:simpleType>
+
+	<xsd:simpleType name="cqDatabaseNames">
+		<xsd:restriction base="xsd:string">
+			<xsd:enumeration value="MDCMS" />
+			<xsd:enumeration value="TRYIT" />
+			<xsd:enumeration value="PROT0" />
+			<xsd:enumeration value="PROT3" />
+			<xsd:enumeration value="MASTR" />
+			<xsd:enumeration value="ASPRD" />
+			<xsd:enumeration value="CQWS1" />
+			<xsd:enumeration value="CQWS2" />
+		</xsd:restriction>
+	</xsd:simpleType>
+
+	<xsd:simpleType name="cqSchemaNames">
+		<xsd:restriction base="xsd:string">
+			<xsd:enumeration value="mdcms" />
+			<xsd:enumeration value="MDCMS" />
+			<xsd:enumeration value="CLON_MDCMS" />
+			<xsd:enumeration value="asprd" />
+			<xsd:enumeration value="CQWebServicesProto" />
+		</xsd:restriction>
+	</xsd:simpleType>
+
+</xsd:schema>

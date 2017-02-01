@@ -1,0 +1,88 @@
+
+/**
+* <pre>
+*=============================================================================
+*
+* Copyright: (C) IBM Corporation 2006 -- IBM Internal Use Only
+*
+*=============================================================================
+*
+*    FILE: ILog.java
+*
+* CREATOR: Ryan A. Morgan
+*    DEPT: AW0V
+*    DATE: 07/05/2006
+*
+*-PURPOSE---------------------------------------------------------------------
+*
+* ILog should be implemented by a class whose purpose is to create a session log.
+* Private or protected setters matching the getters should also be implemented by
+* a class using ILog where applicable. Additional functions and attributes will 
+* need to be created by a class implementing ILog.
+*-----------------------------------------------------------------------------
+*
+*
+**-CHANGE LOG-----------------------------------------------------------------
+* 07/05/2006	RAM		Initial Coding
+*=============================================================================
+* </pre>
+*
+*/
+package com.ibm.stg.iipmds.common;
+import java.io.*;
+import java.util.Date;
+
+public interface ILog {
+
+	/**
+	 * @return	appName		The name of the application creating the log
+	 */
+	public String getAppName();
+
+	/**
+	 * @return	createdBy	The name of the creator
+	 */
+	public String getCreatedBy();
+
+	/**
+	 * @return	timestamp	The time at which the log was created
+	 */
+	public Date getTimestamp();
+
+	/**
+	 * @return	path		The path to where the .log file is written
+	 */
+	public String getPath();
+
+	/**
+	 * @return	fileName	The name of the .log file
+	 */
+	public String getFileName();
+
+	/**
+	 * @return	fullPath	The entire path name
+	 */
+	public String getFullPath();
+
+	/**
+	 * @return	logFile		The Print Stream that the .log file is
+	 * 						being written to
+	 */
+	public PrintWriter getLogFile();
+
+	/**
+	 * @return	asString	The class as a string
+	 */
+	public String toString();
+
+	/**
+	 * @return	funcname	The name of the function
+	 */
+	public String getFuncName();
+
+	/**
+	 * @return	className	The name of the class
+	 */
+	public String getClassName();
+
+}

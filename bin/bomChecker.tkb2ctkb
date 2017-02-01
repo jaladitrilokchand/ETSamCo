@@ -1,0 +1,481 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: bomChecker.tkb2ctkb
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 09/23/2014 GFS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TkCommon;
+use TKutils;
+
+# Global variables
+my $AFS_EDA    = "/afs/eda";
+
+# Program name
+my $appName = "bomChecker.tkb2ctkb";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $srcToolKit = "";
+my $component  = "";
+my $verbose    = 0;
+my $help       = "";
+my $msg        = "";
+my @tokens     = ();
+my $ignoreSrcAdds = 0;
+my $ignoreTgtAdds = 0;
+
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# For now I have copied valid_file() from xmit_common to this script to avoid
+# warning messages when I use the line below. This needs to be revisited.
+#do "/afs/eda/data/edainfra/tools/enablement/prod/bin/xmit_common";
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Define the current directory
+my $startDir = $ENV{"PWD"};
+
+
+# To exit cleanly from a Ctrl+C or an unexpected die()
+$SIG{'INT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{'QUIT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{__DIE__}  = sub { handleInterruption(); };
+
+
+# Read the command line arguments
+if (processArgs()  == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+my $release = TKutils::GetRelease($srcToolKit, ".");
+
+
+# Query the database to create a list of components in this Tool Kit
+my @components = TKutils::GetComponents($srcToolKit, $component, "");
+
+
+# Set the source and target locations
+my $srcLocation = "tk";
+my $tgtLocation = "customtk/tk$srcToolKit";
+
+
+# Iterate thru each component, looking for deliverable mismatches
+my $rc = $OK;
+foreach $component (@components) {
+
+  print "Processing ... $component\n";
+
+  my $srcDir = "$AFS_EDA/$srcLocation/$component/$release";
+  my $tgtDir = "$AFS_EDA/$tgtLocation/$component/$release";
+  print " SRC dir = $srcDir\n";
+  print " TGT dir = $tgtDir\n";
+
+  # Skip this component of src or tgt dirs do not exist
+  if (! -e $srcDir) {
+    print "ERROR: unable to locate source directory\n";
+    print " Dir: $srcDir\n";
+    print " >> Please verify this component should be delivered or is ";
+    print "needed to support testing.";
+    $rc = $ERROR;
+    next;
+  }
+  if (! -e $tgtDir) {
+    print "ERROR: unable to locate target directory\n";
+    print " Dir: $tgtDir\n";
+    $rc = $ERROR;
+    next;
+  }
+
+  # Determine the deliverables for src and tgt directories
+  my @srcFiles = ();
+  my @tgtFiles = ();
+  if (GetDeliverables($release, $srcDir, \@srcFiles) != $OK) {
+    print "ERROR: unable to determine deliverables for source directory\n";
+    print " Dir: $srcDir\n";
+    $rc = $ERROR;
+    next;
+  }
+  if (GetDeliverables($release, $tgtDir, \@tgtFiles) != $OK) {
+    print "ERROR: unable to determine deliverables for target directory\n";
+    print " Dir: $tgtDir\n";
+    $rc = $ERROR;
+    next;
+  }
+  print " SRC Deliverables: " . scalar(@srcFiles) . "\n";
+  print " TGT Deliverables: " . scalar(@tgtFiles) . "\n";
+
+  # Determine if there are any BOM differences
+  my %differences;
+  Compare(\@srcFiles, \@tgtFiles, \%differences);
+  Display($srcToolKit, \%differences);
+
+  $rc = scalar(keys(%differences)) if ($rc != $ERROR);
+
+}
+
+
+exit $rc;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Compares deliverables in the source and target Tool Kits.  For this script,
+deliverables must match exactly between the 2 Tool Kits.  If no component is
+specified then all components in the source Tool Kit are verified.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-src src_tool_kit>
+          [ -c component ] [-ignoreSrcAdds] [-ignoreTgtAdds] [-h]
+
+RETURN CODES:
+  Number of differences
+";
+
+  my $where ="
+WHERE:
+  src_tool_kit  Name of source Tool Kit
+  component     Name of individual component [defaults to all comps in src tk]
+  -ignoreSrcAdds Ignore any additional files in SRC tool kit
+  -ignoreTgtAdds Ignore any additional files in TGT tool kit
+  -y            Verbose mode
+  -h            Application help
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('c=s'            => \$component,
+	      'src=s'          => \$srcToolKit,
+	      'ignoreSrcAdds'  => \$ignoreSrcAdds,
+	      'ignoreTgtAdds'  => \$ignoreTgtAdds,
+              'y'              => \$verbose,
+	      'help|h|?'       => \$help
+	     ) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required parameters
+  if (! $srcToolKit) {
+    print "ERROR: Source Tool Kit (-src) is a required parameter\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetDeliverables($release, $path, $refDeliverables)
+# Purpose: Create a list of deliverables for the given tool kit and path
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub GetDeliverables {
+
+  my ($release, $path, $refDeliverables) = @_;
+
+  # Define the platforms for this release
+  my @platforms = ("64-rs_aix61", "64-amd64_linux26_RH5");
+  if ($release ne "14.1") {
+    print "ERROR: only platforms for the 14.1 tool kits has been defined\n";
+    return $ERROR;
+  }
+
+  # Create a list of deliverables that should NOT be shipped (.dont_ship file)
+  my $dontShipFile = "$path/.dont_ship";
+  my @dontShipEntries = ();
+  if (-e $dontShipFile) {
+    open(DONT_SHIP, "$dontShipFile") || die "open $dontShipFile failed";
+    chomp(@dontShipEntries = <DONT_SHIP>);
+    close(DONT_SHIP);
+  }
+  print ".dont_ship count: " . scalar(@dontShipEntries) . "\n" if ($verbose);
+
+  # Get a list of all possible deliverables for AIX/Linux
+  my $platform = "";
+  foreach $platform (@platforms) {
+    my @allDeliverables = ();
+
+    # Set the .ship-<platform> directory
+    my $shipDir = "$path/.ship-$platform";
+    if (! -d "$shipDir") {
+      print "ERROR: unable to locate required ship directory ...  skipping\n";
+      print " Dir: $shipDir\n";
+      return $ERROR;
+    }
+    print " Ship dir: $shipDir\n" if ($verbose);
+
+    # Create a list of candidate deliverables (full path)
+    my $command = "find -L $shipDir";
+    my @results = ();
+    my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+    if ($rc != $OK) {
+      print "WARNING: trouble running find - broken/cyclic links found\n";
+      print " Command: $command\n";
+      #return $ERROR;
+    }
+    print " Link count: " . scalar(@results) . "\n" if ($verbose);
+
+    my $file;
+    foreach $file (@results) {
+      chomp $file;
+
+      # Ingore empty files, files containing + or cvsignore
+      next if ($file eq "");
+      next if ($file =~ /\+/);  # need to investigate nutshell
+      next if ($file =~ /\*/);  # need to investigate pwrspice
+      next if ($file =~ /cvsignore/);
+
+      push(@allDeliverables, $file);
+    }
+    print " All deliverables: " . scalar(@allDeliverables) . "\n"
+      if ($verbose);
+
+    # Create the final list of deliverables.  Remove candidate deliverables
+    # listed in the .dont_ship file or that do not pass the valid_file test.
+    foreach $file (@allDeliverables) {
+      my $realFile = $file;
+      $realFile = $shipDir . "/" . readlink($file) if (-l $file);
+      print " file (real): $file ($realFile)\n" if ($verbose);
+      next if (-d $realFile);  # Skip directories
+
+      my $tmpFile = $file;
+      $tmpFile =~ s/$shipDir\///g;  # Remove the leading $shipDir
+      print " file (tmp): $file ($tmpFile)\n" if ($verbose);
+      next if (grep(/^$file$/, @dontShipEntries)); # Skip .dont_ship entries
+      next if (! valid_file($file));               # Skip invalid files
+
+      $file =~ s/$path\///g;  # Remove the leading $path (keep .ship-plat)
+      push(@$refDeliverables, $file);
+      print "DEL: $file\n" if ($verbose);
+    }
+
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : Compare(\@srcFiles, \@tgtFiles, \%differences)
+# Purpose: Create a hash of deliverables not found in the source and target
+#          directories. The hash is keyed by the deliverable name and the value
+#          is which location is was found in.
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub Compare {
+
+  my ($refSrc, $refTgt, $refDiff) = @_;
+
+  print "\nIgnoring new files in SRC tool kit\n" if ($ignoreSrcAdds);
+  print "\nIgnoring new files in TGT tool kit\n" if ($ignoreTgtAdds);
+
+  # Find deliverables only in source
+  print "\nSource Deliverables\n---------------------------\n" if ($verbose);
+  my $file = "";
+  foreach $file (@$refSrc) {
+    next if $file eq "";
+    print "$file\n" if ($verbose);
+    if (! grep(/^$file$/, @$refTgt) && ! $ignoreSrcAdds) {
+      $$refDiff{$file} = "SRC only";
+    }
+
+  }
+
+  # Find deliverables only in target
+  print "\nTarget Deliverables\n---------------------------\n" if ($verbose);
+  foreach $file (@$refTgt) {
+    next if $file eq "";
+    print "$file\n" if ($verbose);
+    if (! grep(/^$file$/, @$refSrc) && ! $ignoreTgtAdds) {
+      $$refDiff{$file} = "TGT only";
+    }
+
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : Display($srcTk, \%differences)
+# Purpose: Display any differences found
+# RCs    : $OK or $ERROR
+#------------------------------------------------------------------------------
+sub Display {
+
+  my ($srcTk, $refDiff) = @_;
+
+  print "\n";
+  print "Summary\n-----------\n";
+  print "Tool Kit: $srcTk\n";
+  print "SRC location: $srcLocation\n";
+  print "TGT location: $tgtLocation\n";
+  print "\n";
+
+  # Display any differences
+  if (scalar(keys(%$refDiff)) < 1) {
+    print "No differences found\n";
+    return $OK;
+  }
+
+  my $file = "";
+  foreach $file (keys(%$refDiff)) {
+    print "$$refDiff{$file} - $file\n";
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+#
+# general purpose filter: return (nothing) if file is to be excluded,
+# otherwise return 't'
+#
+#------------------------------------------------------------------------------
+sub valid_file {
+
+  my ($file) = @_;
+
+  # filter to remove files from deliverables
+  if ($file =~ /-O\.dll/) # optimized dlls
+    {
+      return;
+    }
+  elsif ($file =~ /-O\.exp/) # optimized exp files
+    {
+      return;
+    }
+  elsif ($file =~ /-O$/) # optimized files ending with '-O'
+    {
+      return;
+    }
+  elsif ($file =~ /dll(-64)*\/\./) # dotfiles in dll dir
+    {
+      return;
+    }
+  elsif ($file =~ /bin(-64)\/*\./) # dotfiles in bin dir
+    {
+      return;
+    }
+  elsif ($file =~ /prev.ship.list/) # previous filelist
+    {
+      return;
+    }
+  elsif ($file =~ /prior.ship.list/) # prior filelist
+    {
+      return;
+    }
+  elsif ($file =~ /~$/) # xemacs/emacs backup files
+    {
+      return;
+    }
+  elsif ($file =~ /imp$/) # files ending 'imp'
+    {
+      return;
+    }
+  elsif ($file =~ /loadmap$/) # loadmap files
+    {
+      return;
+    }
+  elsif ($file =~ /-g$/) # debug dlls  (end of file??)
+  #elsif ($file =~ /-g/) # debug dlls, possible change discussed with Gregg and Jody, 3/2012
+    {
+      return;
+    }
+  elsif ($file =~ /-pg/) # profiling dlls
+    {
+      return;
+    }
+  elsif ($file =~ /[Mm]akefile/) # Makefiles
+    {
+      return;
+    }
+  elsif ($file =~ /[-_.]pure/) # purify files
+    {
+      return;
+    }
+  elsif ($file =~ /-quant/) # quant? files
+    {
+      return;
+    }
+  elsif ($file =~ /_auto_loads.tcl/) # _auto_loads.tcl
+    {
+      return;
+    }
+  else {
+  }
+
+  return("t");
+
+}
+
+

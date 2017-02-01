@@ -1,0 +1,1292 @@
+#!/usr/bin/env ksh
+#=========================================================================================
+# Program Name: svnExtract
+#
+# Author(s)   : A. Magnan
+#
+# Purpose     : Updates an EDA WC from the EDA SVN 14.1 repository 
+#
+# Function : Performs "svn update" function for a given component/release that:
+#               1) updates the specified location's WC with latest revision of SVN
+#                  code committed to its corresponding SVN trunk/branch.
+#               2) updates the CM metadata with CM info for all commits to the SVN
+#                  trunk/branch that have occurred since the SVN lastExtract date.
+#               3) Generates the LEVELHIST file and the extracted file list used
+#                  by the Build Status Web page.
+#               4) auto-authenticates specific components used in the ET parallel
+#                  build flow. 
+#            Allows selection of either running in DEVELOPMENT or PRODUCTION flows:
+#               1) PRODMODE=TRUE (default): 
+#                    SVN Repository: eda/14.1
+#                    AFS Extraction: /afs/eda/{level}/{component}/14.1
+#                    CM DB (DB2)   : Production
+#               2) PRODMODE=FALSE (for enablement team use only): 
+#                    SVN Repository: edadev/14.1
+#                    AFS Extraction: /afs/eda/{level}/svn_test/{component}/14.1
+#                    CM DB (DB2)   : Development
+#
+# Notes       : (1) The input is a component/release pair (e.g. model.1401)
+#               (2) Library cleanup for deleted files is handled by the Make system.
+#
+# Revision History
+# 06/16/10 AM  Initial version
+# 06/16/10 AM  Added functions to ensure that:
+#              1) we run in DEVMODE until a component is rolled out into production.
+#              2) limit the AFS IDs that can execute this script.
+# 06/28/10 AM  Added parentheses around strings being passed to modifyFuncUpdate for 
+#              all component cases.
+# 06/29/10 AM  Added creation of build/etc dirs from component treetop if does not 
+#              already exist.
+# 07/07/10 AM  Updated SVNCLIB definition in DEVMODE to point at the 
+#              ~edainfra/tools/enablement/dev/bin directory.
+#              Replaced CMDBLIB variable with SVNCLIB for consistency.
+# 07/08/10 AM  Wrote new function, get_revID, to modularize existing in-line code. Wrote 
+#              new function, get_svnRepos, to get name of SVN repository from SVN WC 
+#              identified in EXTRACTDIR. Removed need for SVN_SERVER variable; redefined
+#              SVN_REPOS variable.
+# 07/09/10 AM  Updated to check for XTRACTDIR existence since SVN_TEST may not be set up.
+# 07/14/10 AM  Added "-db DEV" switch to all CM DB API calls that need to reference the
+#              dev DB, i.e. calls in DEVMODE.
+# 07/15/10 GS  Removed edautils from force dev list.
+# 07/21/10 AM  Added edautils to rolled out part of forceDevMode list.
+# 07/22/10 AM  Added model and maise to rolled out part of forceDevMode list.
+# 08/02/10 AM  Added rice to rolled out part of forceDevMode list.                     
+# 08/03/10 GS  Added vss to rolled out part of forceDevMode list.                      
+# 08/03/10 AM  Added "-O" switch for overnight build use. 
+#              -O active: extracted.files.curr.html deleted/created before CM DB update, 
+#              extraction/update status written into this file if RC != 0. Send e-mail 
+#              to SVN Admins if cannot reach SVN server after timeout.
+# 08/05/10 AM  Removed forceDevMode function and changed logic to default to the DEVMODE
+#              flow. Removed -d switch and defined new -P switch to force PRODUCTION flow.
+# 08/06/10 AM  Updated help and mailing list information. Merged in revision history from
+#              production updates.  
+# 08/09/10 AM  Rewrote modifyFuncUpdate code section to simplify and generalize the DEV 
+#              vs PROD flows, overnight build, and output file selection. 
+#              Removed test code for failed test server messaging.
+# 08/11/10 AM  Replaced "\n" with "<br>" in CSFile since it is an HTML file. 
+#              Added "rm $LOCK_EXTRACT" to modifyFuncUpdate RC=2 section.
+# 08/12/10 AM  Updated "rm $LOCK_EXTRACT" in modifyFuncUpdate RC=2 section to work only 
+#              with specified components (e.g. Einstimer associated). This is implemented
+#              as a -A switch (means Always Build). Removed "tee" logfile statements and
+#              set up calls to other programs to write to $BUILDLOG only. 
+# 09/16/10 AM  New function, notify_builder, to auto-notify component builders when an 
+#              actual update to EDA BUILD occurs or there is an error in the attempt.
+#              Note: This is for model* only; function to be updated to work on all 
+#              components when the CM DB capability is ready. 
+# 09/20/10 AM  Added new, non-adverstised -d switch to force code path for all calls to 
+#              my tools WC for debug purposes. Valid values are devWC and prodWC. Also, 
+#              now passing $SVNCLIB value to svnUpdate via its new -e switch.
+# 10/26/10 GS  Changed path to svn from btv to eda.
+# 12/22/10 AM  Updated notify_builder routine to get builder from CM DB.
+# 01/14/11 AM  Parameterized inputs for use in simp_build by adding -e and -l switches.
+#              Removed userID check. Added check to confirm BUILDDIR is an SVN WC.
+#              Added logic to update CM DB only if default BUILDDIR and BUILDLOGDIR 
+#              definitions were used when executing.
+# 01/19/11 AM  Added functionality to get the SVN revision number on the URL trunk vs on
+#              the svn WC. Function called get_revID_URL. Reworked old function, 
+#              get_revID, to get_revID_WC, which gets the current revision number on the
+#              SVN WC. Run svn update is made based on revID_URL > revID_WC.
+# 01/20/11 AM  Changed auto-authentication capability to be called when trying to get 
+#              the latest revision ID from the SVN trunk. Running SVN update native 
+#              command, eliminating need to call svnUpdate script which tried to handle 
+#              auto-authentication at SVN WC update time.
+# 01/26/11 AM  Added components for auto-authentication.
+# 02/03/11 AM  Changed default execution flow to PRODUCTION flow, eliminating the -P 
+#              switch. Added -D switch to change execution flow to DEVELOPMENT flow 
+#              (which uses special SVN repository, AFS area, and development CM DB).
+#              Created function autoAuthenticate to modularize code.
+# 02/04/11 AM  Modifed code to support new CM DB APIs (svnLog and generateLevelHist) 
+#              which replace DB API modifyFuncUpdate.
+# 02/07/11 AM  Created function logEvent that uses new CM DB API svnLog.
+# 02/08/11 AM  New CM DB events defined for use by extraction (EXTRACT_START, EXTRACTED, 
+#              LH_GENERATED, EXTRACT_SUCCESS, EXTRACT_FAIL)
+# 02/14/11 AM  Fixed lexical revision compare error (changed test to numeric vs string).
+# 02/18/11 AM  Updated showComponent API to remove the -a switch.
+#              Updated notify_builders function to accept subject and body parameters.
+# 03/29/11 AM  Updated notify_builders to work with any 14.1 component. If builder info 
+#              in CM DB, then will allow e-mail notification, else will flag as no info.
+# 04/20/11 AM  Updated FORCE mode to include LEVELHIST generation. Updated to support 
+#              DB keywords for machine greenjiffy.fishkill.ibm.com
+# 05/13/11 AM  Changed all references to btv/edainfra to eda/edainfra for SVN migration. 
+# 05/18/11 GS  Changed dev/prod database modes to bdev/bprod.
+# 10/17/11 GS  Updated to support extractions into shipb and tkb AFS directories. 
+#              Added commens to functions. Changed BUILDDIR to EXTRACTDIR and BUILDLOG to 
+#              EXTRACTLOG. Automatically detects if host is i btv/fishkill host and sets 
+#              correct SVN executable. Determine tool kit version for LEVEL by querying 
+#              ETREE db via getToolKits. Updated functions which reads the revision from 
+#              SVN repos and working copy.
+# 01/17/12 GS  Removed amagnan from mailing lists. Updated how EXTRACTDIR is set.  
+#              Unfortunately if you run 'svn info /afs/eda/shipb/ess/14.1' you get a 
+#              message that /afs/eda/shipb/ess is not a working copy because 14.1 is 
+#              really a sym link to /afs/eda/tk14.1.0/ess/14.1.  When setting the 
+#              EXTRACTDIR if the LEVEL is not build then set it to the real directory
+#              (/afs/eda/tk14.1.0/ess/14.1) and not the symlink.
+# 01/18/12 GS  Added support for -R (user specified revision).  Changed how the WC and SVN
+#              repos revisions are determined.
+# 10/01/12 GS  Added support for cteKlog AFS auth during overnight build
+# 01/03/13 GS  Added support for xtinct TKs.
+# 04/22/13 GS  Updated to validate the extract directory which can be 
+#              incorrect if wrong component/release used on cmd line.
+# 02/18/14 GS  Updated to support customtkb extracts.
+#==========================================================================================
+#
+# High level flow of this script ...
+#
+#------------------------------------------------------------------------------------------
+#
+#  1. Read application arguments
+#  2. Verify required parameters were set
+#  3. Set the hour, date, month and day of the week
+#  4. Parse component and release from "component.release" parameter
+#  5. Define the "extract" environment
+#  6. Define the log directory and file
+#  7. Update the AFS token is overnight
+#  8. Setup/verify parallel build and support directories
+#  9. Verify extract location is a SVN working copy
+# 10. Verify SVN server is available
+# 11. Auto authenticate if overnight build
+# 12. Write debug info to log file
+# 13. Write the lock file
+# 14. Remove the no.extract file
+# 15. Verify the component and release
+# 16. Change permissions on read only files to 644
+# 17. Determine if updates exist in SVN for this component/release
+# 18. If extraction is needed then
+#     a. Run "svn update" on the target working copy
+#     b. If "svn update" was successful
+#        i. Log the EXTRACTED event
+#       ii. Generate the LEVELHIST file
+#      iii. Generate the extracted.files.curr.html file
+#       iv. Clean up lock file
+# 19. End
+#
+
+#==========================================================================================
+# Display script usage/help
+# Usage: help
+#------------------------------------------------------------------------------------------
+function help
+{
+cat << \EOF
+# Usage: svnExtract <-r comp.rlse> [-L level]
+#                   [-h] [-A] [-O] [-R revision] [-e extract target loc] [-l LOG dir] 
+#
+#      BUILDER OPTIONS:
+#            -h  shows this help
+#            -L  <LEVEL>
+#                Tool Kit extraction level [default = build]
+#                (e.g. build. shipb, tkb or customtkb/tk14.1.6z ...)
+#                /afs/eda/{LEVEL}/{component}/{release}
+#            -e  SVN extraction location (EXTRACTDIR)
+#                (default: /afs/eda/{level}/{comp}/14.1)
+#            -l  Directory to log script results (EXTRACTLOGDIR)
+#                (default: /afs/eda/u/$USER/logs/${MONTH})
+#                Log file predefined as ${DATE}.${PRODUCT}.${REL_VER}.svnExtract.${LEVEL}
+#            -r  <comp.rlse>    
+#                (e.g. model.1401)
+#            -A  always build even if nothing new has been extracted/updated.
+#                (default: if no extraction, no build required)
+#            -O  overnight extract only
+#                Use this flag to run script from cron, which clears the file used as
+#                the Overnight Build entry on the EDA Build Status web page.
+#                (default: appends extract info to existing extracted.files.curr.html file)
+#            -R  revision to extract
+#                Use this flag to update the target working copy to a specific revision
+#                default: update WC to head of trunk/branch)
+#
+# IMPORTANT NOTE: If using -e switch, you will need to rerun this script without it when
+#                 you are ready to extract your code changes into the EDA Release system. 
+#
+#      ENABLEMENT TEAM ONLY OPTIONS:
+#            -D  forces script to run in Development/Test mode.
+#                use this flag to execute script in EDA development release flow and 
+#                extract into the /afs/eda/{level}/svn_test/{component}/14.1 release 
+#                directory. This option also puts the metadata into the Development CM DB.
+#                This switch should only be used by the enablement support team.
+#            -F  forces SVN update and CM DB update to run. 
+#                Normally, an extraction occurs only if the revision on the SVN 
+#                trunk/branch is greater than the one on the SVN WC. 
+#                     
+EOF
+}
+
+
+#=========================================================================================
+# Write final message in the log file and exit with the spefied rc
+# Usage: goodbye $rc $message
+#-----------------------------------------------------------------------------------------
+function goodbye
+{
+  rc="$1"
+
+  if [[ -f $EXTRACTLOG ]]
+  then 
+    [[ -n $ENTIRE ]] && print "\n$SHELL_NAME: $EXT_RLSE ending at $(date +"%a  %D %T") on $(hostname -s)" >> $EXTRACTLOG
+    [[ -n $2 ]] && print "$2" >> $EXTRACTLOG
+  else
+    [[ -n $ENTIRE ]] && print "\n$SHELL_NAME: $EXT_RLSE ending at $(date +"%a  %D %T") on $(hostname -s)"
+    [[ -n $2 ]] && print "$2"
+  fi
+
+  exit "${rc:-0}"
+
+}
+
+
+#==========================================================================================
+# Pareses the release, component and rel_ver from the release parameter
+# Usage: parse_rel $release
+#------------------------------------------------------------------------------------------
+function parse_rel
+{
+  # Variables:
+  # ----------
+  # INPUT:
+  # RELEASE      =  release.ver  (release name)
+  # OUTPUT:
+  # PRODUCT      =  release name in lowercase, ie. 'einstimer'
+  # REL_VER      =  release version, leading zeros ie., 0901 or 1401
+  # R_V          =  release version, dot version ie., 14.1
+
+  typeset RELEASE=$1
+
+  PRODUCT=$(print $RELEASE | cut -f1 -d. )
+  LOG_VER=$(print $RELEASE | cut -f2 -d.)
+
+  REL_VER=$(print $RELEASE | cut -f2 -d.)
+  [[ $REL_VER = +([0-9])-[0-9]* ]] && RV_EXT=-$(print $REL_VER | cut -d- -f2-) || RV_EXT=
+  R_V="$(print $REL_VER | cut -c1,2 | sed 's/^0//').$(print $REL_VER | cut -c3,4 | sed 's/^0//')$RV_EXT"
+
+}
+
+
+#=========================================================================================
+# Email admins the fail message
+# Usage: sendFailMsg
+#-----------------------------------------------------------------------------------------
+function sendFailMsg
+{
+failMsg="SVN Server is not available; svnExtract has timed out after waiting 2 hours."
+mail -s "SVN Server Needs Attention" $svnAdminMail <<EOF
+$failMsg
+EOF
+}
+
+
+#==========================================================================================
+# Verifies the SVN server associated with the specified working copy is online and available
+# Usage: test_server $directory
+#------------------------------------------------------------------------------------------
+function test_server
+{
+  typeset -i COUNT
+  COUNT=0
+  cd $1
+  until [[ -n $SERVER_UP || $COUNT -gt 24 ]]
+  do
+    $SVN info 2>&1 >/dev/null  
+    if [[ $? = 0 ]]
+    then
+      SERVER_UP=true
+    else
+      date
+      sleep 300
+      print "$(date): Waiting for SVN server" >> $EXTRACTLOG
+      COUNT=$COUNT+1
+    fi
+  done
+  if [[ $COUNT -gt 24 ]]
+  then
+    sendFailMsg
+    svnFailMsg="SVN Server is not available; svnExtract has timed out after waiting 2 hours."
+    goodbye 1 "\n$svnFailMsg"
+  fi
+}
+
+
+#==========================================================================================
+# Read the currect revision of the specified SVN working copy
+# Usage: get_revID_WC 
+#------------------------------------------------------------------------------------------
+function get_revID_WC {
+
+  print "\nRetrieving Revision from working copy  ... " >> $EXTRACTLOG
+
+  # Get the Revision and Last Changed Rev of the SVN working copy
+  revID_WC=$($SVN info $EXTRACTDIR | grep "Last Changed Rev:" | cut -f4 -d" ")
+  print " REVID WC: $revID_WC" >> $EXTRACTLOG
+
+}
+
+
+#==========================================================================================
+# Read the latest revision of the SVN trunk/branch associated with the working copy
+# Usage: get_revID_URL
+#------------------------------------------------------------------------------------------
+function get_revID_URL {
+
+  print "\nRetrieving Revision from SVN REPOS ... " >> $EXTRACTLOG
+
+  # If the user specified a revision then use that revision to see if an update is needed
+  if [[ -n $REVISION ]]
+  then
+    print " Using user specified revision ..."
+    revID_URL=$REVISION
+  else 
+    # Get the Revision and Last Changed Rev of the SVN repository
+    print " Looking up last changed revision from SVN ..."
+    svn_URL=$($SVN info $EXTRACTDIR | grep "URL:" | cut -f2 -d" ") 
+    revID_URL=$($SVN info $svn_URL | grep "Last Changed Rev:" | cut -f4 -d" ")
+  fi
+
+  print " REVID URL: $revID_URL" >> $EXTRACTLOG
+
+}
+
+
+#==========================================================================================
+# Verify the extract directory is an SVN working copy
+# Usage: check_svnWC
+#------------------------------------------------------------------------------------------
+function check_svnWC {
+
+  myrc=0
+  print -n "\n$(date +"%a %D %T"): Checking if $EXTRACTDIR is an SVN WC....." >> $EXTRACTLOG
+
+  # Get the entire repository root, then remove the trailing component name
+  command="$SVN info $EXTRACTDIR"
+  WC_tmp=$($command 2>&1)
+  rc=$?
+  if [[ $rc != 0 ]]
+  then
+    myrc=8
+    print "it's not!" >> $EXTRACTLOG
+  else
+    print "it is!" >> $EXTRACTLOG
+  fi
+
+  return $myrc
+
+}
+
+
+#==========================================================================================
+# Get the SVN repository associated with the SVN WC
+# Usage: get_svnRepos
+#------------------------------------------------------------------------------------------
+function get_svnRepos
+{
+  print "\nRetrieving SVN Repository info for this SVN WC..." >> $EXTRACTLOG
+
+  # Get the entire repository root, then remove the trailing component name
+  repos_tmp=$($SVN info $EXTRACTDIR | grep "Repository Root:" | cut -f3 -d" ")
+  SVN_REPOS=${repos_tmp%\/*}
+
+  # Get the SVN server name
+  SVN_SERV=$($SVN info $EXTRACTDIR | grep "URL:" | cut -f3 -d"/")
+
+  print "Repository Name: $SVN_REPOS\n" >> $EXTRACTLOG
+  print "Server Name: $SVN_SERV\n" >> $EXTRACTLOG
+
+}
+
+
+#=========================================================================================
+# Automatically authenticate access to the SVN server
+# Usage: autoAuthenticate
+#-----------------------------------------------------------------------------------------
+function autoAuthenticate
+{
+  print "\nPerforming auto-authentication for $PRODUCT." >> $EXTRACTLOG
+  funcPW=`cat /tmp/local/$USER.funcid`
+  cd $EXTRACTDIR
+
+  SVNURL=$($SVN info | grep "URL:" | cut -f2 -d" ")
+  export SVNURL
+  authResults=$(/usr/bin/expect $SVNCLIB/svn_auth_user.exp $funcPW 2>&1)
+  print "Auto-authentication results:" >> $EXTRACTLOG
+  print "$authResults" >> $EXTRACTLOG
+
+  # Was authentication attempted?
+  grep "Authentication realm:" $EXTRACTLOG
+  rc=$?
+  if (( rc == 0 ))
+  then
+    print "SVN authentication challenge was detected." >> $EXTRACTLOG
+  else
+    print "SVN authentication challenge was NOT detected." >> $EXTRACTLOG
+  fi
+
+  cd - 2>/dev/null >/dev/null
+}
+
+
+#==========================================================================================
+# Send e-mail to the component builder when an actual SVN extraction/update
+# of new code occurs for an overnight build.
+# Usage: notify_builder
+#------------------------------------------------------------------------------------------
+function notify_builder
+{
+  found_builder=FALSE
+  MY_MSG_SUBJ=$1
+	MY_MSG_BODY=$2
+
+  # Get e-mail addresses of component builders
+  blCmd="$SVNCLIB/showComponent -r $R_V -c $PRODUCT | grep BUILDER | cut -f2 -d\":\""
+  print "Command: $blCmd" >> $EXTRACTLOG
+  builderList=$($blCmd)
+  if [[ -n $builderList ]]
+  then
+    found_builder=TRUE
+    print "Found builders: $builderList!" >> $EXTRACTLOG
+    msg_to=$builderList
+  fi
+
+  # Send e-mail to builder(s)
+  if [[ $found_builder = TRUE ]]
+  then
+    mail -s "$MY_MSG_SUBJ" $msg_to <<EOF
+    $MY_MSG_BODY
+EOF
+  fi
+}
+
+
+#==========================================================================================
+# Log the specified events in the ETREE database
+# Usage: logEvent $eventName $eventMessage
+#------------------------------------------------------------------------------------------
+function logEvent
+{
+  eventName=$1
+  eventMsg=$2
+  cmdbCmd=""
+  logrc=0
+
+  # Log event if in normal WC
+  if [[ -z $MYWC ]]
+  then
+    baseCmd="$SVNCLIB/svnLog -c $PRODUCT"
+    baseCmd="$baseCmd -t $TKVERSION -l $LEVEL -e $eventName -m \"$eventMsg\" $dbSwitch"
+    cmdbCmd="${baseCmd}${eventCmd}"
+    print "$(date): $cmdbCmd" >> $EXTRACTLOG
+    print "$(date): $cmdbCmd" >> $LOG
+    print "$(date): $cmdbCmd"
+   
+    $cmdbCmd 2>&1 >> $EXTRACTLOG
+    logrc=$?
+    if (( logrc != 0 ))
+    then
+      case $logrc in
+        1) # Error detected
+           msg="ERROR: Event, $eventName, was not logged in CM DB.\n"
+           print $msg | tee -a $EXTRACTLOG
+           ;;
+	2) # svnLog passes back an RC=2, if the SVN revision has already been updated 
+	   # in the EDA $LEVEL WC - this is a valid condition so change the RC=0 from 
+           # the svnExtract script.
+	   msg="INFO: Event, $eventName, was not logged in CM DB."
+           print $msg | tee -a $EXTRACTLOG
+           ;;
+	*) # Unknown error code detected
+           msg="ERROR: Event, $eventName, was not logged in CM DB.\n"
+	   msg="$msg ERROR: Unknown error code detected (rc = $rc).\n"
+           print $msg | tee -a $EXTRACTLOG
+           ;;
+      esac
+    else  # logrc=0
+      msg="INFO: Event, $eventName, was logged in CM DB successfully.\n"
+      print $msg | tee -a $EXTRACTLOG
+    fi
+  else
+     # MYWC used - not recognized extraction point
+     msg="WARN: Event, $eventName, was not logged in CM DB,"
+     msg="$msg WARN: because $USER extracted code outside the EDA Release location."
+     msg="$msg INFO: For these updates to be released, please rerun the -e switch !!\n"
+     print $msg | tee -a $EXTRACTLOG
+     logrc=4
+  fi
+  return $logrc
+}
+
+
+#==========================================================================================
+# Determine the Took Kit based on the LEVEL/location
+# Usage: setToolKit
+#------------------------------------------------------------------------------------------
+function setToolKit
+{
+  cmdbCmd=""
+  logrc=0
+
+  # Set the stage based on the LEVEL
+  if [[ $LEVEL = @(build) ]]
+  then
+    stage="development"
+  elif [[ $LEVEL = @(ship|shipb) ]]
+  then
+    stage="preview"
+  elif [[ $LEVEL = @(tk|tkb) ]]
+  then
+    stage="production"
+  else
+    stage=$LEVEL
+  fi
+
+  # Look up the Tool Kit for this stage
+  cmdbCmd="$SVNCLIB/getToolKits -r $R_V -s $stage -q"
+  print "Command: $cmdbCmd" >> $EXTRACTLOG
+  dbTk=$($cmdbCmd)
+  print "Result: $dbTk" >> $EXTRACTLOG
+  if [[ $dbTk = No* ]]
+  then
+    errorMsg="\nWARNING: unable to query ETREE database for Tool Kit version for $LEVEL"
+    print $errorMsg >> $EXTRACTLOG
+    print $errorMsg 
+    if [[ -z $TKVERSION ]]
+    then
+      myMsg="Tool Kit version unknown ... use -t option to set TK version"
+      print $myMsg >> $EXTRACTLOG
+      print $myMsg 
+      return 8
+    else 
+      myMsg="Tool Kit version set to user defined Tool Kit version ($TKVERSION)"
+      print $myMsg >> $EXTRACTLOG
+      print $myMsg 
+    fi
+  else
+    print "Tool Kit version: $dbTk" >> $EXTRACTLOG
+    print "Tool Kit version: $dbTk"
+    if [[ -z $TKVERSION ]]
+    then
+      myMsg="Tool Kit version set to $dbTk"
+    else 
+      myMsg="Overriding user defined Tool Kit version and setting to $dbTk"
+    fi
+    print $myMsg >> $EXTRACTLOG
+    TKVERSION=$dbTk
+  fi
+
+  return 0
+
+}
+
+
+#======================================================================
+#                       MAIN Routine
+#======================================================================
+PRODMODE=TRUE          # Production mode vs development mode.
+OVERNIGHT=FALSE        # Same day mode vs overnight mode.
+ALWAYSBUILD=FALSE      # Auto-build flags if extraction vs force always build.
+LEVEL="build"          # Extraction level is /afs/eda/$LEVEL/$COMPONENT/$REL
+FORCE=FALSE            # Run SVN update and CM DB update only if needed.
+XTRACT=FALSE           # No extraction so can run tests to see if one is needed.
+GEN_LH=TRUE            # Generate LEVELHIST file 
+TKVERSION=""           # Tool Kit version - will be set from ETREE DB
+REVISION=""            # Desired revision to be extracted
+userID=`whoami`
+
+
+unset MYWC MYLOG RELEASE EXTRACTDIR
+# Parse args
+while getopts :e:hl:r:t:L:R:ADFOTX OPTION
+do
+  case "$OPTION" in
+    e) MYWC=$OPTARG;;
+    h) help; goodbye 1;;
+    l) MYLOG=$OPTARG;;
+    r) RELEASE=$OPTARG;;
+    t) TKVERSION=$OPTARG;;
+    A) ALWAYSBUILD=TRUE;;
+    D) PRODMODE=FALSE;;
+    F) FORCE=TRUE;;
+    L) LEVEL=$OPTARG;;
+    O) OVERNIGHT=TRUE;;
+    R) REVISION=$OPTARG;;
+    T) DEBUG=TRUE;;
+    X) NOEXTRACT=TRUE;;
+    :) help; goodbye 1 "\n*** Option -$OPTARG requires a parameter.";;
+    ?) help; goodbye 1 "\n*** Option -$OPTARG is not recognized.";;
+  esac
+done
+shift $(($OPTIND - 1))
+
+EXT_RLSE=$RELEASE
+
+# Error checking for parameters
+[[ -z $RELEASE ]] && { help; goodbye 1 "\n*** No component.release specified."; }
+[[ -z $NAME ]] && USERNAME=
+
+# Verify LEVEL is an expected value
+if [[ -z $MYWC && $LEVEL = @(build|shipb|tkb) ]]
+then
+  print "Extracting updates into ... $LEVEL "
+elif [[ -z $MYWC && $LEVEL = *+(xtinct/tk1)* ]]
+then
+    print "Extracting updates into ... $LEVEL "
+elif [[ -z $MYWC && $LEVEL = *+(customtkb/tk1)* ]]
+then
+    print "Extracting updates into ... $LEVEL "
+else
+  print "Incorrect LEVEL specified ... $LEVEL"
+  print "valid LEVELs are build, shipb, tkb, xtinct/tkx.y.z or customtkb/tkx.y.z" 
+  help
+  goodbye 1 "\n*** Invalid LEVEL ($LEVEL) specified."
+fi
+
+
+if [[ -z $LEVEL ]]
+then
+  goodbye 1 "\n*** LEVEL ($LEVEL) not found."
+fi
+
+
+# Ask if user wants dengging turned on
+if [[ -n $DEBUG ]]
+ then
+  print "\nDo you want to trace the script? [Yes: type y]: \c"
+  read REPLY
+  [[ -n $REPLY ]] && set -x
+fi
+
+SCRIPT=$$
+SHELL_NAME=${0##*/}
+
+maxerrcnt=0
+
+# ----------------------------------------------------------------------
+# Get the hour based on 24-hour time
+# If it is before after 6pm, use tomorrow's date for the log file
+# ----------------------------------------------------------------------
+# The normal setting for TZ in Fishkill is EST5EDT (GMT+5 and DST),
+# telling the system we are 5 hours behind Greenwich, which is the time
+# it is physically keeping. Pretend we are in Middle Europe, where
+# The new day begins 6 pm our time.
+
+# Variables:
+# ----------
+# OUTPUT:
+# ADOW         =  adjusted day of week (next day if after 1800 hours)
+# DATE         =  current date (adjusted ahead if after 1800 hours)
+# DOW          =  day of week
+# HOUR         =  current hour
+# MONTH        =  current month
+#
+integer HOUR=$(date +%H)
+if [[ $HOUR -ge 18 ]]
+ then
+  typeset -l DATE=$(TZ=MET-1MEDT date +%b%d )
+  typeset -l MONTH=$(TZ=MET-1MEDT date +%b )
+  ADOW=$(TZ=MET-1MEDT date +%a)
+ else
+  typeset -l DATE=$(date +%b%d )
+  typeset -l MONTH=$(date +%b )
+  ADOW=$(date +%a)
+fi
+DOW=$(date +%a)
+
+# Use parse_rel function to get PRODUCT name and convert from zero-based release
+# version to dot version $R_V (e.g. 1401 -> 14.1)
+# parse_rel - parse cmvc release name, must be called with 
+# release name in $1
+
+parse_rel $RELEASE
+
+#===================================
+# Define EDA extraction environment
+#===================================
+if [[ -n $MYWC ]]
+then
+  EXTRACTDIR=$MYWC
+else
+  if [[ $PRODMODE = FALSE ]]
+  then
+    EXTRACTDIR=/afs/eda/$LEVEL/svn_test/$PRODUCT/$R_V
+    svnAdminMail=""
+  else
+    EXTRACTDIR=/afs/eda/$LEVEL/$PRODUCT/$R_V
+    svnAdminMail="jwcolem@us.ibm.com"
+    if [[ -L $EXTRACTDIR ]]
+    then
+      my_dir=$(ls -l $EXTRACTDIR | awk -F " -> " '{print $2}')
+      EXTRACTDIR=$my_dir
+    fi
+  fi
+fi
+print "Extracting updates to ... $EXTRACTDIR"
+if [[ ! -d $EXTRACTDIR ]]
+then
+    print ""
+    print "ERROR: unable to locate extract directory! Please check the "
+    print "       release and/or location specified on the command line."
+    print "Extract dir: $EXTRACTDIR"
+    print "Release    : $RELEASE"
+    print "Level      : $LEVEL"
+    print ""
+    exit 8
+fi
+
+# Define program execution LOG files
+LOG_LEVEL=$LEVEL
+if [[ $LOG_LEVEL = *+(xtinct/tk1)* ]]
+then
+    LOG_LEVEL="xtinct"
+elif [[ $LOG_LEVEL = *+(customtkb/tk1)* ]]
+then
+    LOG_LEVEL="customtkb"
+fi
+
+if [[ -n $MYLOG ]]
+then
+  EXTRACTLOGDIR=$MYLOG
+  EXTRACTLOG=${EXTRACTLOGDIR}/${DATE}.${PRODUCT}.${REL_VER}.svnExtract_override
+else
+  EXTRACTLOGDIR=/afs/eda/u/$USER/logs/${MONTH}
+
+  # Create infrastructure, if needed, for default execution
+  [[ ! -d /afs/eda/u/$USER/logs/${MONTH} ]] && mkdir -p /afs/eda/u/$USER/logs/${MONTH}
+
+  if [[ $PRODMODE = FALSE ]]
+  then
+    EXTRACTLOG=${EXTRACTLOGDIR}/${DATE}.${PRODUCT}.${REL_VER}.svnExtract_devmode.${LOG_LEVEL}
+  else
+    EXTRACTLOG=${EXTRACTLOGDIR}/${DATE}.${PRODUCT}.${REL_VER}.svnExtract.${LOG_LEVEL}
+  fi
+fi
+
+
+print "\n$SHELL_NAME for $RELEASE starting at $(date +"%a %D %T") on $(hostname -s) by $userID" >> $EXTRACTLOG
+print "Today is $DOW, and the adjusted day of week for log file is $ADOW" >> $EXTRACTLOG
+
+# Handle AFS Tokens
+if [[ $OVERNIGHT = TRUE ]]
+then
+  # Get a token so the script can run via cron
+  if [[ $USER = "einslib" ]] 
+  then
+    # use cteKlog to set the AFS token
+    export CTEPATH=/opt/xsite/cte
+    $CTEPATH/tools/bin/cteKlog -file $HOME/.cte_afs_pw/.CTE_AFS_PW
+  else
+    PASS=$(cat /tmp/local/$USER)
+    /usr/afsws/bin/klog -pass $PASS
+    export KAUTH=afs
+    /usr/afsws/bin/tokens >> $EXTRACTLOG
+  fi
+fi
+
+# Does the EXTRACTDIR directory exist?
+if [[ ! -d $EXTRACTDIR ]]
+then
+    print "ERROR: EXTRACTDIR directory, $EXTRACTDIR, does not exist!" >> $EXTRACTLOG
+    exit 8
+fi
+
+#============================================================================
+# Define infrastructure to support parallel compile and compile/link status
+#============================================================================
+LIBRARYDIR=$EXTRACTDIR/build
+# Create infrastructure, if needed, for default execution
+if [[ ! -d $LIBRARYDIR ]] 
+then
+  if [[ -z $MYWC ]]
+  then
+    mkdir -p $EXTRACTDIR/build
+  else
+    LIBRARYDIR=$EXTRACTDIR
+  fi
+fi    
+
+LIBETC=$LIBRARYDIR/etc
+# Create infrastructure, if needed, for default execution
+if [[ ! -d $LIBETC ]] 
+then
+  if [[ -z $MYWC ]]
+  then
+    mkdir -p $LIBRARYDIR/etc
+  else
+    LIBETC=$EXTRACTDIR
+  fi
+fi
+
+LOG=$LIBETC/svn.autoextract.log
+[[ ! -s $LOG ]] && print "# Activity log." > $LOG
+print "#" >> $LOG
+
+# Define constructs to control sequential compile/link execution
+LOCK_EXTRACT=$EXTRACTDIR/lock.extract
+NO_EXTRACT=$EXTRACTDIR/no.extract
+
+#--------------------------------------------
+# Define the SVN environment
+# EDA cell: /afs/eda/tools/bin/svn
+#--------------------------------------------
+SVN="/afs/eda/tools/bin/svn"
+print "SVN: $SVN" >> $LOG
+export SVN
+
+# Is EXTRACTDIR an SVN WC?
+check_svnWC
+rc=$?
+if (( rc != 0 ))
+then
+    print "\nERROR: The SVN extraction target must be an SVN WC!" | tee -a $EXTRACTLOG
+    print " Target directory, $EXTRACTDIR, does not appear to be an SVN WC!\n" | tee -a $EXTRACTLOG
+    exit 8
+fi
+
+
+#------------------------------------------------
+# Test the SVN server to see if it is available.
+#------------------------------------------------
+print "\n$(date):...Running test_server" >> $EXTRACTLOG
+print "# $(date):" >> $LOG
+print "test_server $EXTRACTDIR" >> $LOG
+print "$(date): test_server $EXTRACTDIR" >> $EXTRACTLOG
+if [[ $PRODMODE = FALSE ]]
+then
+  print "DEVMODE: test_server $EXTRACTDIR" >> $EXTRACTLOG
+  test_server $EXTRACTDIR
+else
+  test_server $EXTRACTDIR
+fi
+
+# Get the name of the SVN repository and server name for the SVN WC 
+get_svnRepos 
+
+# Select AFS path for enablement tool script execution
+if [[ $PRODMODE = FALSE ]]
+then
+  # Development flow (uses {level}/svn_test/{component}/14.1 dirs)
+  # Use the enablement tool development location
+  SVNCLIB=/afs/eda/data/edainfra/tools/enablement/dev/bin
+
+  # Select the correct CM DB based on server and operation mode
+  case $SVN_SERV in
+    "greenjiffy.fishkill.ibm.com")
+       dbSwitch="-db GDEV"
+       print "[INFO]: Server name recognized...setting dbSwitch to \"$dbSwitch\".\n" >> $EXTRACTLOG
+       ;;
+    *) dbSwitch="-db DEV"
+       print "[WARN]: Server name not recognized...setting dbSwitch to \"$dbSwitch\".\n" >> $EXTRACTLOG
+       ;;
+  esac
+else
+  # Production flow (uses {level}/{component}/14.1 dirs)
+  # Use the enablement tool production location
+  SVNCLIB=/afs/eda/data/edainfra/tools/enablement/prod/bin
+  case $SVN_SERV in
+    "greenjiffy.fishkill.ibm.com")
+       dbSwitch="-db GPROD"
+       print "[INFO]: Server name recognized...setting dbSwitch to \"$dbSwitch\".\n" >> $EXTRACTLOG
+       ;;
+    *) dbSwitch=""
+       print "[WARN]: Server name not recognized...setting dbSwitch to \"$dbSwitch\".\n" >> $EXTRACTLOG
+       ;;
+  esac
+fi
+
+# For now, only allow auto-authentication for OVERNIGHT extractions and for
+# select components that we know have the proper infrastructure setup.  
+if [[ $PRODUCT = @(model|modelio|modelutil|edautils|ess) && $OVERNIGHT = TRUE ]]
+then
+  autoAuthenticate
+else
+  print "No auto-authentication performed for $PRODUCT." >> $EXTRACTLOG
+fi
+
+#------------------------------
+# Generate DEVMODE Info
+#------------------------------
+if [[ $PRODMODE = FALSE ]]
+then
+  print "\nRunning in DEVELOPMENT MODE on component $PRODUCT...\n" >> $EXTRACTLOG
+  print "TEST ENVIRONMENT: ($EXTRACTDIR)." >> $EXTRACTLOG
+  [[ -z $MYWC && -z $MYLOG ]] && print "The CM DEV DB is being used!\n" >> $EXTRACTLOG
+else
+  print "\nRunning in PRODUCTION MODE on component $PRODUCT...\n" >> $EXTRACTLOG
+fi
+print "SVN             : $SVN" >> $EXTRACTLOG
+print "SVN_REPOS       : $SVN_REPOS" >> $EXTRACTLOG
+print "SVN_SERV        : $SVN_SERV"  >> $EXTRACTLOG
+if [[ $AUTOAUTH = TRUE ]]
+then
+  print "SVNURL          : $SVNURL" >> $EXTRACTLOG
+fi
+print "EXTRACTDIR       : $EXTRACTDIR" >> $EXTRACTLOG
+print "EXTRACTLOG       : $EXTRACTLOG" >> $EXTRACTLOG
+print "LOG             : $LOG" >> $EXTRACTLOG
+print "SVNCLIB         : $SVNCLIB\n" >> $EXTRACTLOG
+
+if [[ $OVERNIGHT = TRUE ]]
+then
+  print "Running in OVERNIGHT Build Mode." >> $EXTRACTLOG
+else
+  print "Running in MANUAL Build Mode." >> $EXTRACTLOG
+fi
+
+if [[ $ALWAYSBUILD = TRUE ]]
+then
+  print "Running in ALWAYS BUILD Mode." >> $EXTRACTLOG
+else
+  print "Running in BUILD IF EXTRACTION Mode." >> $EXTRACTLOG
+fi
+
+if [[ $FORCE = TRUE ]]
+then
+  print "Running in FORCE Mode." >> $EXTRACTLOG
+fi
+
+# Drop the LOCK_EXTRACT file in the extract directory. 
+# This keeps the build (compile/link) scripts from starting until extract is completed.  
+touch $LOCK_EXTRACT
+
+# Remove the NO_EXTRACT file if it exists.
+[[ -a $NO_EXTRACT ]] && rm $NO_EXTRACT
+
+# set entire so we get the right goodbye()
+ENTIRE=TRUE
+
+#-------------------------------------------------------------
+# Call the CM interface to check if the component and release 
+# are defined in the CM DB.
+#------------------------------------------------------------- 
+print "\n$(date):...Running validateRelComp" >> $EXTRACTLOG
+print "# $(date):" >> $LOG
+cmdbCmd="$SVNCLIB/validateRelComp -c $PRODUCT -r $R_V $dbSwitch"
+if [[ $PRODMODE = FALSE ]]
+then
+  print "DEVMODE: $(date): $cmdbCmd" >> $EXTRACTLOG
+else
+  print "$(date): $cmdbCmd" >> $EXTRACTLOG
+fi
+print "$cmdbCmd" >> $LOG
+$cmdbCmd 2>&1 >> $EXTRACTLOG
+rc=$?
+if (( rc != 0 ))
+then
+  case $rc in
+    1) print "ERROR: Release not found in CM DB!\n" >> $EXTRACTLOG;;
+    2) print "ERROR: Component not found in CM DB!\n" >> $EXTRACTLOG;;
+    3) print "ERROR: Release and component not found in CM DB!\n" >> $EXTRACTLOG;;
+    *) print "ERROR: Unknown rc,\"$rc\", from script $SVNCLIB/validateCompRelease.\n" >> $EXTRACTLOG;;
+  esac
+  goodbye $rc
+fi
+
+#-------------------------------------------------
+# Look for read-only files and make them writable
+#-------------------------------------------------
+print "\n$(date):...Checking for files with read-only permissions" >> $EXTRACTLOG
+EXCLUDE="| egrep -v \"include|IMPORT\""
+curCmd="eval find $EXTRACTDIR -type f -perm 440 -print -o -type f -perm 444 -print $EXCLUDE | xargs chmod 644"
+print "$(date): $curCmd" >> $EXTRACTLOG
+print "$curCmd" >> $LOG
+$curCmd 2>&1 >> $EXTRACTLOG
+
+if [[ -n $NOEXTRACT ]]
+then
+  print "\n$(date):...NOEXTRACT is set true, no extract occurs" >> $EXTRACTLOG
+  notify_builder "NOTIFY: TEST MSG" "This is a test message"  # <= REMOVE AFTER TESTING
+  rm $LOCK_EXTRACT
+  exit
+fi
+
+#------------------------------------------------------------------------------
+# Determine the ToolKit version for this LEVEL
+#------------------------------------------------------------------------------
+setToolKit
+rc=$?
+if (( rc != 0 ))
+then
+  goodbye 1 "\n*** Invalid ToolKit version ($TKVERSION) for this LEVEL ($LEVEL)."
+fi
+
+
+#------------------------------------------------------------------------------
+# Determine if we need an extraction by comparing the current revision number
+# in the SVN WC with the revision number in the SVN URL repository or user 
+# specified revision
+#------------------------------------------------------------------------------
+revID_URL=""
+get_revID_URL
+if [[ $revID_URL = "" ]]
+then
+  print "ERROR: Could not get SVN revision number from SVN repository!" >> $EXTRACTLOG
+  exit 8
+fi
+
+revID_WC=""
+get_revID_WC
+if [[ $revID_WC = "" ]]
+then
+  print "ERROR: Could not get SVN revision number from SVN WC!" >> $EXTRACTLOG
+  exit 8 
+fi
+
+
+# Verify we are not backleveing the working copy
+if (( $revID_URL < $revID_WC )) 
+then
+  print "INFO: You are attempting to backlevel the working copy by updating the"
+  print "      working copy to a lower revision.  This operation is not permitted"
+  print "      by this script."
+  print "SVN URL revision: $revID_URL"
+  print "Working copy revision: $revID_WC"
+  goodbye 8
+fi
+
+
+print "\n***** Starting process to update SVN WC and log events ***** " | tee -a $EXTRACTLOG
+print "SVN WC located at $EXTRACTDIR." | tee -a $EXTRACTLOG
+logEvent "EXTRACT_START" "svnExtract starting"
+
+if (( $revID_URL > $revID_WC )) || [[ $FORCE = TRUE ]]
+then
+  if [[ $FORCE = TRUE ]]
+  then
+    print "INFO: User selected the FORCE switch to run SVN update and log event to the CM DB.\n"
+  else
+    print "INFO: There is a difference of revision numbers between the SVN repository (rev $revID_URL) and SVN WC (rev $revID_WC)!" >> $EXTRACTLOG
+    print "      This indicates that an SVN WC update is required.\n" >> $EXTRACTLOG
+  fi
+
+  #---------------------------------------------------------------------
+  # Update the EDA extraction WC from its correspoding SVN trunk/branch
+  #---------------------------------------------------------------------
+  # Get into the WC directory
+  cd $EXTRACTDIR
+
+  # Perform the update
+  # @results contains the message back from the SVN update operation which
+  # would contain the revision number if there were file changes.
+  print "\n$(date):...Running svn update" >> $EXTRACTLOG
+  print "# $(date):...Running svn update" >> $LOG
+
+  svnCmd="$SVN update"
+  if [[ -n $REVISION ]]
+  then
+    svnCmd="$SVN update --revision $REVISION"
+  fi
+
+  if [[ $PRODMODE = FALSE ]]
+  then
+    print "DEVMODE: $(date): $svnCmd\n" >> $EXTRACTLOG
+  else
+    print "$(date): $svnCmd\n" >> $EXTRACTLOG
+  fi
+
+  print "$svnCmd" >> $LOG
+  print "***** Performing svn update *****"
+  print "Current WC revision is $revID_WC."
+  $svnCmd 2>&1 >> $EXTRACTLOG
+  rc=$?
+  if (( rc != 0 ))
+  then
+    updateStatus=ERROR
+    updateMsg="Failure detected in SVN update operation."
+    print "$updateStatus: $updateMsg\n" | tee -a $EXTRACTLOG
+
+    logEvent "EXTRACT_FAIL" "$updateMsg"
+    goodbye $rc
+  else
+    updateStatus=OK
+    updateMsg="SVN update successful."
+
+    # The event EXTRACTED returns RC=2 if the revision has already been extracted.
+    # In this case, we do not want to run generateLevelHist...but can FORCE to do so.
+    logEvent "EXTRACTED" "$updateMsg"
+    rc=$?
+    if (( rc == 2 ))
+    then
+			if [[ $FORCE = TRUE ]]
+      then
+        GEN_LH=TRUE
+        print "FORCE Mode ON...will generate LEVELHIST even though CM DB says update not needed.\n" | tee -a $EXTRACTLOG
+      else
+        GEN_LH=FALSE
+      fi
+    fi
+
+    # Get the revision number
+    revID_WC=""
+    get_revID_WC
+    print "$updateStatus: $updateMsg \nThe WC is now at revision $revID_WC.\n" | tee -a $EXTRACTLOG
+
+    if [[ $revID_WC != $revID_URL ]]
+    then
+      print "WARNING: SVN WC revision number ($revID_WC) indicates a problem with the SVN update!" | tee -a $EXTRACTLOG
+    fi
+  fi
+
+  #==============================================================================
+  # Update CM DB for Update processing
+  # Only run if user used default EXTRACTDIR. 
+  # This is the defined EDA Release process.
+  #==============================================================================
+  print "INFO: Obtained SVN revision number $revID_WC for WC.\n" >> $EXTRACTLOG
+  if [[ $PRODMODE = FALSE ]]
+  then
+    LHFile="/afs/eda/$LEVEL/svn_test/$PRODUCT/$R_V/LEVELHIST"
+    CSFile="/afs/eda/$LEVEL/svn_test/$PRODUCT/$R_V/build/etc/extracted.files.curr.html"
+  else
+    LHFile="/afs/eda/$LEVEL/$PRODUCT/$R_V/LEVELHIST"
+    CSFile="/afs/eda/$LEVEL/$PRODUCT/$R_V/build/etc/extracted.files.curr.html"
+  fi
+
+  # We want to remove the existing CSFile if this is an overnight build (vs manual build)
+  if [[ $OVERNIGHT = TRUE ]]
+  then
+    if [[ -f $CSFile ]]
+    then
+      rm $CSFile
+    fi
+    print "$(date +"%a %D %T"): Starting overnight SVN extraction/update...<br>" > $CSFile
+  else
+    print "\n$(date +"%a %D %T"): Starting overnight SVN extraction/update...<br>" >> $CSFile
+  fi
+  
+  # Components that use simp_build for their build flow do not need a CSFile created.
+  case $PRODUCT in
+    dotlib|maise|netcalc|nutshell)  
+       # Create only an LHFile
+       wSwitch=""
+       ;;
+    *) # Default: Create both an LHFile and a CSFile
+       wSwitch="-w $CSFile"
+       ;;
+  esac
+
+  if [[ -z $MYWC && $GEN_LH = TRUE ]]
+  then
+    #----------------------------------------------------------------------
+    # Query the CM DB for changeset file info:
+    # Create LEVELHIST file for components:
+    #   dotlib, edautils, einstimer, ess, maise, netcalc, model, nutshell,
+    #   rice, vss  
+    # Create Overnight Extracted FileSet for use by Build Status Web page
+    # for components:
+    #   edautils, einstimer, ess, model, rice, vss   
+    #----------------------------------------------------------------------
+    #===================================
+    # Generate the LEVELHIST and CSFile
+    #===================================
+    cmdbCmd="$SVNCLIB/generateLevelHist -c $PRODUCT -t $TKVERSION -last -l \"$LHFile\" $wSwitch $dbSwitch"
+    print "$(date): $cmdbCmd" >> $EXTRACTLOG
+    print "$(date): $cmdbCmd" >> $LOG
+    print "***** Updating the LEVELHIST file *****"
+    $cmdbCmd 2>&1 >> $EXTRACTLOG
+    rc=$?
+    if (( rc != 0 ))
+    then
+      case $rc in
+        1) # Error detected
+	         updateStatus=ERROR
+           updateMsg="generateLevelHist failure detected in updating of CM DB."
+           print "$updateStatus: $updateMsg\n" >> $EXTRACTLOG
+           print "$(date +"%a %D %T"): ERROR: $updateMsg<br>" >> $CSFile
+
+           if [[ $OVERNIGHT = TRUE ]]
+           then
+             # Notify builder of ERROR condition
+             MSG_SUBJ="Overnight LEVELHIST Update Failure for Component $PRODUCT/$R_V"
+             MSG_BODY="ERROR encountered in overnight run. Please check the component log file ($EXTRACTLOG) for details."
+             notify_builder "$MSG_SUBJ" "$MSG_BODY"
+           else
+             print "ERROR: Failure detected in LEVELHIST update from CM DB."
+             print "ERROR: Please check the component log file ($EXTRACTLOG) for details." 
+           fi
+
+           logEvent "EXTRACT_FAIL" "LEVELHIST update failure (rc=$rc)"
+           goodbye $rc
+           ;;
+	      *) print "ERROR: Unknown failure detected in generateLevelHist script (rc = $rc).\n" >> $EXTRACTLOG
+           print "$(date +"%a %D %T"): ERROR: Unknown failure detected in generateLevelHist script (rc = $rc).<br>" >> $CSFile
+           if [[ $OVERNIGHT = TRUE ]]
+           then
+             # Notify builder of ERROR condition
+             MSG_SUBJ="Overnight LEVELHIST Update Failure for Component $PRODUCT/$R_V"
+             MSG_BODY="ERROR encountered in overnight run. Please check the component log file ($EXTRACTLOG) for details."
+             notify_builder "$MSG_SUBJ" "$MSG_BODY"
+           else
+             print "ERROR: LEVELHIST update failure detected. Please check the component log file ($EXTRACTLOG) for details."
+           fi
+           logEvent "EXTRACT_FAIL" "LEVELHIST update failure (rc=$rc)"
+           goodbye $rc;;
+        esac
+    else  # generateLevelHist rc=0
+      updateStatus=OK
+      updateMsg="CM DB updated successfully for revision $revID_WC."
+      print "INFO: $updateMsg\n" >> $EXTRACTLOG
+      print "$(date +"%a %D %T"): Completed successfully.<br>" >> $CSFile
+
+      logEvent "LH_GENERATED" "LEVELHIST generated"
+      logEvent "EXTRACT_SUCCESS" "$updateMsg"
+ 
+      # Give the green light for the build scripts
+      print "INFO: Removing lock.extract file\n" >> $EXTRACTLOG
+      rm $LOCK_EXTRACT
+
+      # Notify builder of successful SVN update
+      if [[ $OVERNIGHT = TRUE ]]
+      then
+        MSG_SUBJ="Overnight SVN Extraction Successful for Component $PRODUCT/$R_V"
+        MSG_BODY="Please check the component log file ($EXTRACTLOG) for details."
+        notify_builder "$MSG_SUBJ" "$MSG_BODY"
+      else
+        print "LEVELHIST file updated successfully."
+      fi
+    fi # else for generateLevelHist rc
+  fi # [[ -z $MYWC && $GEN_LH = TRUE ]]
+
+  if [[ $GEN_LH = FALSE ]]
+  then 
+    # No LEVELHIST generation needed
+    # generateLevelHist passes back an RC=2, if the SVN revision has already been updated in the
+    # EDA WC - this is a valid condition so change the RC=0 from the svnExtract script.
+
+    print "\nINFO: The $LEVEL area has already been updated with this revision, rev $revID_WC!" | tee -a $EXTRACTLOG
+
+    # Use the NO EXTRACT file to tell the build flow that this revision has already 
+    # been extracted and 'build on demand' will give up in build script.
+    # Also do not run the genLevelHist script since should already contain this revision's entries.
+	
+	  print "INFO: No extraction/update was needed, creating a no.extract file for use by SVN build flow.\n" >> $EXTRACTLOG
+	  touch $NO_EXTRACT
+
+    # Optionally, allow builds to run even if no extraction has occurred.
+	  if [[ $ALWAYSBUILD = TRUE ]]
+    then
+	    print "INFO: No extraction/update was needed, but user wants builds to run anyway." >> $EXTRACTLOG
+      print "INFO: Removing lock.extract file.\n" >> $EXTRACTLOG
+      rm $LOCK_EXTRACT
+    fi
+    rc=0 
+    print "$(date +"%a %D %T"): No new SVN revisions to extract/update.<br>" >> $CSFile
+  fi
+elif (( $revID_URL == $revID_WC ))
+then
+  print "\nINFO: The revision numbers are the same between the SVN repository (rev $revID_URL) and the SVN WC (rev $revID_WC)." | tee -a $EXTRACTLOG
+  print "INFO: No extraction/update was needed or performed."
+  logEvent "EXTRACT_SUCCESS" "No extraction/update was needed or performed"
+  print "INFO: No extraction/update was needed, creating a no.extract file for use by SVN parallel build flow." >> $EXTRACTLOG
+  print "INFO: Also, deleting the lock.extract file.\n" >> $EXTRACTLOG
+  rm $LOCK_EXTRACT
+  touch $NO_EXTRACT
+  rc=0 
+elif (( $revID_URL < $revID_WC ))
+then
+  print "\nERROR: Revision number in SVN repository (rev $revID_URL) is a lower number than the number in the SVN WC (rev $revID_WC) !!" | tee -a $EXTRACTLOG
+  print "ERROR: This indicates a problem with the SVN WC !!" | tee -a $EXTRACTLOG
+  logEvent "EXTRACT_FAIL" "SVN repository has lower revision number than SVN WC"
+  rc=8
+else
+  logEvent "EXTRACT_FAIL" "Encountered unknown problem determining if an extraction should be performed."
+  print "ERROR: Encountered unknown problem determining if an extraction should be performed." | tee -a $EXTRACTLOG
+  rc=8 
+fi
+
+# Done
+print "\n***** svnExtract completed (rc=$rc) *****\n"
+goodbye $rc

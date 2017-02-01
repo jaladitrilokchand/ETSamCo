@@ -1,0 +1,46 @@
+#!/usr/bin/env ksh
+#========================================================================================================
+# Program Name: doList_rerunAGTS
+#
+# Author(s)   : A. Magnan
+#
+# Purpose     : Perform cleanup activity and rerun AGTS steps for Dry Run Test 
+#
+# Function    : 1) 
+#
+# Notes       : (1) The input is a list of EDA tool components.
+#               (2) Do not run this on TK versions that have been released. The data content
+#                   in the TK Version Tree is erased/initialized as part of the cleanup process.
+#
+# Revisions   : 0.0 12/01/11 AM Initial version
+#========================================================================================================
+#======================================================================
+#                       MAIN Routine
+#======================================================================
+integer cnt=0
+integer rc=0
+
+curDate="$(date +%y%m%d)"
+curTime="$(date +%H%M)"
+
+fileName="/afs/eda/u/svnlib/toolkit/dryrun2/components_to_rerun"
+failFile="/afs/eda/u/svnlib/toolkit/dryrun2/compfails_rerunAGTS_$curDate_$curTime"
+
+while read comp
+do
+  (( cnt = cnt + 1 ))
+  print "\n$cnt) Component: $comp"
+  /afs/eda/u/amagnan/edainfra/tools/enablement/dev/bin/cleanAGTS -t 14.1.0 -c $comp
+	rc=$? 
+  if (( rc == 0 ))
+  then
+    /afs/eda/u/amagnan/edainfra/tools/enablement/dev/bin/runAGTS -t 14.1.0 -c $comp
+	  rc=$? 
+    if (( rc != 0 ))
+    then
+      print "$comp: failed in runAGTS\n" >> $failFile
+    fi
+  else 
+     print "$comp: failed in cleanAGTS\n" >> $failFile 
+  fi 
+done < $fileName

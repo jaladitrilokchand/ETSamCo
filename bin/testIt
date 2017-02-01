@@ -1,0 +1,243 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: testIt
+#  SYNTAX: See "printSyntax" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# Tests ETREE listed in the input file
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 06/16/2011 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use Sys::Hostname;
+use Getopt::Long;
+Getopt::Long::Configure ("pass_through");
+
+
+#
+# Global variables
+#
+
+# Program name
+my $progName = "testIt";
+my $progInvocation = $progName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $inFile;
+my $outFile;
+my $testLocation;
+my @commands = ();
+my $verbose   = 0;
+my $help      = "";
+my $TIME_IT = "/afs/eda/data/edainfra/tools/enablement/prod/bin/timeIt";
+my $TIME_IT_COUNT = 10;
+
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $msg = "";
+my $entry = "";
+my @tokens = ();
+my @results = ();
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+  printSyntax();
+  print "\n[$progName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+
+#
+# Display initial information.
+#
+if ($verbose) {
+    print "\n";
+    print "Program   : $progName\n";
+    print "In file   : $inFile\n";
+    print "Location  : $testLocation\n";
+}
+
+
+# Create the log file
+my $date = `date +%Y%m%d.%H%M%S`;
+chomp $date;
+$outFile = $testLocation . "/" . $progName . "." . hostname . "." . $date;
+
+# Read the input file
+open IN, "<", "$inFile" or die $!;
+@commands = <IN>;
+close IN;
+
+
+# Run the tests.
+my @manual;
+my @output;
+foreach $entry (@commands) {
+    my ($appName, $mode, $command) = split(",", $entry);
+    chomp $command;
+
+    # Skip header
+    next if ($appName eq "API");
+
+    # Save any manual tests to show the user
+    if (uc($mode) ne "AUTO") {
+	push(@manual, $command);
+	next;
+    }
+    
+    # Process any auto commands
+    my $cmd = $testLocation . "/" . $command;
+    my $runCmd = $TIME_IT . " -a \"" . $cmd . "\" -c " . $TIME_IT_COUNT;
+
+    print "\nTesting $appName\n --> $runCmd\n";
+    push(@output, "-------------------\nTesting $appName\n\n");
+
+    @results = `$runCmd`;
+    my $rc = $? >> 8;
+    
+    # Save the results
+    push(@output, @results);
+    push(@output, "\nRC = $rc\n\n-------------------\n");
+    
+}
+
+
+# Write the results
+print join("", @output);
+open OUT, ">$outFile";
+print OUT join("", @output);
+close OUT;
+
+if (scalar(@manual)) {
+    print "\n";
+    print "Manual commands not processed\n";
+    print "------------------------------\n";
+    print join("\n", @manual), "\n";
+}
+
+print "\nResults: $outFile\n";
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+
+# ------------------------------------------------------------------------------
+# Name   : printSyntax()
+# Purpose: Print syntax to console
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub printSyntax {
+    
+    my $syntax = "
+SYNTAX:
+  $progName <-i inputFile> <-l testLocation> [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+    
+    print $syntax;
+    
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub printHelp {
+    
+    my $progDescription = "
+Runs all auto tests in the input file.";
+    
+    my $where ="
+WHERE:
+  -i Comma delimited input file [App,auto|manual,command]
+  -l Location to run commands from
+  -h Application help (optional)
+  -y Verbose mode (optional)
+";
+
+    print "$progDescription\n";
+    printSyntax();
+    print $where;
+    
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+# ------------------------------------------------------------------------------
+sub processArgs {
+
+    # Parse command line arguments
+    GetOptions ('in|i=s'     => \$inFile,
+		'loc|l=s'    => \$testLocation,
+		'verbose|y'  => \$verbose,
+		'help|h|?'   => \$help
+		) || return $ERROR;
+    
+    
+    # If help requested, show usage
+    if ($help) {
+	printHelp();
+	return $ERROR;
+    }
+
+    # Verify the testCount
+    if (! $inFile) {
+	$msg .= "[$progName] Input File (-i) must be specified.\n";
+    }
+    
+    # Verify the testApp
+    my $msg = "";
+    if (! $testLocation) {
+	$msg .= "[$progName] testLocation (-l) must be specified.\n";
+    }
+    
+    # Return
+    if ($msg ne "") {
+	print $msg;
+	return $ERROR;
+    }
+    
+    return $OK;
+    
+}

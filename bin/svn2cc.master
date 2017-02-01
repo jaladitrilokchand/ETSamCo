@@ -1,0 +1,437 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: svn2cc.master
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 04/10/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 08/23/2012 JVI Initial coding.
+# 09/22/2012 EH  Added CheckForBackups() and GetSysTime() to pause processing
+#                while daily SVN and ClearCase backups are running.
+# 12/15/2012 JVI - support for new -E option (excluded components)
+#                - support for new extractOnly and importOnly options
+#                - disable automatic creation of clearcase baselines
+# =============================================================================
+#
+# FUTURE WORK -----------------------------------------------------------------
+#
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use Time::Local;
+
+# Global variables
+# TODO - may want to change dev to prod ...
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $blackOutStartTime = "02:15";
+my $blackOutEndTime   = "04:30";
+
+# Program variables
+my $appName = "svn2cc";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $toolKit         = "";
+my $dbMode          = ""; # default is prod if empty
+my $commaSeperatedComponents         = "";
+my $commaSeperatedExcludedComponents = "";
+my @components      = ();
+my $component       = "";
+my $componentsFrom  = "command line";
+my $appErrorMessage = "";
+my $startDir = $ENV{"PWD"};
+my $dryRunMode      = 0;
+my $extractOnly     = 0;
+my $importOnly      = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleDIE(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+print "Running in DRY RUN mode ...\n" if ($dryRunMode);
+
+
+my %componentsWithErrors = ();
+
+
+# Create list of components to process if none were specified with the command
+my @inclusions = split /,/, $commaSeperatedComponents;
+if (scalar(@inclusions) < 1) {
+  @inclusions = SetComponents();
+  $componentsFrom = "getComponents";
+}
+else {
+  $componentsFrom = "command line";
+}
+
+# remove any items from the component list that were specified in the exclusion
+# list (the -E option)
+my @exclusions = split /,/, $commaSeperatedExcludedComponents;
+my %excluded;
+@excluded{@exclusions} = ();
+if ( scalar( %excluded ) ) { $componentsFrom .= " with exclusions"; }
+foreach my $inclusion ( @inclusions ) {
+  push( @components, $inclusion ) unless exists $excluded{$inclusion};
+}
+if (scalar(@components) < 1) {
+  CleanExit("No components to process ... exiting\n", $ERROR);
+}
+
+
+# Process each component
+foreach $component (@components) {
+
+  # Skip the etreetest* and svntest* components
+  next if ($component =~ /etreetest/);
+  next if ($component =~ /svntest/);
+
+  #
+  # Currently:
+  #   SVN backup starts at 03:00 and appears to last for approximately 5 minutes.
+  #   Clearcase backup starts at 04:00 and is usually locked for a few minutes.
+  # The window to pause the start of new components in svn2cc processing is 
+  # defined by $blackOutStartTime and $blackOutEndTime  
+  CheckForBackups();
+  
+  print "\nProcessing ... $component\n";
+
+  # Call SVN2CC engine
+  my $svn2ccRc = ExecuteSVN2CC($component);
+
+  if ( $svn2ccRc != 0 ) {
+    $componentsWithErrors{$component} = $svn2ccRc;
+  }
+
+}
+
+
+# create clearcase baseline if components imported successfully
+# 13 Dec 12 - jvi - clearcase baseline creation is now to be created manually.
+#                   the original automatic creation is disabled by
+#                   the hardcoded setting of componentsFrom below.
+if ( scalar( keys %componentsWithErrors )  != 0 ) {
+  $commaSeperatedComponents = join ',', sort keys %componentsWithErrors; 
+  print "\nCheck the logs for errors found in \"$commaSeperatedComponents\"\n";
+}
+else {
+  $componentsFrom = "no automatic baselines for now";
+  if ( $componentsFrom eq "getComponents" ) {
+
+    # create clearcase baselines
+
+    print " Creating clearcase baselines ...\n" if ($verbose);
+    
+    # Construct the command
+    my $command = "$BIN_DIR/svn2cc.createBaselines";
+    $command .= " -t $toolKit";
+
+    # Run the command
+    my $rc = RunSystem($command);
+
+  }
+  else {
+    # automatic baseline creation is only done when all components were 
+    # successfully imported. there currently isn't a way to know that all
+    # toolkit components are in clearcase if the component names were provided
+    # by the command line option
+    print "\nCreate the clearcase baselines manually when all components are in clearcase.\n";
+  }
+}
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  CleanExit("\n[$appName] Caught an unexpected die - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  print STDERR <<End_of_Help;
+
+This script executes the SVN2CC process for all components in 
+the given EDA Tool Kit.
+
+SYNTAX:
+  $appName <-t tool_kit> [-C components] [-E excluded_components] 
+                         [-dryrun] [y] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+
+WHERE:
+  tool_kit   = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+  components = (optional) comma separated list of component names.
+                          default is all components in toolkit
+  excluded_components = (optional) comma separated list of component names.
+                          to be excluded from processing
+  -extractOnly (optional) extract from svn. do not import to clearcase.
+  -importOnly  (optional) do not extract from svn. import to clearcase.
+  -dryrun    = (optional) Run script in dryrun mode
+  -h           (optional) application help
+  -y           (optional) Verbose (print the invocation of each command)
+
+End_of_Help
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'        => \$toolKit,
+	      'C=s'           => \$commaSeperatedComponents,
+	      'E=s'           => \$commaSeperatedExcludedComponents,
+              'extractOnly|e' => \$extractOnly,
+              'importOnly|i'  => \$importOnly,
+	      'db=s'          => \$dbMode,
+	      'dryrun'        => \$dryRunMode,
+	      'y'             => \$verbose,
+	      'help|h|?'      => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) is a required parameter\n";
+    return $ERROR;
+  }
+
+  if ( $extractOnly && $importOnly ) {
+    print "ERROR: extractOnly and importOnly specified. choose one or the other.\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents()
+# Purpose: Create a list of components ready for SVN2CC
+# RCs    : List of component names or empty list
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  print " Querying for components in $toolKit ...\n" if ($verbose);
+
+  # Query the DB for tk/components in the DEVELOPMENT state
+  # Construct the command
+  my $command = "$BIN_DIR/getComponents";
+  $command .= " -t $toolKit";
+  #$command .= " -s DEVELOPMENT";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my @results = `$command`;
+  my $rc = $? >> 8;
+
+  my $comps = $results[0];
+  chomp $comps;
+  print "Results: $comps\n" if ($verbose);
+
+  my @list = ();
+  if ($rc == 0) {
+    @list = split(/,/, $comps);
+  }
+
+  print "Found " . scalar(@list) . " components\n" if ($verbose);
+
+  return @list;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ExecuteSVN2CC()
+# Purpose: Run the SVN2CC engine for the specified tool kit ann component
+# RCs    : rc from SVN2CC
+#------------------------------------------------------------------------------
+sub ExecuteSVN2CC {
+
+  my ($myComponent) = @_;
+
+  print " Running SVN2CC engine ...\n" if ($verbose);
+
+  # Construct the command
+  my $command = "$BIN_DIR/svn2cc.engine";
+  #$command = "/afs/eda/u/ehull/edainfra/tools/enablement/dev/bin/svn2cc.engine";
+  #$command = "/afs/eda/u/jvi/edainfra/tools/enablement/dev/bin/svn2cc.engine";
+  $command .= " -t $toolKit";
+  $command .= " -c $myComponent";
+  $command .= " -y"           if ($verbose);
+  $command .= " -dryrun"      if ($dryRunMode);
+  $command .= " -db $dbMode"  if ($dbMode);
+  $command .= " -extractOnly" if ($extractOnly);
+  $command .= " -importOnly"  if ($importOnly);
+
+  # Run the command
+  my $rc = RunSystem($command);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RunSystem($command)
+# Purpose: Executes the command and returns the command's return code
+# RCs    : return code
+#------------------------------------------------------------------------------
+sub RunSystem {
+
+  my ($command) = @_;
+
+  my $rc = $OK;
+  print "  Command: $command\n";
+  system($command);
+  $rc = $? >> 8;
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CheckForBackups()
+# Purpose: Provide a pause in processing (delayed return) when invoked between
+#          $blackOutStartTime and $blackOutEndTime.
+# RCs    : 0 = OK
+#          8 = ERROR
+#-----------------------------------------------------------------------------
+sub CheckForBackups {
+  my $curSysTime = time();
+  while ( ($curSysTime  > GetSysTime($blackOutStartTime)) && ($curSysTime  < GetSysTime($blackOutEndTime)) )  {
+    chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+    print "$dateTime Processing paused for backup window.\n";
+    sleep(600);
+    $curSysTime = time();
+  }
+
+  return $OK;
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : GetSysTime()
+# Purpose: For a given hh:mm time input, return the equivalent system time for
+#          today's date.
+# RCs    : 0 = OK
+#          8 = ERROR
+#-----------------------------------------------------------------------------
+sub GetSysTime {
+
+  my ($tgtTime) = @_;
+
+  # Parse hours and minutes
+  my ($tgtHr, $tgtMin) = (split(/:/, $tgtTime)) [0,1];
+
+  # Get the current day, month and year
+  my ($currentDay, $currentMonth, $currentYear) = (localtime)[3..5];
+
+  # Get the system time for today at $tgtTime
+  my $sysTime = timelocal("00", $tgtMin, $tgtHr, $currentDay, $currentMonth, $currentYear);
+
+  return $sysTime;
+
+}

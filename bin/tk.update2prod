@@ -1,0 +1,20 @@
+tk=$1
+comp=$2
+print "ToolKit: $tk"
+print "Component: $comp"
+if [[ -z $tk ]]
+then
+  print "Missing tool kit"
+  print "Usage: tk.update2prod <tk> <comp>"
+  exit 8
+fi
+if [[ -z $comp ]]
+then
+  print "Missing component"
+  print "Usage: tk.update2prod <tk> <comp>"
+  exit 8
+fi
+svnLog -t $tk -c $comp -l build -e extracted
+svnLog -t $tk -c $comp -l build -e advanced_to_dev
+svnLog -t $tk -c $comp -l dev -e advanced_to_prod
+

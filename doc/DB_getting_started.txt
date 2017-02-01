@@ -1,0 +1,46 @@
+DB2 Database Cheat Sheet
+--------------------------
+
+Connection
+----------
+	db2 connect to <database>
+	db2 connect to <database> user <user>
+	db2 connect to <database> user <user> using <password>
+	db2 disconnect <database>
+
+Tables
+-------
+	db2 list tables for all
+	db2 list tables for schema <schema>
+	db2 describle table <table>
+
+	
+Debugging SQL codes and errors
+--------------------------------
+Run db2 ? SQL... (for example, "db2 ? SQL0668N")
+
+
+Manually connecting to the database
+------------------------------------
+
+1. Log into greenjiffy.fishkill.ibm.com (ssh greenjiffy.fishkill.ibm.com)
+2. Run db2profile and connnect ...
+
+   +---------+--------------------------------------+--------------------------+
+   |Database | Run                                  |  Connect                 |
+   +---------+--------------------------------------+--------------------------+
+   | PROD    | . /db2aix/edainst1/sqllib/db2profile | db2 connect to etreedb   |
+   | TEST    | . /db2aix/edatest1/sqllib/db2profile | db2 connect to tktestdb  |
+   | DEV     | . /db2aix/edadev1/sqllib/db2profile  | db2 connect to tkdevdb   |
+   +---------+--------------------------------------+--------------------------+
+
+3. To run sql in from a file - "db2 -f <file_name>.sql -t" (you may need to remove ^M added by Windows)
+   >>> May need to run "db2 reorg" or "db2 table <table_name> reorg" <<<
+   
+4. Disconnect - "db2 disconnect etreedb"
+
+
+Note:
+   - When ever you change the structure of the database (add/delete additional columns), Reorg the effected table using the 
+     following command.
+     db2 reorg table <tableName>

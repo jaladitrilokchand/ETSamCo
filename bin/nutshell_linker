@@ -1,0 +1,5 @@
+comp=$1
+exec=$2
+cp -pP /afs/eda/shipb/$comp/14.1/.bin-aix64/$exec /afs/eda/ship/$comp/14.1/.bin-aix64/.
+cp -pP /afs/eda/shipb/$comp/14.1/.bin-linux64/$exec /afs/eda/ship/$comp/14.1/.bin-linux64/.
+echo "done"

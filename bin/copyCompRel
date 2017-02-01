@@ -1,0 +1,266 @@
+#!/usr/bin/env ksh
+#=================================================================================
+# Program Name: copyCompRel
+#
+# Author(s)   : A. Magnan
+#
+# Purpose     : Copy an EDA component/release tree from one EDA code repository to another.
+#
+# Notes       : (1) An EDA code repository contains the component/release trees for all EDA 
+#                   Toolkit components.
+#               (2) A component/release tree is copied from the source repository (S_REPOS)
+#                   to the target repository (T_REPOS).
+#               (3) S_REPOS is defined with the -s switch.
+#               (4) T_REPOS is defined with the -t switch. 
+#               (5) The EDA component is defined with the -c switch.
+#               (6) The EDA release is defined with the -r switch.
+#               (7) The copy method (tar, rsync, or update) is defined with the -m switch.
+#               (8) For the TAR copy method, the target location is cleaned out prior to the 
+#                   copy operation.
+#               (9) Optionally, a -X switch is defined to clean out the target location prior
+#                   to executing the other copy operations.
+#              (10) Optionally, a -C switch will enable an attempt to create the component/release 
+#                   directory at the target location, if it does not exist, before the copy
+#                   operation is performed.
+#              (11) The CPLOG file, containing program messages, is defined with the -l 
+#                   switch.
+#              (12) An e-mail is sent to a person in the AFS Admin role if there are access or
+#                   AFS disk quota issues.
+#
+# Revisions   : 0.0 12/08/10 AM Initial version
+#   
+#=================================================================================
+
+help()
+{
+cat << \EOF
+# Usage   : copyCompRel [-h] -c <comp> -r <rlse> -l <log file> -m <copy method> -s <srcdir> -t <tgtdir> [-C] [-D] [-N] [-X]
+#           -c <comp>      specify component name (corresponds to component directory)
+#           -h             shows this help
+#           -l <log file>  specify the log file to contain the program messages.
+#           -m <method>    specify the copy method (tar, rsync, update)
+#           -r <rlse>      specify release <R.V>
+#           -s <srcdir>    specify EDA source repository (e.g. /afs/eda/prod)
+#           -t <tgtdir>    specify EDA target repository (e.g. /afs/eda/special)
+#           -C             create TGT_DIR directories if they do not exist
+#           -D             turn on the DEBUG messages.
+#           -N             show what would be done (but don't do it) "NO-OP"
+#           -X             clean the component/release tree at the target location prior to copy.
+#
+# Details : Copy $srcdir/$comp/$rlse -> $tgtdir/$comp/$rlse
+# 
+EOF
+}
+
+goodbye()
+{
+  rc="$1"
+  [[ -n $2 ]] && print "$2\n"
+  exit "${rc:-0}"
+}
+
+cleanTgtDir()
+{
+  # Clean out the target repos/component/release directory.
+  cd "$TGT_DIR"
+  curDir=`pwd`
+ 
+  [[ -n $DEBUG ]] && print "[D] Location to clean: $curDir" >> $CPLOG
+
+  if [[ -n $NOOP ]]
+  then
+    print "\n   In NO-OP mode; otherwise the following commands would be executed:" >> $CPLOG
+    print "       rm -rf *"          >> $CPLOG
+    print "       rm -rf .bin*"      >> $CPLOG
+    print "       rm -rf .dll*"      >> $CPLOG
+    print "       rm -rf .lib*"      >> $CPLOG
+    print "       rm -rf .owner"     >> $CPLOG
+    print "       rm -rf .update"    >> $CPLOG
+  else
+    if [[ $TGT_DIR = $curDir ]]
+    then
+      print "\n   Files are being deleted..." >> $CPLOG
+      rm -rf *             # (gets everything but the . files)
+      rm -rf .bin*
+      rm -rf .dll*
+      rm -rf .lib*
+      rm -rf .owner
+      rm -rf .update
+      print "   Deletion complete.\n" >> $CPLOG
+    else
+      print "ERROR: Problem with cleaning target directory, $TGT_DIR." >> $CPLOG
+      goodbye 8 
+    fi
+  fi
+}
+
+sendMsg()
+{
+  MSG_TO=$1
+  MSG_SUBJ=$2
+  MSG_BODY=$3
+  mail -s "$MSG_SUBJ" $MSG_TO <<EOF
+  $MSG_BODY
+EOF
+  return
+}
+
+# Initialize variables
+rc=0
+
+# Define mailing list to be used for error reporting
+MAILLIST="amagnan@us.ibm.com nanhuo@us.ibm.com"      
+
+unset S_REPOS T_REPOS COMP RLSE CPLOG METHOD DEBUG NOOP CLEAN
+# Get program input from switches
+while getopts :c:hl:m:r:s:t:CDNX OPTION
+do
+  case "$OPTION" in
+    c) COMP=$OPTARG;;
+    h) help; goodbye;;
+    l) CPLOG=$OPTARG;;
+    m) METHOD=$OPTARG;;
+    r) RLSE=$OPTARG;;
+    s) S_REPOS=$OPTARG;;
+    t) T_REPOS=$OPTARG;;
+    C) CRTGT=TRUE;;
+    D) DEBUG=TRUE;;
+    N) NOOP=TRUE;;
+    X) CLEAN=TRUE;;
+    :) help; goodbye 1 "\n*** Option -$OPTARG requires a parameter.";;
+    ?) help; goodbye 1 "\n*** Option -$OPTARG is not recognized.";;
+  esac
+done
+shift $(($OPTIND - 1))
+
+# Validate existence of required program switches
+[[ -n $1 ]] && { help; goodbye 1 "\n*** Superfluous command line parms found!"; }
+[[ -z $S_REPOS ]] && goodbye 1 "\n*** A valid EDA component source repository must be specified."
+[[ -z $T_REPOS ]] && goodbye 1 "\n*** A valid EDA component target repository must be specified."
+[[ -z $COMP ]] && goodbye 1 "\n*** A valid component must be specified."
+[[ -z $RLSE ]] && goodbye 1 "\n*** A valid release must be specified.  Format R.V"
+[[ -z $CPLOG ]] && goodbye 1 "\n*** A fully qualified log file must be specified."
+[[ -z $METHOD ]] && goodbye 1 "\n*** A valid copy method (tar, rsync, update) must be specified."
+
+# Validate copy method
+[[ $METHOD != @(tar|rsync|update) ]] && goodbye 1 "\n*** Please specify valid copy methods, either tar, rsync, or update."
+
+print "\nRunning the $0 script as $USER.\n" > $CPLOG
+
+# DEBUG Information
+[[ -n $DEBUG ]] && print "[D]EBUG mode is ACTIVE." >> $CPLOG
+[[ -n $DEBUG ]] && print "[D] S_REPOS : $S_REPOS" >> $CPLOG
+[[ -n $DEBUG ]] && print "[D] T_REPOS : $T_REPOS" >> $CPLOG
+[[ -n $DEBUG ]] && print "[D] COMP    : $COMP"    >> $CPLOG
+[[ -n $DEBUG ]] && print "[D] RLSE    : $RLSE"    >> $CPLOG
+[[ -n $DEBUG ]] && print "[D] LOG FILE: $CPLOG"   >> $CPLOG
+[[ -n $DEBUG ]] && print "[D] METHOD  : $METHOD\n"  >> $CPLOG
+
+# NO-OP Information
+[[ -n $NOOP ]] && print "[N]O-OP mode is ACTIVE.\n" >> $CPLOG
+
+# Check existence of both source and target code repositories
+[[ ! -d $S_REPOS ]] && goodbye 8 "\n*** EDA code repository, $S_REPOS, not found!!" >> $CPLOG
+[[ ! -d $T_REPOS ]] && goodbye 8 "\n*** EDA code repository, $T_REPOS, not found!!" >> $CPLOG
+  
+# Define/validate source repos/component/release directory
+SRC_DIR="$S_REPOS/$COMP/$RLSE"
+[[ ! -d $SRC_DIR ]] && goodbye 8 "\n*** Can't find source component/release directory, $SRC_DIR!!" >> $CPLOG
+print "\n   Source Dir: $SRC_DIR" >> $CPLOG
+
+# Define/validate target repos/component/release directory
+TGT_DIR="$T_REPOS/$COMP/$RLSE"
+if [[ ! -d $TGT_DIR ]]
+then
+  if [[ -n $CRTGT ]]
+  then
+    print "Trying to create the directory now!!" >> $CPLOG
+    cd "$T_REPOS"
+    mkdir -p $COMP/$RLSE
+    rc=$?
+    if (( rc != 0 ))
+    then
+      print "ERROR: Unable to create target component/release directory, $TGT_DIR. RC=$rc." >> $CPLOG
+      goodbye 8
+    else
+      cd "$TGT_DIR"
+      newDir=`pwd`
+      print "[I] Created new target component/release directory, $newDir. RC=$rc." >> $CPLOG
+    fi
+  else
+     subject="CMLIB cannot access $COMP/$RLSE Directory"
+     msgbody="AFS ID $USER cannot find or access the $TGT_DIR directory."
+     print "\n$subject" >> $CPLOG
+     print "$msgbody" >> $CPLOG
+     sendMsg "$MAILLIST" "$subject" "$msgbody"
+     goodbye 8
+  fi
+fi
+print "   Target Dir: $TGT_DIR\n" >> $CPLOG
+ 
+#===================================
+# START THE DATA TRANSFER OPERATION
+#===================================
+print "\n$(date): Starting processing of $COMP/$RLSE.\n" >> $CPLOG
+
+# Clean the TGT_DIR if requested
+if [[ -n $CLEAN ]]
+then
+  cleanCmd="cleanTgtDir"
+  if [[ -n $NOOP ]]
+  then
+    print "\n   In NO-OP mode; otherwise the following command would be executed:" >> $CPLOG
+    print "     $cleanCmd"  >> $CPLOG
+  else
+    [[ -n $DEBUG ]] && print "[D] Running \"$cleanCmd\" on target directory \"$TGT_DIR\"." >> $CPLOG
+    cleanTgtDir
+  fi
+fi
+
+# Now, execute the copy method from SRC_DIR to TGT_DIR
+case $METHOD in
+  tar) copyCmd="tar cvf - . | (cd ${TGT_DIR} && tar xvf -)"
+       if [[ -n $NOOP ]]
+       then
+         print "\n   In NO-OP mode; otherwise the following command would be executed:" >> $CPLOG
+         print "     $copyCmd"  >> $CPLOG
+       else
+         cd "$SRC_DIR"
+         thisDir=`pwd`
+         [[ -n $DEBUG ]] && print "[D] Running \"$copyCmd\"" >> $CPLOG 
+         [[ -n $DEBUG ]] && print "    from src directory \"$thisDir\"." >> $CPLOG 
+         tar -cvf - . | (cd ${TGT_DIR} && tar -xvf -) 2>&1 | tee -a $CPLOG
+       fi;;
+  rsync) copyCmd="rsync -rlptvz $SRC_DIR/ $TGT_DIR"
+       # rsync -a switch implements -rlptgoD
+       # Ran into issues with -g (preserve group) so changed from -a to -rlpt
+       if [[ -n $NOOP ]]
+       then
+         print "\n   In NO-OP mode; otherwise the following command would be executed:" >> $CPLOG
+         print "     $copyCmd"  >> $CPLOG
+       else
+         cd "$SRC_DIR"
+         thisDir=`pwd`
+         [[ -n $DEBUG ]] && print "[D] Running \"$copyCmd\"" >> $CPLOG 
+         [[ -n $DEBUG ]] && print "    from src directory \"$thisDir\"." >> $CPLOG
+         # Note: Need the trailing slash at end of SRC_DIR to enable the correct operation
+         /usr/bin/rsync -rlptvz $SRC_DIR/ $TGT_DIR 2>&1 | tee -a $CPLOG
+       fi;;
+esac
+
+# If error detected, try to determine problem and notify enablement role
+if [[ -n $(egrep -w "rsync error|Error|Disk quota exceeded|No space left on device|Permission denied" $CPLOG) ]]
+then
+  print "\nFAIL: $METHOD copy has finished with errors." >> $CPLOG
+  subject="Copy unsuccessful for $COMP/$RLSE."
+  msgbody="Advance failure! See: $CPLOG for details."
+  print "\n$subject" >> $CPLOG
+  print "$msgbody" >> $CPLOG
+  sendMsg "$MAILLIST" "$subject" "$msgbody"
+else
+  print "\nSUCCESS: $METHOD copy has finished." >> $CPLOG
+fi
+
+# Finish up
+print "\n$(date): Ended processing of $COMP/$RLSE.\n" >> $CPLOG
+goodbye

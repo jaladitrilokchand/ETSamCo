@@ -1,0 +1,454 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: doTK_xmit_redo
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 11/22/2011
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 01/11/2012 GS  Initial coding - copied from doTK_xmit
+# =============================================================================
+
+use warnings;
+use strict;
+use File::stat;
+use Time::localtime;
+use Sys::Hostname;
+use Cwd;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use File::Copy;
+
+#
+# Global variables
+#
+my $BUILD   = "/afs/eda/build/";
+
+
+# Program name
+my $appName = "doTK_xmit_redo";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $toolKit    = "";
+my $devMode    = 0;
+my $debugMode  = 0;
+my $component  = "";
+my $help       = "";
+my $verbose    = 0;
+my $singleTest = 0;
+my $outSummary = "";
+my $outResults = "";
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+# Set the location and name of createFuncUpdate application
+my $DEV_LOGS = "/afs/eda/data/edainfra/tools/enablement/dev/logs";
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $DEV_BIN = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $XMIT = "$DEV_BIN/transmit_no_crs";
+my $GET_COMPS = "$BIN/getComponents";
+my $SHOW_ALL = "$BIN/cr.showAll";
+my $CR_UPDATE = "$BIN/changeReqUpdateAll";
+my $GET_REV = "$BIN/getRevisionsTk";
+my $SHOW_BY = "$BIN/changeReqShowByStatus";
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# Define the current directory
+#
+my $startDir = $ENV{"PWD"};
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+#
+# Define custom perl libs path and modules
+#
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use IcofFile;
+use Time::HiRes qw(gettimeofday tv_interval);
+
+
+#
+# Verify user is running as svnlib
+#
+my $AUTH_USER = "svnlib";
+my $user = getlogin();
+print "User: $user\n";
+if ((! $debugMode) && ($user ne $AUTH_USER)) {
+  print "Only the $AUTH_USER AFS id has the correct access to execute this script \n";
+  exit #ERROR;
+}
+
+print "User authorization complete ...\n\n";
+
+
+#
+# Define this script's output results and summary files
+#
+print "Setting output files ... \n";
+my $date = `date  +%m%d%y`;
+chomp $date;
+my $time = `date  +%H%M%S`;
+chomp $time;
+
+$outSummary = "$DEV_LOGS/$appName" . "_summary_" . $date . "_" . $time;
+$outResults = "$DEV_LOGS/$appName" . "_results_" . $date . "_" . $time;
+
+print " Output results file\n";
+print "  -> $outResults \n";
+print " Output summary file\n";
+print "  -> $outSummary \n\n";
+
+#
+# Create a list of DELIVERED components.  We'll only want to xmit
+# components in this list.
+#
+my @results;
+my $command = "$GET_COMPS -t $toolKit -ct DELIVERED -q";
+my $rc = 0;
+my @delComponents = ();
+if (! $component) {
+  print "Running ...\n $command\n";
+  @results = `$command`;
+  $rc = $? >> 8;
+  print " Return code: $rc\n";
+  if ($rc < 1) {
+    @delComponents = split(/,/, $results[0]);
+  }
+}
+else {
+  push(@delComponents, $component);
+}
+print " Delivered component: " . scalar(@delComponents) . "\n";
+
+
+#
+# Transmit all delivered components
+#
+print "Starting component xmits ... \n";
+print "-----------------------------\n";
+$rc = 0;
+foreach $component (@delComponents) {
+
+  print " Processing $component ...\n";
+
+  # Get start time data
+  my $startTms = [gettimeofday];
+  my $startTime = `date +%H%M%S`;
+  my $startDate = `date +%Y%m%d`;
+  chomp $startTime;
+  chomp $startDate;
+  my $startData = "Start time: $startTime\n";
+  $startData .= "Start date: $startDate\n";
+
+  # Update Released Change Requests to complete
+  #UpdateChangeReqs($toolKit, $component);
+
+  # Xmit this component
+  $command = "$XMIT -v $toolKit -c $component -s";
+  print "Running ...\n $command\n";
+  if ($debugMode) {
+    print "DEBUG - command NOT actually run\n";
+  }
+  else {
+    @results = `$command`;
+    $rc = $? >> 8;
+    print " Return code: $rc\n";
+  }
+
+  # Get the end time 
+  my $elapsed = tv_interval ( $startTms );
+  my $endData = "Elapsed time: $elapsed seconds\n";
+
+  # Log results.
+  my $result = "==========\n" . $startData . "----------\n";
+  $result .= join("", @results);
+  $result .= "----------\n" . $endData . "==========\n";
+  UpdateResults($result);
+  UpdateSummary($component, $rc, "complete", $startDate, $startTime, $elapsed);
+
+  # If -s is used then run until the first component is successful
+  if ($singleTest && ($rc < 1)) {
+    print "TEST exit...\n";
+    last;
+  }
+
+}
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}  # End of handleInterruption
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}  # End of handleDIE
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Re-transmits ALL delivered components or a single component.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-g] [-d] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  -t Tool Kit [14.1.0, 14.1.1 ...].
+  -c Component to process (only processes this component)
+  -g Debug mode [no actions taken] (optional)
+  -d Development mode (optional)
+  -h Application help (optional)
+  -y Verbose mode (optional)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}       # End of printHelp
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tool_kit|t=s'    => \$toolKit,
+              'comp|c=s'        => \$component,
+              'debug|g'         => \$debugMode,
+              'dev|d'           => \$devMode,
+              'st'              => \$singleTest,
+              'verbose|y'       => \$verbose,
+              'help|h|?'        => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the required parameters.
+  my $msg = "";
+  if (! $toolKit) {
+    $msg = "ERROR: tool_kit (-t) is a required parameter\n";
+  }
+
+  if ($singleTest) {
+    print "Single test mode = ON\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateSummary($component, $rc, $step, $startDate, $startTime, $elapsed)
+# Purpose: Add an entry to the output summary file
+# RCs    : none
+#------------------------------------------------------------------------------
+sub UpdateSummary {
+
+  my ($component, $rc, $step, $startDate, $startTime, $elapsed) = @_;
+  my $newLine = "$component;$rc;$step;$startDate;$startTime;$elapsed;";
+  print "[UpdateSummary] new line ... $newLine\n" if ($verbose);
+
+  my @contents = ();
+  if (-f $outSummary) {
+    if (! IcofFile::ReadFileToList("$outSummary", \@contents, 0)) {
+      print "WARNING: unable to read XMIT summary file\n";
+      print "         File: $outSummary\n";
+    }
+  }
+
+  # Replace the results
+  my $line;
+  my @newContents = ();
+  foreach $line (@contents) {
+    my @tokens = split(/;/, $line);
+    if ($tokens[0] eq $component) {
+      print "Replacing ..\n $line\n with\n $newLine\n";
+      push(@newContents, $newLine);
+    }
+    else {
+      push(@newContents, $line);
+    }
+  }
+  push(@newContents, $newLine) if (scalar(@newContents) < 1);
+
+  if (! IcofFile::WriteListToFile($outSummary, 0, @newContents)) {
+    print "ERROR: unable to write XMIT summary file\n";
+    print "       File: $outSummary\n";
+  }
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateResults($newResults)
+# Purpose: Add new results to the output results file
+# RCs    : none
+#------------------------------------------------------------------------------
+sub UpdateResults {
+
+  my (@newResults) = @_;
+
+  print "[UpdateResults] new results ...\n" . join("\n", @newResults) if ($verbose);
+
+  my @contents = ();
+  if (-f $outResults) {
+    if (! IcofFile::ReadFileToList("$outResults", \@contents, 0)) {
+      print "WARNING: unable to read XMIT results file\n";
+      print "         File: $outResults\n";
+    }
+  }
+  push(@contents, @newResults);
+
+  if (! IcofFile::WriteListToFile($outResults, 0, @contents)) {
+    print "ERROR: unable to write XMIT results file\n";
+    print "       File: $outResults\n";
+  }
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateChangeReqs($component)
+# Purpose: Updates released Change Requests for this TK and component to complete
+# RCs    : none
+#------------------------------------------------------------------------------
+sub UpdateChangeReqs {
+
+  my ($tk, $comp) = @_;
+
+  print "[UpdateChangeReqs] ... $tk - $comp\n" if ($verbose);
+
+  # Find the Released CRs for this Tool Kit and Component
+  $command = "$SHOW_BY -t $toolKit -c $comp -s RELEASED";
+  @results = ();
+  $rc = 0;
+  print "Running ...\n $command\n" if ($verbose);
+  @results = `$command`;
+  $rc = $? >> 8;
+  print " Return code: $rc\n" if ($verbose);
+  return if ($rc != 0);
+
+  # Update Released CRs to complete
+  my $cr = "";
+  foreach $cr (@results) {
+    chomp $cr;
+    $command = "$CR_UPDATE -cr $cr -s COMPLETE";
+    print "Running ...\n $command\n" if ($verbose);
+    if ($debugMode) {
+      print "DEBUG - command NOT actually run\n";
+    }
+    else {
+      @results = `$command`;
+      $rc = $? >> 8;
+      print " Return code: $rc\n" if ($verbose);
+    }
+  }
+
+}

@@ -1,0 +1,455 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: prev2prod
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 09/30/2014 GS  Initial coding.
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+#use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TKutils;
+use IcofFile;
+
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+my $SERVER_BTV_DIR = "/afs/btv.ibm.com/data/vlsi/eclipz/common/tools/edatools";
+my $SERVER_EDA_DIR = "/afs/eda/project/eclipz/common/tools/edatools";
+
+# Program variables
+my $appName = "prev2prod";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dbMode          = "";  # default is prod if empty
+my $dryRun          = 0;
+my $toolKit         = "";
+my $startDir;
+my $site            = "";
+my $isAsics         = 0;
+my $isServer        = 0;
+my @results         = ();
+my $command         = "";
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+my @plats = ( "aix64b", "lin64b_x86" );
+my %sysPlats = ( "amd64_linux26_RH5", "lin64b_x86",
+                 "amd64_linux26_RH6", "lin64b_x86",
+                 "64-rs_aix61", "aix64b",
+                 "64-rs_aix71", "aix64b" );
+my $SITE_REF = "/afs/eda/data/edainfra/tools/enablement/dev/doc/EDA.location.ref";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+my $topDir = GetTopDir($toolKit, $site, $isAsics);
+print "Top: $topDir\n";
+my $beta = GetBeta($topDir, $toolKit);
+print "Beta: $beta\n";
+my $volume = GetVolume($topDir, $toolKit, $beta, $isAsics);
+print "Volume: $volume\n";
+
+foreach my $plat (@plats) {
+
+  my $tkVolPlat = GetTkPlat($toolKit, $plat, $volume);
+  my $tkPliPlat = GetTkPlat($toolKit, $plat, "0");
+  print "TkVolPlat: $tkVolPlat\n";
+  print "TkPliPlat: $tkPliPlat\n";
+
+  my $installDir = GetInstallDir($toolKit, $plat, $isAsics);
+  print "Install: $installDir\n";
+
+  chdir("$topDir/$installDir");
+  print "Cd to $topDir/$installDir\n";
+  $command = "ln -s $tkVolPlat $tkPliPlat";
+  TKutils::RunCommand($command, \@results, $dryRun, 1);
+
+  if ($isAsics) {
+
+    my $tkPreview = "$topDir/toolkit_preview";
+    print "Preview: $tkPreview\n";
+    chdir($tkPreview);
+    print "Cd to $tkPreview\n";
+    $command = "ln -s ../$installDir/$tkPliPlat";
+    TKutils::RunCommand($command, \@results, $dryRun, 1);
+
+    chdir($topDir);
+    print "Cd to $topDir\n";
+    $command = "ln -s $installDir/$tkPliPlat";
+    TKutils::RunCommand($command, \@results, $dryRun, 1);
+
+  }
+
+  UpdateGuide($topDir, $installDir, $tkVolPlat, $plat, $beta, $dryRun);
+
+}
+
+if ($isServer) {
+
+  chdir($topDir);
+  foreach my $sysPlat (keys(%sysPlats)) {
+    my $plat = $sysPlats{$sysPlat};
+    my $tkPliPlat = GetTkPlat($toolKit, $plat, "0");
+
+    my $installDir = GetInstallDir($toolKit, $plat, $isAsics);
+    $command = "ln -s $installDir/$tkPliPlat .tk$toolKit" . ".0-" . $sysPlat;
+    TKutils::RunCommand($command, \@results, $dryRun, 1);
+
+  }
+
+  $command = "ln -s .tk$toolKit.0-" . "@" . "sys tk$toolKit" . ".0";
+  TKutils::RunCommand($command, \@results, $dryRun, 1);
+
+}
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  #LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script converts preview TK installs that used beta (volA/volB) syntax
+to a production install.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tk> <-s site> <-server | -asics>
+                  [-dryrun] [-y] [-db dbMode] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tk        = Tool Kit version which must exist (ie, 14.1.1 ...)
+  site      = Tool kit install site (ie, btv, fsh, aus, ...)
+  -asics    = ASICs install
+  -server   = Server install
+  -dryrun   = Run script in dryrun mode
+  dbMode    = Database mode [default = PROD] (PROD, DEV, TEST)
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('t=s'       => \$toolKit,
+              's=s'       => \$site,
+              'asics'     => \$isAsics,
+              'server'    => \$isServer,
+	      'db=s'      => \$dbMode,
+	      'dryrun'    => \$dryRun,
+	      'y'         => \$verbose,
+	      'help|h|?'  => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) is a required parameter\n";
+    return $ERROR;
+  }
+
+  if (! $site) {
+    print "ERROR: Site (-s) is a required parameter\n";
+    return $ERROR;
+  }
+  if (! $isAsics && ! $isServer) {
+    print "ERROR: Install type (-asics or -server) is a required parameter\n";
+    return $ERROR;
+  }
+  if ($isAsics && $isServer) {
+    print "ERROR: Only one install type (-asics or -server) is acceptable\n";
+    return $ERROR;
+  }
+
+  $toolKit =~ s/14/18/g if ($isAsics);
+  #$site = "ezbtv" if ($isServer && $site eq "btv");
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetTopDir($toolKit, $site, $isAsics);
+# Purpose: Construct the tk platform name
+# RCs    : name
+#------------------------------------------------------------------------------
+sub GetTopDir {
+  my ($tk, $site, $isAsics) = @_;
+
+  my $top = "";
+  if (! $isAsics) {
+    $top = $SERVER_BTV_DIR if ($site eq "btv");
+    $top = $SERVER_EDA_DIR if ($site eq "eda");
+    $top .= "/tk$tk";
+    return $top;
+  }
+
+  my $release = TKutils::GetRelease($tk, ".");
+  $release = "18.1" if ($isAsics);
+  print "Release: $release\n";
+
+
+  my @contents;
+  IcofFile::ReadFileToList($SITE_REF, \@contents, 0);
+  foreach my $line (@contents) {
+    my @tokens = split(/;/, $line);
+    my $mySite = $tokens[1];
+    my $myRelease = $tokens[4];
+    next if (($mySite ne $site) || ($myRelease ne $release));
+
+    $top = $tokens[3];
+    return $top;
+
+  }
+
+  return $top;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetBeta($topDir, $toolKit)
+# Purpose: Determine the highest beta* directory
+# RCs    : beta name
+#------------------------------------------------------------------------------
+sub GetBeta {
+  my ($topDir, $tk) = @_;
+
+  my $beta = "tk$tk.beta";
+  print "BETA: $beta\n" if ($verbose);
+  my $myBeta = "";
+  opendir(my $dh, $topDir) || die;
+  my @subDirs = readdir($dh);
+  foreach my $dir (@subDirs) {
+    print "Dir: $dir\n" if ($verbose);
+    next if ($dir !~ /^$beta/);
+    print "TESTING: $dir\n" if ($verbose);
+    my @tokens = split(/_/, $dir);
+    @tokens = split(/\./, $tokens[0]);
+    my $cBeta = pop @tokens;
+    print "Candid beta: $cBeta\n" if ($verbose);
+    $myBeta = $cBeta if ($cBeta gt $myBeta);
+  }
+  closedir $dh;
+
+  return $myBeta;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetVol($topDir, $beta)
+# Purpose: Determine the volume associated with this beta
+# RCs    : volume
+#------------------------------------------------------------------------------
+sub GetVolume {
+  my ($top, $tk, $beta, $isAsics) = @_;
+
+  my $file = "$topDir/";
+  if ($isAsics) {
+    $file .= "tk$tk.$beta" . "_aix64b";
+  } 
+  else {
+    $file .= ".tk$tk.$beta" . "-64-rs_aix61";
+  }
+  my $link = readlink($file);
+  print "File: $file\n" if ($verbose);
+  print "Link: $link\n" if ($verbose);
+
+  if (! $isAsics) {
+    $file = "$topDir/$link";
+    $link = readlink($file);
+    print "File: $file\n" if ($verbose);
+    print "Link: $link\n" if ($verbose);
+  }
+
+  my @tokens = split("vol", $link);
+  @tokens = split("_", $tokens[1]);
+
+  return "vol" . $tokens[0];
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : GetInstallDir($toolKit, $plat, $isAsics)
+# Purpose: Construct the tk platform name
+# RCs    : name
+#------------------------------------------------------------------------------
+sub GetInstallDir {
+  my ($tk, $plat, $isAsics) = @_;
+
+
+  my $install = "";
+  $install = "ptn/" if ($isAsics);
+
+  $install .= $plat . "/";
+  $install .= "tk$tk";
+
+  return $install;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetTkPlat($toolKit, $plat, $vol)
+# Purpose: Construct the tk platform name
+# RCs    : name
+#------------------------------------------------------------------------------
+sub GetTkPlat {
+  my ($tk, $plat, $vol) = @_;
+
+  my $name = "tk$tk";
+  if ($vol =~ /vol/) {
+    $name .= "_";
+  }
+  else {
+    $name .= ".";
+  }
+  $name .= $vol . "_" . $plat;
+
+  return $name;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateGuide$($topDir, $install, $plat, $beta, $dryRun)
+# Purpose: Update the gna_toolkit_init.tcl file
+# RCs    : 
+#------------------------------------------------------------------------------
+sub UpdateGuide {
+  my ($top, $install, $pli, $plat, $beta, $dryRun) = @_;
+
+  my $file = "$top/$install/$pli/";
+  $file .= "theguide_support/tcl/always_source/gna_toolkit_init.tcl";
+  print "GNA file: $file\n";
+
+  my @contents = ();
+  IcofFile::ReadFileToList($file, \@contents, 0);
+  for (my $i; $i < scalar(@contents); $i++) {
+    next if ($contents[$i] !~ /beta/);
+
+    my $line = $contents[$i];
+    print "Old line: $line\n";
+    $line =~ s/$beta/0/g;
+    print "New line: $line\n";
+    $contents[$i] = $line;
+
+  }
+
+  if (! $dryRun) {
+    print "Updating $file\n";
+    IcofFile::WriteListToFile($file, 0, @contents);
+  }
+  else {
+    print "[DRY RUN] >>>\n";
+    print "\n\n" . join("\n", @contents) . "\n";
+  }
+
+}
+
+

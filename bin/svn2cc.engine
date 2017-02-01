@@ -1,0 +1,530 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: svn2cc.engine
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#    DATE: 04/30/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 09/15/2012 JVI Initial coding.
+# 09/26/2012 EH  Changed getRevisionsTk -l option from shipb to tkb as a 
+#                temporary fix for problem that occurs just after a Tool Kit
+#                is staged from PREVIEW to PRODUCTION.
+# 12/15/2012 JVI support for new extractOnly and importOnly options
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+# Global variables
+# TODO - may want to change dev to prod ...
+my $BIN_DIR      = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $BIN_DIR_PROD = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $SVN          = "/afs/eda/tools/bin/svn";
+my $svnReposUrl  = "https://greenjiffy.fishkill.ibm.com/eda/tk";
+my $logDir       = "";
+my $authorizedId = "svnlib";
+
+# Program variables
+my $appName = "svn2cc.engine";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dryRun          = 0;
+my $toolKit         = "";
+my $component       = "";
+my $dbMode          = ""; # default is prod if empty (GS)
+my $branch          = "";
+my $release         = "";
+my $logFile         = "";
+my $revision        = "";
+my $cmdLineArgs     = "";
+my $dryRunMsg       = "";
+my $extractOnly     = 0;
+my $importOnly      = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc  = $ERROR;
+my $startDir = $ENV{"PWD"};
+my $progRC = "";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleDIE(); };
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Enable logging
+$rc = setupLogging();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to complete $appName initalization", $ERROR);
+}
+
+
+unless ( $importOnly ) {
+
+  # Get latest SVN revision for the current component
+  ($rc, $revision) = GetLatestRevision();
+
+  # Return immediately if there is a bad rc.
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to get SVN revision for $component.", $ERROR);
+  }
+
+  print "Latest $component revision in shipb: $revision\n";
+
+  # Checkout component into an SVN working copy
+  $rc = CreateSvnWC();
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to create SVN working copy", $ERROR);
+  }
+
+}
+
+
+unless ( $extractOnly ) {
+
+  # Import the SVN working copy into clearcase
+  $rc = importToClearcase();
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to import SVN working copy to clearcase", $ERROR);
+  }
+}
+
+
+# Report successful completion
+chomp(my $logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+CleanExit("\n$logDate $appName complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  CleanExit("\n[$appName] Caught an unexpected die - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+  print "$message\n";
+  print "Return code: $rc\n";
+  close (STDOUT);
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  print STDERR <<End_of_Help;
+
+This script executes the SVN2CC process for an individual component. It is
+run to check out a revision of a component and remove any .svn dirs to prepare
+for import to clearcase
+
+SYNTAX:
+  $appName <-t tool_kit> <-c component> [-extractOnly] [-importOnly]
+                                        [-dryrun] [-db dbmode] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+
+WHERE:
+  tool_kit  = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+  component = name of component (e.g., einstimer)
+  -extractOnly (optional) extract from svn. do not import to clearcase.
+  -importOnly  (optional) do not extract from svn. import to clearcase.
+  -dryrun      (optional) Dry run (disables actual checkout of component)
+  -dbmode      (optional) database mode (e.g., prod or dev) default: prod
+  -h           (optional) application help
+  -y           (optional) Verbose (print the invocation of each command)
+
+End_of_Help
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  my $rc = $OK;
+  my $command = "";
+
+  # Capture command line arguments for logging (before GetOptions deletes them)
+  $cmdLineArgs = join(' ', @ARGV);
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'        => \$toolKit,
+              'component|c=s' => \$component,
+              'extractOnly|e' => \$extractOnly,
+              'importOnly|i'  => \$importOnly,
+              'dryrun'        => \$dryRun,
+              'db=s'          => \$dbMode,
+              'y'             => \$verbose,
+              'help|h|?'      => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) must be specified\n";
+    return $ERROR;
+  }
+  if (! $component) {
+    print "ERROR: component (-c) must be specified\n";
+    return $ERROR;
+  }
+
+  if ( $extractOnly && $importOnly ) {
+    print "ERROR: extractOnly and importOnly specified. choose one or the other.\n";
+    return $ERROR;
+  }
+
+  $logDir = "/afs/eda/data/edainfra/logs/$toolKit/svn2cc";
+  #$logDir = "/afs/eda/u/jvi/svn2cc/logs";
+
+  ($rc, $release) = convert_tkVersion ($toolKit, "release");
+  if ($rc != 0) {
+    print "ERROR: Tool Kit $toolKit could not be converted to a release version\n";
+    return $ERROR;
+  }
+
+  $branch = "tk" . $toolKit;
+
+  $dryRunMsg = "[disabled by dryrun option]" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateSvnWC()
+# Purpose: Retrieve source code from SVN toolKit version branch
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateSvnWC {
+
+  my $rc = 0;
+  my @results = ();
+  my $command;
+
+  print "Creating SVN working copy in $branch/$component/$release\n";
+
+  # first attempt to checkout a specific revision of a branch. if that fails,
+  # assume there have been no revisions made to the branch and try to
+  # checkout the branch without a specific revision. if both checkout attempts
+  # fail, log the error
+
+  # Create svn working copy dir if it does not already exist
+  my $wcDir = "/afs/eda/data/edainfra/svn2cc/$branch/$component/$release";
+  #$wcDir = "/afs/eda/u/jvi/svn2cc/svn";
+  if (! -d $wcDir) {
+    mkpath($wcDir)
+  }
+  else {
+    # empty a pre-existing working copy directory
+
+    $command = "rm -rf $wcDir";
+    print "Running $command\n" if ( $verbose );
+    @results = `$command`;
+    $rc = $? >> 8;
+    if ( $rc > 0 ) {
+      print "ERROR: Unable to pre-empty the svn working copy directory $wcDir\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+
+
+  # Construct the command. the --quiet option on the first attempt should help
+  # keep the log managable
+  $command = "$SVN checkout --quiet";
+  $command .= " $svnReposUrl/$component/branches/${branch}\@$revision";
+  $command .= " $wcDir";
+  $command .= " 2>&1";
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -dryrun option was specified
+  unless ( $dryRun ) {
+
+    @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+
+      # checkout of specific revision failed, retry without revision
+
+      $command = "$SVN checkout";
+      $command .= " $svnReposUrl/$component/branches/${branch}";
+      $command .= " $wcDir";
+      $command .= " 2>&1";
+
+      print "Running $command\n" if ( $verbose );
+
+      @results = `$command`;
+      $rc = $? >> 8;
+
+      if ( $rc > 0 ) {
+	print "ERROR: Unable to create working copy in $branch/$component/$release\n";
+	print @results;
+	return $ERROR;
+      }
+    }
+
+    if ($rc == 0) {
+
+      # .svn directories should not end up in clearcase
+
+      $command      = "find $wcDir -type d -name .svn";
+      print "Running $command\n" if ( $verbose );
+      my @result_lines = `$command`;
+      if ( scalar(@result_lines ) > 0) {
+	foreach my $line ( @result_lines ) {
+	  chomp $line;
+	  $command = "rm -rf $line";
+	  print "Running $command\n" if ( $verbose );
+	  @results = `$command`;
+	  $rc = $? >> 8;
+	  if ( $rc > 0 ) {
+	    print "ERROR: Unable to remove .svn directory $line from svn working copy\n";
+	    print @results;
+	    return $ERROR;
+	  }
+	}
+      }
+    }
+  }
+
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetLatestRevision()
+# Purpose: Retrieve latest revision for component in prod
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub GetLatestRevision {
+
+  my $rc = 0;
+
+  # Construct the command
+  #my $command = "$BIN_DIR/getRevisionsTk";
+  my $command = "$BIN_DIR_PROD/getRevisionsTk";
+  $command .= " -c $component";
+  #$command .= " -l shipb";
+  $command .= " -l tkb";
+  $command .= " -latest";
+  $command .= " -db $dbMode" if ($dbMode);
+
+  print "Running $command\n" if ($verbose);
+
+  chomp(my $revision = `$command`);
+  $rc = $? >> 8;
+
+  return ($rc, $revision);
+
+}
+
+
+
+#------------------------------------------------------------------------------
+# Name   : importToClearcase()
+# Purpose: import the checked out component into clearcase
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub importToClearcase {
+
+  my $command = "$BIN_DIR/svn2cc.import";
+  $command .= " -y" if ( $verbose );
+  $command .= " -c $component";
+  $command .= " -t $toolKit";
+  print "Running $command\n" if ( $verbose );
+  print "\n---------- svn2cc.import ----------\n";
+  my @results = `$command`;
+  print @results;
+  print "\n---------- end of svn2cc.import ----------\n";
+  my $rc = $? >> 8;
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : setupLogging()
+# Purpose: Enable logging
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub setupLogging {
+
+  # Create $logDir if it does not already exist
+  mkpath($logDir) if (! -d $logDir);
+
+  # Open log file for script messages
+  chomp(my $logDate = `date +%C%y%m%d\_%H%M%S`);
+  $logFile = "$logDir/" . $appName . "_" . $component . "_" . $logDate . ".log";
+
+  # Open a filehandle for a log file only
+  #open(LOGFILE, ">$logFile") || die "open $logFile failed";
+
+  # Open a filehandle for both stdout and a log file
+  open (STDOUT, "| tee -a $logFile") ||
+      die "ERROR: unable to open log file $logFile  $!\n";
+
+  my $afsId = (getpwuid($<)) [0];
+#  if ($afsId ne "$authorizedId") {
+#    print "\nERROR: Only the $authorizedId AFS ID is permitted to run this script\n";
+#    return $ERROR;
+#  }
+
+  chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  chomp(my $machine = `hostname`);
+  print "\n$dateTime $afsId on $machine invoked $appName $cmdLineArgs\n\n";
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# [08/02/2012: COPIED FROM TkCommon.pm and updated here for a quick fix]
+#
+#   FUNCTION: convert_tkVersion (tkVer, verType)
+#    PURPOSE: Convert tkVersion to other formats based on verType
+#
+#  PARAMS IN: tkVer    = Toolkit version (e.g. 14.1.{n})
+#             verType  = type to convert into:
+#                        "release"   : 14.1
+#                        "selfstore" : 1401
+#                        "underscore": 14_1_{n}
+#
+# PARAMS OUT: rc       = return code
+#             newVer   = converted format
+#
+# RETURN CODES: 0 = TK version was converted
+#               1 = TK version was not converted
+#------------------------------------------------------------------------------
+sub convert_tkVersion {
+
+  my ($tkVer, $verType) = @_;
+
+  my ($maj, $min, $ver);
+  my $newVer;
+  my $rc = $ERROR;      # Default: not converted
+  my $us = "_";
+  my $dot = ".";
+  my $zero = "0";
+
+  # Is tkVer in correct format?
+  #if ($tkVer =~ m/(\d\d).(\d).(\d)/) {
+  if ( ($tkVer =~ m/(\d\d).(\d).(\d)/) || ($tkVer =~ m/(\d\d).(\d).build/) ) {
+
+    # Split into three parts
+    ($maj, $min, $ver) = split (/\./, $tkVer);
+
+    # Reassemble based on verType
+    if ($verType eq "underscore") {
+      $newVer = "$maj$us$min$us$ver";
+      $rc = 0;
+    }
+    elsif ($verType eq "selfstore") {
+      $newVer = "$maj$zero$min";
+      $rc = 0;
+    }
+    elsif ($verType eq "release") {
+      $newVer = "$maj$dot$min";
+      $rc = 0;
+    }
+    return ($rc, $newVer);
+  }
+  else {
+    print "TK version \"$tkVer\" is not in correct format.\n";
+  }
+}

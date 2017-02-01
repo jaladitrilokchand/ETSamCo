@@ -1,0 +1,308 @@
+#!/usr/bin/env tclsh
+
+##################################
+##################################
+# Pre-Commit Hook History
+# yy/mm/dd   author rel  comment
+#=============================================================================================
+# 11/12/06   SET    2.0  No longer block based on presence of "|"
+# 11/08/03   SET    1.3  Remove -t from commit.ready call
+# 11/08/02   SET    1.3  Update commit.ready message text
+# 11/07/29   SET    1.3  Toolkit and Release no longer set within hook
+# 11/06/29   SET    1.2  Redirect STDERR from hook extensions so that RC=0 unless explictly set otherwise
+# 11/06/22   SET    1.2  minor hook extension output message grammar change.
+# 11/06/07   SET    1.2  Bluejiffium operations now use same repos name style as greeniffy
+# 11/06/03   SET    1.2  pass explicit argument entries to extentions
+# 11/05/26   SET    1.2  change to run all functions with a single exit at end
+# 11/05/19   SET    1.2  Support for component specific hook extensions
+# 11/05/11   SET    1.1  Update command dir and log dir for edasvn server
+# 11/05/11   SET    1.1  new location for commands and logs on edasvn
+# 11/05/04   SET    1.1  log file generation
+# 11/04/28   SET    1.1  check if branch in use requires change control
+# 11/03/16   SET    1.1  change to use of commit.ready for cr num verification
+# 11/03/16   SET    1.1  extract change request number from log message and verify it
+# 11/02/23   SET         change logmsg length check to 2048
+
+set hook_rel 2.0
+
+# keep track of when mail is sent, to reduce number of mail sent for one commit
+set no_mail_sent 1
+
+# if switched on (1), this causes a log file to be written
+set write_log 1
+
+# optimistic setting,  reset if any problems detected
+# some problems allow continued processing, but need a non-zero return at the end for message handling
+set no_msg 1
+
+# Passed parms are the Repository name, and the Transaction number
+set REPOS [ lindex $argv 0 ]
+set TXN   [lindex $argv 1 ]
+
+
+set WHEREDAT  [exec hostname]
+switch -- $WHEREDAT {
+        "bluejiffium.btv.ibm.com" {
+          # it's on the bluejiffium SSL certificate
+           set URLPREFIX "bluejiffium.btv.ibm.com"
+           set primary_server 0
+        }
+        default {
+           # Assume on edasvn machine (aka greenjiffy) the SSL certificate for edasvn is for greenjiffy
+           set URLPREFIX "greenjiffy.fishkill.ibm.com"
+           set primary_server 1
+        }
+}
+
+# Where to find the ETree infrastructure code
+set INFRAPATH "/afs/eda/data/edainfra/tools"
+
+# What to prefix log file names in e-mail with, so that they are clickable URLs
+set LOGURLPREFIX "http://w3.eda.ibm.com"
+
+#####
+##  Using last directory in REPOS as Component Name
+##  2nd to last directory will determine whether this is a Prod or Dev commit
+set repos_split [split $REPOS /]
+set COMPONENT [lindex $repos_split end]
+set STAGE     [lindex $repos_split end-1]
+
+####################################################
+### TOOL_KIT and Release determined within apis based on branch name
+###
+#set TOOL_KIT 14.1.0
+#set RELEASE   14.1
+
+
+
+switch -- $STAGE {
+        "eda" {
+          set run_mode PROD
+        }
+        "tk" {
+          set run_mode PROD
+        }
+        default {
+          # Assume DEVelopment mode (safe) for all other cases
+          set run_mode DEV
+        }
+}
+
+#set run_mode PROD
+#set run_mode MIXED
+#set run_mode DEV
+
+switch -- $run_mode {
+        "PROD" {
+           set cmd_path  "$INFRAPATH/enablement/prod/bin"
+           set hookextension_path  "$INFRAPATH/component/prod/hue/$COMPONENT/"
+           set db_mode PROD
+           set logdir "$INFRAPATH/user/logs"
+        }
+        "MIXED" {
+           # Run production level command scripts, but direct updates to DEV db2 database
+           set cmd_path  "$INFRAPATH/enablement/prod/bin"
+           set hookextension_path  "$INFRAPATH/component/dev/hue/$COMPONENT/"
+           set db_mode DEV
+           set logdir "$INFRAPATH/user/logs/dev"
+        }
+        default {
+          # Assume DEVelopment mode (safe) for all other cases
+           set cmd_path  "$INFRAPATH/enablement/dev/bin"
+           set hookextension_path  "$INFRAPATH/component/dev/hue/$COMPONENT/"
+           set db_mode DEV
+           set logdir "$INFRAPATH/user/logs/dev"
+        }
+} ; # end of run_mode switches
+
+if { $primary_server } {
+  # a "G" prefix on the db_mode switch to the DB2 API
+  set db_mode "G$db_mode"
+} else {
+  # On alternate server, a "B" prefix on the db_mode switch to the DB2 API
+  set db_mode "B$db_mode"
+}
+
+
+set file "$logdir/pre_commit_[clock format [clock seconds] -format %Y%m%d.%H%M%S]"
+set logfile $file\_log
+if { $write_log } {
+  if { [catch {open $logfile w 0755} logfile_fid] } {
+      if { [ catch {exec echo "Unable to create/write $logfile" | mail -s "SVN $db_mode Hook Pre-Commit Logfile Error Detected" sturnbul@us.ibm.com } sm_result] } {
+      }
+      set write_log 0
+   }
+}
+
+if { $write_log } {
+  puts $logfile_fid "Pre-commit SVN Hook processing log"
+  puts $logfile_fid "REPOS: $REPOS"
+  puts $logfile_fid "Running on $WHEREDAT"
+  puts $logfile_fid "Run Mode set as $run_mode"
+}
+
+###############
+##
+## Component Specific Early Hook Extension Support
+##
+##
+###############
+if { [ file exists $hookextension_path/pre-commit-early ] } {
+   if { $write_log } {
+     puts $logfile_fid "Early Hook Extension: $hookextension_path/pre-commit-early"
+   }
+   if { [catch {exec $hookextension_path/pre-commit-early $REPOS $TXN 2>@1 }  ext_out] } {
+     puts stderr "Pre-Commit Early Extension for $COMPONENT returned the following message."
+     puts stderr $ext_out
+     if { $write_log } {
+       puts $logfile_fid "Pre-Commit Early Extension for $COMPONENT returned the following message."
+       puts $logfile_fid $ext_out
+     }
+     set no_msg 0
+   }
+}
+###############
+## End of Component Specific Early Hook Extension Support
+###############
+
+puts stderr "Pre-Commit >>>> REPOS = $REPOS <<<<"
+# puts stderr "CHANGED >>>> [ exec svnlook changed  $REPOS ] <<<< "
+
+set logmsg [ exec svnlook log -t $TXN $REPOS ]
+
+## Delimiter to be used in generating the transaction file
+#set delim "|"
+#
+#if { [ string first $delim $logmsg] != -1 } {
+#   puts stderr "Commit Halted - Log string contains the reserved character, \"$delim\"."
+#   puts stderr "Log: $logmsg"
+#   set no_msg 0
+#}
+
+if { [ string length $logmsg] >= 2048 } {
+   puts stderr "Commit Halted - Log string length, [string length $logmsg], exceeds the maximum allowed length of 2048."
+   set no_msg 0
+}
+
+####
+##
+##  extract the branch name (or trunk) from the change list
+##  check if that branch requires the use of change control numbers
+##  expecting each change entry to have a target of
+##      trunk/file
+##      branches/branchname/file
+##      tags/file  <--- we're ignoring these at this time
+##
+####
+      set the_branch ""
+      foreach changerec [split [ exec svnlook changed $REPOS -t $TXN] "\n"] {
+         if { $write_log } {
+           puts $logfile_fid "Change Record : $changerec"
+         }
+         set mod [lindex $changerec 0]
+         set filename [ string trim [string range $changerec [string first " " $changerec] end] ]
+         if { [ string equal -length 6 "trunk/" $filename ] } {
+           set the_branch trunk
+           break
+         } elseif { [ string equal -length 8 "branches/" $filename ] } {
+           set splitname [split $filename "/"]
+           set the_branch [lindex $splitname 1]
+           break
+         }
+      } ; # end of foreach change record loop
+
+      if { $the_branch != "" } {
+
+        if { $write_log } {
+          puts $logfile_fid "Target Branch : $the_branch"
+        }
+
+        # make the api call to check if a commit to this branch of the component requires change numbers
+        set cr_query_cmd  $cmd_path/branchCheck
+        if { [catch {exec $cr_query_cmd  -c $COMPONENT -b $the_branch -db $db_mode }  need_cr] } {
+          # all was not well, send some mail about branch change query fail
+          if { $write_log } {
+            puts $logfile_fid "Output from branchCheck : $need_cr"
+          }
+          if { [ catch {exec echo "$LOGURLPREFIX/$logfile" | mail -s "SVN $db_mode Hook Pre-Commit Error Detected in branchCheck" "sturnbul@us.ibm.com" } sm_result] } {
+          } else {
+            set no_mail_sent 0
+          }
+        } else {
+          if { $need_cr == 1 } {
+            ####
+            ##
+            ##  parse log message to extract change request number
+            ##
+            ####
+            set cr_string [ string trimright [ string range $logmsg 0 [string first ":" $logmsg] ] ":" ]
+
+            if { $cr_string == "" } {
+              # all was not well - no change request string found
+              puts stderr "Pre-Commit: Commit Halted - Change Control required for branch $the_branch of component $COMPONENT"
+              puts stderr "Pre-Commit: Commit Halted - Log Message does not begin with a Change Request Number"
+              set no_msg 0
+              if { $write_log } {
+                puts $logfile_fid "Commit Halted - Change Control required for branch $the_branch of component $COMPONENT"
+              }
+            } else {
+
+              set cr_cmd  $cmd_path/commit.ready
+              if { [catch {exec $cr_cmd -c $COMPONENT -b $the_branch -cq $cr_string -db $db_mode }  db_result] } {
+                # all was not well
+                puts stderr "Pre-Commit: Commit Halted - Change Request Number, $cr_string, not in the Approved state"
+                puts stderr "Returned from commit.ready, $db_result"
+                set no_msg 0
+                if { $write_log } {
+                  puts $logfile_fid "Commit Halted - Change Request Number, $cr_string, not in the Approved state"
+                }
+              }
+            } ; # end of the else for cr string found
+
+          } else {
+           # change number not required for this branch... carry on.
+          }
+        } ; # end of change record need determined else case
+
+      } else {
+        # couldn't figure out what branch to ask about... carry on.
+        if { $write_log } {
+          puts $logfile_fid "Target Branch : Unknown"
+#         if { [ catch {exec echo "$LOGURLPREFIX/$logfile" | mail -s "SVN $db_mode Hook Pre-Commit Unable to Determine Branch" "sturnbul@us.ibm.com" } sm_result] } {
+#         } else {
+#           set no_mail_sent 0
+#         }
+        }
+      }
+
+###############
+##
+## Component Specific Late Hook Extension Support
+##
+##
+###############
+if { [ file exists $hookextension_path/pre-commit-late ] } {
+   if { $write_log } {
+     puts $logfile_fid "Late Hook Extension: $hookextension_path/pre-commit-late"
+   }
+   if { [catch {exec $hookextension_path/pre-commit-late $REPOS $TXN 2>@1 }  ext_out] } {
+     puts stderr "Pre-Commit Late Extension for $COMPONENT returned the following message."
+     puts stderr $ext_out
+     if { $write_log } {
+       puts $logfile_fid "Pre-Commit Late Extension for $COMPONENT returned the following message."
+       puts $logfile_fid $ext_out
+     }
+     set no_msg 0
+   }
+}
+###############
+## End of Component Specific Late Hook Extension Support
+###############
+
+if { $write_log } { close $logfile_fid }
+if { $no_msg } {
+  exit 0
+} else {
+  exit 1
+}
+

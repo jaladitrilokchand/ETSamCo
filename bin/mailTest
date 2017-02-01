@@ -1,0 +1,211 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: mailTest
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/13/2014 GS  Initial coding.
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TKutils;
+use email;
+
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+
+# Program variables
+my $appName = "mailTest";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dryRun          = 0;
+my $toAddress       = "";
+my $fromAddress     = "";
+my $subject         = "";
+my $body            = "";
+my $startDir;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+# Create the email and send it
+my %emailObj;
+email::createobj(\%emailObj, "plain");
+
+email::addto(\%emailObj, $toAddress);
+email::addfrom(\%emailObj, $fromAddress);
+email::addsubject(\%emailObj, $subject);
+email::addbody(\%emailObj, $body);
+
+my $reply = email::sendit(\%emailObj);
+if ($reply == 0) {
+  print "Email sent successfully!\n";
+  $rc = $OK;
+}
+else {
+  print "ERROR: unable to send email ... $reply\n";
+}
+
+
+CleanExit("\nApplication complete", $rc);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+  print "Return code: $rc\n";
+
+  chdir($startDir) if (defined($startDir));
+
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Send an email .. really used to test email.pm
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t to_addr> <-f from_addr> <-b body> <-s subject>
+                  [-dryrun] [-y] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  to_addr   = Email To: address
+  from_addr = Email From: address
+  body      = Email body
+  subject   = Email subject
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('t=s'       => \$toAddress,
+	      'f=s'       => \$fromAddress,
+              's=s'       => \$subject,
+              'b=s'       => \$body,
+	      'dryrun'    => \$dryRun,
+	      'y'         => \$verbose,
+	      'help|h|?'  => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $toAddress) {
+    print "ERROR: To address(-t) is a required parameter\n";
+    return $ERROR;
+  }
+  if (! $fromAddress) {
+    print "ERROR: From address(-d) is a required parameter\n";
+    return $ERROR;
+  }
+  if (! $subject) {
+    print "ERROR: Subject(-s) is a required parameter\n";
+    return $ERROR;
+  }
+  if (! $body) {
+    print "ERROR: Body(-b) is a required parameter\n";
+    return $ERROR;
+  }
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+

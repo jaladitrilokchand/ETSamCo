@@ -1,0 +1,420 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: loadCommittedRev
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 10/21/2011
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 10/21/2011 GS  Initial coding.
+# 09/24/2012 GS  Updated to parse the CR from the commit comments.
+# 11/13/2012 GS  Updated to take an optional CR if a CR is not in the commit
+#                log text.
+# =============================================================================
+
+use warnings;
+use strict;
+use File::stat;
+use Time::localtime;
+use Sys::Hostname;
+use Cwd;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use File::Copy;
+use FindBin qw($RealBin);
+
+use lib "$RealBin/../libperl";
+use SVNutils;
+use IcofFile;
+
+
+#
+# Global variables
+#
+my $BUILD   = "/afs/eda/build/";
+
+
+# Program name
+my $appName = "loadCommittedRev";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $toolKit    = "";
+my $component  = "";
+my $revision   = "";
+my $changeReq  = "DEV";
+my $loadDb     = 0;
+my $showOnly   = 0;
+my $help       = "";
+my $verbose = 0;
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+# Set the location and name of createCodeUpdate application
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $CCU = "$BIN/createCodeUpdate ";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# Define the current directory
+#
+my $startDir = $ENV{"PWD"};
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption();
+                    exit($ERROR);
+                  };
+
+$SIG{'QUIT'} = sub { handleInterruption();
+                     exit($ERROR);
+                   };
+
+$SIG{__DIE__}  = sub { handleDIE();
+                       #exit($ERROR);
+                     };
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    #printSyntax();
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+#
+# Determine SVN URL for working copy
+#
+#my $url = "";
+#exit $ERROR if (SVNutils::GetURL($toolKit, $component, "build", \$url) != $OK);
+
+# navechan: This is not working for customtkb upate. url returned is always pointing to '/trunk'
+# If -t is actual toolkit not .buil, it should look in branches not trunk. Updating it.
+# $url ="https://greenjiffy.fishkill.ibm.com/eda/tk/einstimer/branches/tk14.1.12"; (test)
+my $url ="https://greenjiffy.fishkill.ibm.com/eda/tk/$component/branches/tk$toolKit";
+print "url: $url\n";
+
+#
+# Query SVN for the desired component and revision
+#
+my $command;
+my @results;
+$command = "/afs/eda/tools/bin/svn log -r $revision -v $url";
+print "Command: $command\n";
+@results = `$command`;
+my $rc = $? >> 8;
+if ($rc != 0) {
+  print "ERROR: unable to query SVN for revision data ...\n";
+  print join("\n", @results) . "\n";
+  exit $rc;
+}
+
+
+#
+# Parse commit data from the results
+#
+my $developer = "";
+my $date = "";
+my $time = "";
+my $abstract = "";
+my %changes = ();
+my $changesComplete = 0;
+foreach $entry (@results) {
+  print "$entry";
+  next if ($entry =~ /----/);
+  next if ($entry =~ /^Changed paths:/);
+  chomp $entry;
+  if ($entry =~ /^r\d+/) {
+    print " is 1st line\n" if ($showOnly);
+    @tokens = split(/ \| /, $entry);
+    $developer = $tokens[1];
+    my $timestamp = $tokens[2];
+    $time = GetTime($timestamp);
+    $date = GetDate($timestamp);
+  }
+  elsif ((! $changesComplete) && ($entry eq "")) {
+    print " empty - change list is complete\n" if ($showOnly);
+    $changesComplete = 1;
+  }
+  elsif ((! $changesComplete) && ($entry =~ /^ /)) {
+    print " is a changed file\n" if ($showOnly);
+    @tokens = split(/ +/, $entry);
+    my $action = $tokens[1];
+    my $file = $tokens[2];
+    $file =~ s/^\/// if ($file =~ /^\//);
+    $action = "U" if ($action eq "M");
+    $changes{$file} = $action;
+  }
+  elsif ((! $changesComplete) && ($entry eq "")) {
+    print " is a change list is complete\n" if ($showOnly);
+    $changesComplete = 1;
+  }
+  elsif ($changesComplete) {
+    print " is abstract line\n" if ($showOnly);
+    if ($abstract eq "") {
+      $abstract = $entry;
+    }
+    else {
+      $abstract .= "\n" . $entry;
+    }
+  }
+}
+
+
+# Get the change req from the abstract
+@tokens = split(/:/, $abstract);
+if (($tokens[0] =~ /^MDCMS/) || ($tokens[0] =~ /^PROT/)) {
+  $changeReq = $tokens[0];
+}
+
+
+#
+# Load commit data into the commit file
+#
+my @contents = ();
+push(@contents, "HOOKREL     | 3.0 |\n");
+push(@contents, "REPOS       | https://greenjiffy.fishkill.ibm.com/eda/tk/$component |\n");
+push(@contents, "STAGE       | tk |\n");
+push(@contents, "COMPONENT   | $component |\n");
+push(@contents, "CHANGE_REQ  | $changeReq |\n");
+push(@contents, "REVISION    | $revision |\n");
+push(@contents, "<ABSTRACT>\n");
+push(@contents, "$abstract\n");
+push(@contents, "</ABSTRACT>\n");
+push(@contents, "USER        | $developer |\n");
+push(@contents, "COMMIT_DATE | $date |\n");
+push(@contents, "COMMIT_TIME | $time |\n");
+foreach $entry (sort(keys(%changes))) {
+  push(@contents, "CHANGED     | $changes{$entry} | $entry |\n");
+}
+
+if ($showOnly) {
+  print join("", @contents) . "\n";
+  exit $OK;
+}
+
+
+# Write the data file if asked
+my $ddate = `date +%Y%m%d`;
+chomp $ddate;
+
+my $ttime = `date +%H%M%S`;
+chomp $ttime;
+
+my $outFile = "/afs/eda/data/edainfra/tools/user/logs/post_commit_loadCommittedRev-" . $$ . "_" . $ddate . "." . $ttime;
+open OUT, ">$outFile" or die $!;
+print OUT join("", @contents) . "\n";
+close OUT;
+
+print "Results written to ...\n";
+print "  $outFile\n";
+print "\n";
+
+
+# Execute createCodeUpdate if asked
+if (! $loadDb) {
+  print "WARNING - ETREE DB not loaded ...\n";
+  print "Please run this command to load results into ETREE DB ...\n";
+  print "  $CCU -f $outFile\n";
+}
+else {
+  $command = "$CCU -f $outFile";
+  @results = `$command`;
+  $rc = $? >> 8;
+  if ($rc != 0) {
+    print "ERROR trying to load ETREE DB ...\n";
+  }
+  print join("\n", @results) . "\n";
+}
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}  # End of handleInterruption
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}  # End of handleDIE
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Reads the commit data from SVN for the specified TK, component
+and revision.  Then loads that data into the ETREE database.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> <-c -c component> <-r revision> [-cr change_req] 
+           [-x] [-s] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  -t  Tool Kit [14.1.0, 14.1.1 ...] to load data for
+  -c  Component to look up data for
+  -r  Revision to look up commited data for
+  -cr Change request to use if not in commit log
+  -x  execute the command to load data into ETREE database
+  -s  show the resulting data file only - DO NOT WRITE FILE 
+  -h  Application help (optional)
+  -y  Verbose mode (optional)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}       # End of printHelp
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('td|t=s'         => \$toolKit,
+              'comp|c=s'       => \$component,
+              'rev|r=s'        => \$revision,
+              'cr=s'           => \$changeReq,
+              'load|x'         => \$loadDb,
+              'show|s'         => \$showOnly,
+              'verbose|y'      => \$verbose,
+              'help|h|?'       => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify required parameters
+  my $msg = "";
+  if (! $toolKit) {
+    $msg = "ERROR: Tool Kit (-t) is a required parameter\n";
+  }
+  if (! $component) {
+    $msg = "ERROR: Component (-c) is a required parameter\n";
+  }
+  if (! $revision) {
+    $msg = "ERROR: Revision (-r) is a required parameter\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : getDate($timestamp)
+# Purpose: Parses the date from the timestamp
+# RCs    : none
+#------------------------------------------------------------------------------
+sub GetDate {
+
+  my ($timestamp) = @_;
+
+  my (@parts) = split(/ +/, $timestamp);
+
+  return $parts[0];
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : getTime($timestamp)
+# Purpose: Parses the time from the timestamp
+# RCs    : none
+#------------------------------------------------------------------------------
+sub GetTime {
+
+  my ($timestamp) = @_;
+
+  my (@parts) = split(/ +/, $timestamp);
+
+  return $parts[1];
+
+}

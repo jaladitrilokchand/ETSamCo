@@ -1,0 +1,329 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: chgIncludeLinks
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 10/19/2012 EJH  Initial coding
+# 03/22/2013 GFS  Updated to use TKutils.pm.  Updated to support a reference
+#                 location that defaults to prod.
+# =============================================================================
+use warnings;
+use strict;
+use File::Basename;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TKutils;
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+
+# Program variables
+my $appName = "chgIncludeLinks";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help         = "";
+my $verbose      = 0;
+my $toolKit      = "";
+my $dbMode       = "";
+my $component    = "";
+my $startDir     = $ENV{"PWD"};
+my $debug        = 0;
+my $refObject    = "";
+my $tgtDir       = "";
+my $refLocation  = "prod";
+my $release;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+print "Running in DEBUG mode ...\n" if ($debug);
+
+# Define component directories containing symlinks to be processed
+my (@tgtDir) = ("include", "private");
+foreach $tgtDir (@tgtDir) {
+
+  print "Processing $tgtDir directory\n" if ($verbose);
+
+  # Create list of symlinks in tk14.1.x/<component>/14.1/<target dir> directory
+  my @links = GetLinkList($toolKit, $component, $tgtDir);
+
+  # For each symlink - transform symlink to referent file if
+  # if the object with the same name in refLocation is a file.
+  my $link = "";
+  foreach $link (@links) {
+
+    # Need to cover the case where object doesn't exist in tk14.1.x repository.
+    # If the symlink is broken, there is no point in looking in refLocation.
+    if (!-e $link) {
+      print "WARNING: symlink $link is broken\n";
+      next;
+    }
+
+    # Get the path to the object with the same name in refLocation
+    $refObject = $link;
+    $refObject =~ s/tk$toolKit/$refLocation/;
+    print " refObject: $refObject\n" if ($verbose);
+
+    # Need to cover case where object does not exist in refLocation
+    if (!-e $refObject) {
+      print "WARNING: $refObject does not exist\n";
+      next;
+    }
+
+    # Only take action when the object is a file in refLocation.
+    # Ignore symlinks and directories in refLocation.
+    if ((-f $refObject) && (!-l $refObject)) {
+      ReplaceLink($toolKit, $component, $link);
+    }
+  }
+}
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+
+  my ($message, $rc) = @_;
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script compares symlinks found in the include and private directories at
+the top level directory of the current component to the object of the same
+name and relative path in the refLocation area.
+
+If the object in refLocation is a file then the script converts the
+symlink in tk14.1.x location to the file that the symlink refers to.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-ref refLocation]
+                  [-g] [-y] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit    = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+  component   = Process this component only
+  refLocation = Reference location [default = prod] (shipb, customtkb/tk14.1.x)
+  -g          = (optional) Run script in debug mode
+  -y          = (optional) Run script in verbose mode
+  -h            (optional) application help
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'     => \$toolKit,
+	      'db=s'       => \$dbMode,
+	      'comp|c=s'   => \$component,
+	      'ref=s'      => \$refLocation,
+	      'debug|g'    => \$debug,
+	      'y'          => \$verbose,
+	      'help|h|?'   => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) is a required parameter\n";
+    return $ERROR;
+  }
+  $release = TKutils::GetRelease($toolKit, ".");
+
+  # Verify referrence location exists
+  my $path = "/afs/eda/$refLocation/$component/$release";
+  if (! -e $path) {
+    print "ERROR: reference directory does not exist [$path]";
+    return $ERROR;
+  }
+
+  # Verify target location exists
+  $path = "/afs/eda/tk$toolKit/$component/$release";
+  if (! -e $path) {
+    print "ERROR: target directory does not exist [$path]";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetLinkList($toolKit, $component, $subDirectory)
+# Purpose: Find symlinks for this component's sub directory
+# RCs    : List of symlinks
+#------------------------------------------------------------------------------
+sub GetLinkList {
+
+  my ($toolKit, $comp, $tgtDir) = @_;
+  my @files = ();
+
+  # Validate the directory exists
+  my $path = "/afs/eda/tk$toolKit/$comp/$release/$tgtDir";
+  if (! -e $path) {
+    print "Target directory $path does not exist. Skipping.";
+    return @files;
+  }
+  print " Looking for symlinks in $path\n" if ($verbose);
+
+  # Construct the command
+  my $command = "find $path";
+  $command .= " -type l";
+  $command .= " -exec ls -l {} \\;";
+
+  # Run the command
+  print "  DEBUG ... $command\n" if ($debug);
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $debug, $verbose);  
+
+  @files = ();
+  my $file;
+  foreach $file (@results) {
+    my @tokens = split(/ +/, $file);
+    push(@files, $tokens[8]);
+  }
+
+  return @files;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ReplaceLink($toolKit,$component, $file)
+# Purpose: Replace a symlink with the file it refers to
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub ReplaceLink {
+
+  my ($tk, $comp, $file) = @_;
+
+  print " Replacing symlink $file\n" if ($verbose);
+
+  # Get the link's source
+  my $srcFile = readlink($file);
+  print " symlink referent file:  $file -> $srcFile\n" if ($verbose);
+
+  my $test = dirname($file) . "/" . $srcFile;
+  my $symlinkDir = dirname($file);
+  print " symlinkDir: $symlinkDir\n" if ($verbose);
+  if (! -e $test) {
+    print "ERROR - source doesn't exist!\n";
+    print "      - $test\n";
+    exit 8;
+  }
+
+  # Remove the existing link
+  print "  Removing symlink $file\n";
+  unlink($file) if (! $debug);
+
+  # Copy $srcFile to tk14.1.x target directory
+  print "  DEBUG ... copying $symlinkDir/$srcFile to $file\n" if ($debug);
+  my $cmd = "cp -p $symlinkDir/$srcFile $file";
+  my @results;
+  my $rc = TKutils::RunCommand($cmd, \@results, $debug, $verbose);
+
+  return $rc;
+
+}
+
+
+

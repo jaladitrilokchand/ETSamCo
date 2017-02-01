@@ -1,0 +1,19 @@
+#!/usr/bin/ksh
+
+ENABLEDIR=/afs/eda.fishkill.ibm.com/data/edainfra/tools/enablement/dev
+
+echo "linking start-commit to dev"
+rm start-commit
+ln -s $ENABLEDIR/bin/start-commit start-commit
+
+echo "linking pre-commit to dev"
+rm pre-commit
+ln -s $ENABLEDIR/bin/pre-commit pre-commit
+
+echo "linking post-commit to dev"
+rm post-commit
+ln -s $ENABLEDIR/bin/post-commit post-commit
+
+echo "linking pre-revprop-change to dev"
+rm pre-revprop-change
+ln -s $ENABLEDIR/bin/pre-revprop-change pre-revprop-change

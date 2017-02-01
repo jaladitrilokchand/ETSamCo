@@ -1,0 +1,388 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: chgProdLinks
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 05/08/2012 GS  Initial coding.
+# 01/31/2013 GS  Updated find command to look for .* files too.
+# 03/28/2013 GS  Updated to support reference locations other than prod and
+#                other TK releases.
+# =============================================================================
+use warnings;
+use strict;
+use File::Basename;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TKutils;
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+
+# Program variables
+my $appName = "chgProdLinks";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help           = "";
+my $verbose        = 0;
+my $toolKit        = "";
+my $release        = "";
+my $dbMode         = ""; # default is prod if empty
+my $component      = "";
+my $location       = "";
+my $startDir       = $ENV{"PWD"};
+my $debug          = 0;
+my @linksInSvn     = ();
+my %allSource      = ();
+my $refLocation    = "prod";
+my @VALID_LOCS     = ("shipb", "tkb");
+my @VALID_REF_LOCS = ("prod", "shipb", "tkb");
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleDIE(); };
+
+# Read the command line arguments
+if (processArgs() == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+$release = TKutils::GetRelease($toolKit, ".");
+print "Running in DEBUG mode ...\n" if ($debug);
+
+# Create list of components to process
+my @components = TKutils::GetComponents($toolKit, $component, "");
+if (scalar(@components) < 1) {
+  CleanExit("No components to process ... exiting\n", $ERROR);
+}
+
+# Process each component
+foreach $component (@components) {
+
+  print "\nProcessing ... $component\n";
+  next if ($component =~ /^etree/);
+
+  # Create a list of sym links pointing to ../$refLocation/tools/$release
+  my @links = SetLinks($release, $location, $component, $refLocation);
+
+  # Foreach link - remove existing link and create new relative link
+  my $link = "";
+  foreach $link (@links) {
+    UpdateLink($toolKit, $location, $component, $link, $refLocation);
+  }
+
+}
+
+#print "\nAll source files\n-----------------------\n";
+#print join("\n", (sort(keys(%allSource)))), "\n";
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  CleanExit("\n[$appName] Caught an unexpected die - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  if (scalar(@linksInSvn)) {
+    print "\nFound $refLocation links under SVN control ...\n";
+    print join("\n", @linksInSvn) , "\n";;
+  }
+  else {
+    print "\nNo $refLocation links are under SVN control ...\n";
+  }
+
+  print "$message\n";
+  print "Return code: $rc\n";
+
+  chdir($startDir) if (defined($startDir));
+
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script finds symlinks pointing to prod/tools/14.1 and converts them to
+point to ../tools/14.1. This script works for releases other than 14.1.
+
+Use -r to specify a location other than prod (ie, shipb/tools/14.1)
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> <-l location> [-c component] [-r refLocation]
+             [-g] [-y] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit    = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+  location    = Location to run scrit against (tkb | shipb | tkx.y.x)
+  component   = (optional) Process this component only
+  refLocation = Location other than prod (shibp|tkb|customtkb|xtinct)
+  -g          = (optional) Run script in debug mode
+  -y          = (optional) Run script in verbose mode
+  -h            (optional) application help
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'     => \$toolKit,
+	      'db=s'       => \$dbMode,
+	      'comp|c=s'   => \$component,
+	      'loc|l=s'    => \$location,
+	      'ref|r=s'    => \$refLocation,
+	      'debug|g'    => \$debug,
+	      'y'          => \$verbose,
+	      'help|h|?'   => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) is a required parameter\n";
+    return $ERROR;
+  }
+  if (! $location) {
+    print "ERROR: Location (-l) is a required parameter.\n";
+    return $ERROR;
+  }
+
+  # Validate the location (valid loc or starts with tk1*)
+  @tokens = split(/\//, $location);
+  my $loc = $tokens[0];
+  if ((! grep(/^$loc$/, @VALID_LOCS)) && ($loc !~ /^tk1/)) {
+    print "ERROR: Location must be " . join("|", @VALID_LOCS) .
+      " or tkx.y.z (not $location)\n";
+    return $ERROR;
+  }
+
+  # Validate the reference location
+  @tokens = split(/\//, $refLocation);
+  $loc = $tokens[0];
+  if (! grep(/^$loc$/, @VALID_REF_LOCS) && ($loc !~ /^tk/)) {
+    print "ERROR: Reference Location must be " . join("|", @VALID_REF_LOCS) .
+      " or tkx.y.z (not $refLocation)\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetLinks($release, $location, $component, $refLocation)
+# Purpose: Find sym links to $refLocation for this component/locaton
+# RCs    : List of sym link files
+#------------------------------------------------------------------------------
+sub SetLinks {
+
+  my ($rel, $loc, $comp, $ref) = @_;
+
+  print " Querying for sym links ...\n" if ($verbose);
+
+  # Construct the command
+  my $path = "/afs/eda/$loc/$comp/$rel";
+  my $command = "find $path/*";
+  $command .= " -type l";
+  $command .= " -exec ls -l {} \\;";
+  $command .= " | grep \"/$ref/tools/$rel\"";
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  my @files = ();
+  my $file;
+  foreach $file (@results) {
+    my @tokens = split(/ +/, $file);
+    push(@files, $tokens[8]);
+  }
+
+  return @files
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateLink($toolKit, $location, $component, $file, $refLocation)
+# Purpose: Updates the symlink pointing to $ref
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub UpdateLink {
+
+  my ($tk, $loc, $comp, $file, $ref) = @_;
+
+  print "\n\n Updating sym link ($file) ...\n" if ($verbose);
+
+  # Determine the SVN status (ie is file in SVN)
+  my $status = SvnStatus($file);
+  if (($status ne "?") && ($status ne "I")) {
+    push(@linksInSvn, $file);
+  }
+
+  # Get the links source
+  my $srcFile = readlink($file);
+  print "  SVN status: $status\n";
+  print "  Old link: $file -> $srcFile\n";
+  $allSource{$srcFile} = $srcFile;
+
+  # Update the target link to not point to $refLocation
+  if ($srcFile =~ /\.\.\/$ref/) {
+    $srcFile =~ s/\/\.\.\/$ref//;
+  }
+  else {
+    my @tokens = split(/\//, $file);
+    my $upCount = scalar(@tokens) - 5;
+    @tokens = split(/\//, $srcFile);
+    $srcFile = "..";
+    for (my $i = 1; $i < $upCount; $i++) {
+      $srcFile .= "/..";
+    }
+    for (my $i = 4; $i < scalar(@tokens); $i++) {
+      $srcFile .= "/". $tokens[$i];
+    }
+  }
+  print "  New link: $file -> $srcFile\n";
+
+  my $test = dirname($file) . "/" . $srcFile;
+  if (! -e $test) {
+    print "ERROR - source doesn't exist!\n";
+    print "      - $test\n";
+    exit 8;
+  }
+
+  # Remove the existing link
+  print "  Removing: $file\n" if ($verbose);
+  unlink($file) if (! $debug);
+
+  # Create the new link
+  print "  Creating link: $file -> $srcFile\n" if ($verbose);
+  symlink($srcFile, $file) if (! $debug);
+
+  return %allSource;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SvnStatus($file)
+# Purpose: Determines the SVN status for a given file
+# RCs    : svn status
+#------------------------------------------------------------------------------
+sub SvnStatus {
+
+  my ($file) = @_;
+
+  my $command = "/afs/eda/tools/bin/svn";
+  $command .= " status $file";
+
+  my $status = "?";
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, 0);
+
+  if ((scalar(@results) > 0) && ($results[0] !~ /^svn:/)) {
+    my @tokens = split(/ +/, $results[0]);
+    $status = $tokens[0];
+  }
+
+  return $status;
+
+}
+
+

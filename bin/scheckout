@@ -1,0 +1,82 @@
+#!/usr/bin/env tclsh
+#====================================================================================
+#
+# Selective SVN checkout used in the EDA Tool Kit All Groups To Ship (AGTS) process
+#
+# Usage: scheckout $COMPONENT $SVN_REPOS $OUTPUT_DIRECTORY
+#
+# Return:  0 on success
+#         >0 error
+#
+#- CHANGE LOG -----------------------------------------------------------------------
+# 12/08/2011 TSG  Initial coding
+# 12/13/2011 GFS  Updated to set return code to non-zero if commands failed
+# 12/14/2011 GFS  Updated sexec so command results are not displayed if successful
+# 02/05/2013 GFS  Updated to support svn externals in alacutils.
+#====================================================================================
+
+  proc sexec { cmd } {
+    set cmd [ concat " " exec " " $cmd " " ]
+    set rc [ catch { set out [ eval $cmd ] } error ]
+    if { $rc } {
+      puts $error
+    }
+    return $rc
+  }
+
+
+  set COMPONENT [ lindex $argv 0 ]
+  set REPOS     [ lindex $argv 1 ]
+  set OUT       [ lindex $argv 2 ]
+  set EXCDIR    /afs/eda/data/edainfra/prod_excludes
+  set rc        0
+  set SVN_FLAG "--force"
+  if { [ string compare $COMPONENT "alacutils" ] == 0 } {
+    set SVN_FLAG "--force --ignore-externals"
+  }
+
+  set GJ https://greenjiffy.fishkill.ibm.com/eda/tk
+  set SVN /afs/eda/tools/bin/svn
+
+  ### read dirs to be excluded if any ###
+  set normal 1
+  if { [ file exists $EXCDIR/$COMPONENT ]  } {
+    set fn [ open $EXCDIR/$COMPONENT  r ]
+    set excs [ read $fn ]
+    set excs [ lrange [ split $excs \n ] 0 end-1 ]
+    set normal 0
+  } else {
+    set excs {}
+  }
+
+  if { ! $normal } {
+    ### get files directly under treetop
+    #puts " ***** CHECKING OUT FILES UNDER TREETOP"
+    set rc [ sexec "$SVN checkout $SVN_FLAG $REPOS $OUT --depth=files" ]
+    if { $rc } {
+      exit $rc
+    }
+
+    ### selectively checkout dirs
+    #puts " ***** EXCLUDED DIRS UNDER TREETOP = $excs "
+    set lines [ sexec "$SVN ls $REPOS" ]
+    foreach line $lines {
+      if { [ string range $line end end ] == "/" } {
+        set line [ string range $line 0 end-1 ]
+        if { [ lsearch -exact $excs $line ] == -1 } {
+          #puts " ***** CHECKING OUT DIRECTORY $line "
+          set rc [ sexec "$SVN update $SVN_FLAG $OUT/$line" ]
+          if { $rc } {
+            exit $rc
+          }
+        }
+      }
+    }
+  } else {
+    set rc [ sexec "$SVN checkout $SVN_FLAG $REPOS $OUT" ]
+    if { $rc } {
+      exit $rc
+    }
+  }
+
+  exit $rc

@@ -1,0 +1,334 @@
+#!/usr/bin/env perl
+use warnings;
+#use strict;
+#=============================================================================
+#    FILE: doTK_lockmgr
+#
+# CREATOR: Art Magnan
+#    DEPT: AZYX
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# Lock/unlock the component tree access in EDA PROD for all components defined
+# for a specific Toolkit version and having a particular set of attributes.
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 12/13/2011 AM  Initial version
+#=============================================================================
+#=============================================================================
+#			       FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub help {
+        print "\nScript to lock/unlock the component/release treetop access in EDA PROD for all components defined for a specific Toolkit version and having a particular set of component attributes.\n";
+        print "\nUsage:  doTK_lockmgr -t <Toolkit version> -a <component attrib types> <-l|-u> [-d] [-g] [-h]\n";
+        print "\nInput parameters:\n";
+				print "  -t <EDA Toolkit release version> e.g. 14.1.{n}\n";
+				print "  -a <component definition attributes>   e.g. DELIVERED BUILD_SUPPORT TEST_SUPPORT\n";
+        print "  -d [Development Mode ON]\n";
+				print "  -g [Test mode ON - will see what would execute.]\n";
+				print "  -h This help\n";
+				print "  -l lock the component/tree(s)\n";
+				print "  -u unlock the component/tree(s)\n";
+        print "\nNOTES:\n";
+        exit 1;
+} # end help
+
+sub process_cmd_line {
+	#
+  # ---------------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+  # Parms defined:  -t <Toolkit version;  e.g. 14.1.0>
+  #                 -a <component definition attributes>
+  #                 -d [Development Mode ON - using code from DEV area]
+  #                 -g [Test mode ON - will see what would execute.]
+  #                 -h [help]
+	#                 -l Lock the component/tree(s)
+	#                 -u Unlock the component/tree(s)
+  # ---------------------------------------------------------------------
+	getopts('a:dghlt:u');
+	
+  $tkVersion    = "$opt_t";
+  $compAttrList = "$opt_a";
+
+  # Set DEVMODE
+	if ( ${opt_d} ) {
+		$devMode = 1;
+	}
+	else {
+		$devMode = 0;
+	}
+
+	# Set DEBUG mode
+	if ( ${opt_g} ) {
+		$DEBUG = 1;
+	}
+	else {
+		$DEBUG = 0;
+	}
+
+	# Set LOCKING mode
+	if ($opt_l) {
+		$lockMode = "lock";
+    $lockState = "Locked";
+		$lockFlg = "-l";
+	}
+	if ($opt_u) {
+		$lockMode = "unlock";
+    $lockState = "Unlocked";
+		$lockFlg = "-u";
+	}
+	
+	# Display help if requested
+	if ( ${opt_h} ) { help(); }
+
+} # end process_cmd_line
+
+sub check_userID {
+	#
+	# AFS ID svnlib must be used to execute this script
+	#
+	my ($userID, $debug, @authID) = @_;
+  my ($found) = 1;
+	
+	foreach $id (@authID) {
+		if ($debug) {
+			print "userID: \"$userID\"  authID: \"$id\"\n";
+		}
+		if ( $userID eq $id ) {
+			$found = 0;
+			last;
+		}
+	}
+  return ($found);
+} # end check_userID
+
+sub create_timestamp {
+	#
+	# Get date and time info from system
+	#
+	
+	@months = qw(jan feb mar apr may jun jul aug sep oct nov dec);
+	
+  ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+	
+  $year = $year + 1900;
+	
+	$month = $mon + 1;
+  $monthName = $months[$mon];
+	$monthDay = $monthName . $mday;
+	
+  $date_now = $month . "/" . $mday . "/" . $year;
+	
+  if ($min < 10) {
+    $newmin = "0" . $min;
+  }
+  else {
+    $newmin = $min;
+  }
+  $time_now = $hour . ":" . $newmin;	
+} # end create_timestamp
+
+sub log_execution {
+	#
+	# Define the logging, execution timestamps
+	#
+	my ($when, $compType) = @_;
+	my $tkVer = "";
+	
+	if ($when eq "start") {
+
+    # Convert tkVersion for use in log file name
+    $tkVer = TkCommon::convert_tkVersion ($tkVersion, "selfstore");
+
+		# Set up the log file
+		create_timestamp;
+		$datetime = "$date_now at $time_now";
+
+		$logTop  = "/afs/eda/u/svnlib/logs/${monthName}";
+		if (! -d $logTop) {
+			`mkdir -p $logTop`;
+		}
+		$logFile = "$logTop/${monthDay}.${compType}.${tkVer}.${scriptName}";
+		unless (open(STDOUT, "| tee -ai $logFile")) {
+			die ("Output file $logFile cannot be opened.\n");
+		}
+		
+		# Log the start time
+		print ("#\n");
+		print ("# $fullScrName started at $datetime by $userID\n");
+		print ("#\n");
+		
+	} elsif ($when eq "end") {
+
+		create_timestamp;
+		$datetime = "$date_now at $time_now";
+		
+		# Log the end time
+		print ("#\n");
+		print ("# $fullScrName ended at $datetime by $userID\n");
+		print ("#\n");
+		
+	} else {
+		print "ERROR: log_execution: Can't figure out when I need to log!\n";
+	}
+} # end log_execution
+
+#============================================================================================
+#					MAIN ROUTINE
+#============================================================================================
+use Env;
+use Getopt::Std;
+use File::Path qw(mkpath);
+use Cwd;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+$codePath = "/afs/eda/data";
+
+our $scriptName = "doTK_lockmgr";
+our $fullScrName = $0;
+our $rc = 0;
+our $maxRC = 0;
+our $dbType="";
+
+our $opt_t = "";
+our $opt_a = "";
+
+my $compList;
+my $compAttr;
+my $compCnt = 0;
+my $badCnt = 0;
+my $comp;
+my $compRel;
+
+# Only AFS ID svnlib should run this script!!!
+our $rlseID = "svnlib";
+our $userID = $LOGNAME;
+my (@authID) = ($rlseID);
+$rc = check_userID ($userID, 0, @authID);
+if ($rc) {
+  print "\nERROR: You MUST run this script as AFS ID \"@authID\" to manage the locks!!!\n\n";
+  exit 8;
+} else {
+	print "\nINFO: Running script using authorized AFS ID.\n\n";
+}
+
+# Process parms from command line
+process_cmd_line;
+
+# Make sure the required parameters are provided
+if ($tkVersion eq "") {
+  print "\nERROR: Missing Toolkit version.\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+# Ensure tkVersion is in correct format
+$rc = TkCommon::check_tkVersion ($tkVersion);
+if ($rc != 0) {
+  print "\nERROR: Toolkit version specified in an invalid format!\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+if ($compAttrList eq "") {
+	$compDef = "DELIVERED,BUILD_SUPPORT,TEST_SUPPORT";
+  print "INFO: No component group attribute specified.\n";
+  print "Using default component attribute definition of \"$compDef\".\n\n";
+}
+else {
+	# Process the component attribute list
+  my $onetime = 1;
+	print "\nComponent attributes specified:\n";
+	foreach $compAttr (sort split(/ /, $compAttrList)) {
+		print "$compAttr\n";
+		if ($onetime) {
+			$compDef = $compAttr;
+			$onetime = 0;
+		} else {
+			$compDef = $compDef . "," . $compAttr;
+		}
+	}
+}
+
+# Ensure that the -l and -u switches are mutually exclusinve
+if (!$opt_l && !$opt_u) {
+	print "ERROR: You must specify either the lock (-l) or the unlock (-u) switch...quitting!\n\n";
+  exit 4;
+}
+if ($opt_l && $opt_u) {
+	print "ERROR: The -l and -u switches are mutually exclusive, you must use one or the other... quitting!\n\n"; 
+	exit 4;
+}
+
+#
+# Set up program parameters
+#
+if ($devMode) {
+	our $scriptPath = "${codePath}/edainfra/tools/enablement/dev/bin";
+} else {
+	our $scriptPath = "${codePath}/edainfra/tools/enablement/prod/bin";
+}
+
+# Start the logging
+log_execution ("start", "full_TK");
+
+print "Using component definition: \"$compDef\"\n";
+
+#
+# Get the TK version-specific component definition
+#
+my $cmdbCmd = "${scriptPath}/getComponents -t $tkVersion -ct $compDef -q $dbType";
+$compList = `$cmdbCmd`;
+chomp ($compList);
+$rc = $? >> 8;
+
+if ($rc) {
+	print "ERROR: Return code $rc from $cmdbCmd.\n";
+	exit $rc;
+} else {
+	print " \n";
+	print "Component list created. rc=$rc\n";
+	if ($DEBUG) {
+		print "Results:\n";
+		$compCnt = 0;
+		foreach $comp (sort split(/,/, $compList)) {
+			$compCnt++;
+			print "$compCnt) $comp\n";	
+		}
+	}
+}
+
+#
+# Process the lock/unlock command against the list of defined components
+#
+$compCnt = 0;
+print "*** Running \"$lockMode\" operation for all components defined for TK $tkVersion:\n\n";
+foreach $comp (sort split(/,/, $compList)) {
+	$compCnt++;
+	print "$compCnt) $comp\n";
+
+	$validCmd = "${scriptPath}/prodLockMgr -t $tkVersion -c $comp $lockFlg ";
+	
+	# Execute the command
+	TkCommon::runcmd("$validCmd", "$DEBUG");
+	$rc = $? >> 8;
+	
+	if ($rc) {
+		$badCnt++;
+		print "\n[ERROR]: Command, \"$validCmd\", did NOT execute successfully. rc=$rc\n";
+	}
+	else {
+		if ($DEBUG) {
+			print "[DEBUG ON]: Would have $lockState $comp/14.1 directory at EDA PROD (/afs/eda/prod).\n\n";
+		}
+		else {
+			print "$lockState $comp/14.1 directory at EDA PROD (/afs/eda/prod).\n\n";
+		}
+	}
+}
+print "\nThe script, $scriptName, finished with $badCnt out of $compCnt components having errors.\n";
+
+log_execution ("end", "");
+print "\nLOG file located at $logFile.\n\n";
+close (STDOUT);

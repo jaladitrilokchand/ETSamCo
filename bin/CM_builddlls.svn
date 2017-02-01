@@ -1,0 +1,238 @@
+#!/bin/ksh
+# Written on 6/19/98 (Preetha Natesan)
+
+# Modification Log
+#
+# 06/17/10  AM  Copied CM_builddlls.14 to inititialize CM_builddlls.svn
+#               Added -d parm (DEVMODE) to:
+#                  1) Run builds in test area (/afs/eda/build/svn_test/{component}/{release}
+#                     Set by BUILDDIR variable.
+#                  2) Set DEVMODE to always TRUE until code is tested and rolled out to
+#                     production
+#              Force builds into EDA BUILD rather than EDA DEV
+#
+# 07/06/10 AM  Removed DEVMODE always TRUE statement.
+#              Removed LEVEL variable since always is value of "build".
+# 07/27/10 AM  Put BUILDLOG under DEVMODE control and appends "devmode" suffix when in DEVMODE.
+# 08/30/12 GS  Added support for gcov builds and added some debug statements to ensure
+#              the dll sym links are created.
+# 01/10/13 GS  Updated to support xtinct TKs.
+#
+
+PATH=/bin:/etc
+PATH=${PATH}:/afs/eda/tools/gnu/bin
+PATH=${PATH}:/usr/bin:/usr/ccs/bin
+PATH=${PATH}:/afs/eda.fishkill.ibm.com/@sys/prod/bin:/afs/eda.fishkill.ibm.com/@sys/contrib/bin
+PATH=${PATH}:/usr/afsws/bin:/usr/afsws/etc:.
+
+#set -n
+#set -x
+
+help()
+{
+cat << \EOF
+# Usage  CM_builddlls.svn -r <release> -p <platform> [-l level] [-d]
+#         -r <release>  release (i.e. einstimer.0701) 
+#         -p <platform> *rs_aix43|*hp_ux1??|*sun4x_5?|i386_linux2? platforms
+#         -l LEVEL ( default = build ) [ build|shipb|tkb|xtinct/tk14.1.x ]
+#         -d puts in DEVMODE
+# Function: Builds the dlls.
+EOF
+}
+
+goodbye()
+{
+ [[ -n $ENTIRE ]] && print "\n$SHELL_NAME: $RELEASE ending at $(date +"%a %D %T") on $HOSTNAME" >> $BUILDLOG >> $LOGFILE
+ rc="$1"
+ [[ -n $2 ]] && print "$2"
+ exit "${rc:-0}"
+}
+
+LEVEL="build"
+while getopts :dhr:p:l: OPTION
+ do
+  case "$OPTION" in
+    d) DEVMODE=TRUE;;
+    h) help; goodbye 1;;
+    r) RELEASE=$OPTARG;;
+    l) LEVEL=$OPTARG;;
+    p) PLATFORM=$OPTARG;;
+    :) help; goodbye 1 "\n*** Option -$OPTARG requires a paramter.";;
+    ?) help; goodbye 1 "\n*** Option -$OPTARG is not recognized.";;
+ esac
+done
+shift $(($OPTIND - 1))
+
+#get a token so the script can run
+#
+# on the sun when 'rsh'ing USER is set but LOGNAME is not (hp_ux102 is opposite)
+#
+  [[ -z $LOGNAME && -n $USER ]] && LOGNAME=$USER
+  [[ -z $USER && -n $LOGNAME ]] && USER=$LOGNAME
+
+# if [[ $PLATFORM = 64-linux30 ]]
+# then
+#   PASS=$(cat /tmp/local/$USER)
+#   /usr/afsws/bin/klog -c eda.fishkill -pass $PASS
+#   export KAUTH=afs
+# fi
+
+#Error Checking for parameters
+[[ -z $RELEASE ]] && { help; goodbye  "\n*** Release required."; exit; }
+[[ -z $PLATFORM ]] && { help goodbye  "\n*** Platform required."; exit; }
+
+TR=/bin/tr; [[ $PLATFORM = i386_linux2? ]] && TR=/usr/bin/tr
+typeset -l PRODUCT=$(print $RELEASE | cut -f1 -d.) 
+
+REL_VER=$(print $RELEASE | cut -f2 -d.)
+[[ $REL_VER = +([0-9])-[0-9]* ]] && RV_EXT=-$(print $REL_VER | cut -d- -f2-) || RV_EXT=
+R_V="$(print $REL_VER | cut -c1,2 | sed 's/^0//').$(print $REL_VER | cut -c3,4 | sed 's/^0//')$RV_EXT"
+
+EINSLIB=/afs/eda.fishkill.ibm.com/u/einslib
+. $EINSLIB/.CM_WebPage
+
+INVALID=
+VALID_PLATS=$(eval print '$'${PRODUCT}${REL_VER}_PLATS)
+eval [[ $PLATFORM != @($(print $VALID_PLATS | sed 's/ /|/g')) ]] && INVALID=TRUE
+if [[ -n $INVALID ]]
+ then
+  help
+  goodbye 1 "\n*** $PLATFORM is invalid for $RELEASE ***"
+fi
+
+# Get the hour based on 24-hour time
+# If it is before midnight, use tomorrow's date for the log file
+integer HOUR=$(date +%H)
+if [[ $HOUR -ge 18 ]]
+ then
+  # The normal setting for TZ in Fishkill is EST5EDT (GMT+5 and DST),
+  # telling the system we are 5 hours behind Greenwich, which is the time
+  # it is physically keeping.
+  # Pretend we are in Middle Europe, where the new day begins 6 pm our time.
+  typeset -l DATE=$(TZ=MET-1MEDT date +%b%d)
+  typeset -l MONTH=$(TZ=MET-1MEDT date +%b )
+ else
+  typeset -l DATE=$(date +%b%d)
+  typeset -l MONTH=$(date +%b)
+fi
+
+SHELL_NAME=${0##*/}
+PID=$$
+
+if [[ $DEVMODE = TRUE ]]
+then
+  BUILDDIR=/afs/eda.fishkill.ibm.com/$LEVEL/svn_test/${PRODUCT}/${R_V}
+  if [[ $USER = einslib ]]
+  then
+    BUILDLOG=$EINSLIB/logs/${MONTH}/${DATE}.${PRODUCT}.${REL_VER}.${PLATFORM}.devmode
+  else
+    BUILDLOG=/afs/eda/u/$USER/logs/${MONTH}/${DATE}.${PRODUCT}.${REL_VER}.${PLATFORM}.devmode
+  fi
+else
+  BUILDDIR=/afs/eda.fishkill.ibm.com/$LEVEL/${PRODUCT}/${R_V}
+  if [[ $USER = einslib ]]
+  then
+    BUILDLOG=$EINSLIB/logs/${MONTH}/${DATE}.${PRODUCT}.${REL_VER}.${PLATFORM}
+  else
+    BUILDLOG=/afs/eda/u/$USER/logs/${MONTH}/${DATE}.${PRODUCT}.${REL_VER}.${PLATFORM}
+  fi
+fi
+
+if [[ $PRODUCT = @(ess|cre|edautils) || ($PRODUCT = einstimer && $REL_VER -ge 0701)  ]]
+ then
+  unset TOP
+ else
+  export TOP=$BUILDDIR
+fi
+
+EINS_DLL_DIR=$BUILDDIR/$R_V/dll
+
+BUILDETC=$BUILDDIR/build/etc
+LOGDIR=$BUILDETC/log/$PLATFORM
+LOGFILE=$LOGDIR/builddlls
+COMPLOCKDIR=$BUILDETC/complock/$PLATFORM
+COMPLOCK=$COMPLOCKDIR/builddlls
+HOSTNAME=$(print $(hostname) | cut -f1 -d.)
+TOKEN=$(/usr/afsws/bin/tokens)
+
+
+print "\n$SHELL_NAME: $RELEASE starting $(date +"%a %D %T") on $HOSTNAME ${SUFF}\n" | tee -a $BUILDLOG >> $LOGFILE
+print "\ntokens:\n$TOKEN" | tee -a $BUILDLOG >> $LOGFILE
+
+print ${HOSTNAME} > $COMPLOCK
+ENTIRE=TRUE
+
+
+if [[ -n $(print $PLATFORM | grep 64) ]] 
+ then
+  export OBJECT_MODE=64
+  SYS=64-$(sys)
+  BITEXT="BITS=64"
+  EXT="-64"
+  
+ else
+  SYS=$(sys)
+  BITEXT=
+  EXT=
+fi
+
+export PATH
+
+# Set up gnumake environment
+NUT_VER=$(grep "^NUTSH_VERSION" $BUILDDIR/Make.rules | awk '{print $3}')
+NUTSHELL=/afs/eda/prod/nutshell/$NUT_VER
+BTOOLS=$NUT_VER
+BTLEVEL=prod
+if [[ $LEVEL != build ]]
+then
+  BTLEVEL=$LEVEL
+fi
+
+export PATH=/afs/eda.fishkill.ibm.com/$BTLEVEL/tools/$BTOOLS/bin:$PATH
+export LANG=C
+print "PATH: $PATH" >> $LOGFILE
+export PATH
+
+print "Starting at $(date) on $(hostname ${SUFF})" >> $LOGFILE
+print "make is `whence make`" >> $BUILDLOG
+print "$(date +"%a %D %T"): Statistics in dll directory before linking" >> $LOGFILE
+fs lq $BUILDDIR/dll${EXT} >> $LOGFILE 2>&1
+
+TYPES="g O"
+[[ $PLATFORM = 64-rs_aix53 && ($REL_VER = 1301) ]] && TYPES="g O p"
+[[ $PLATFORM = 64-linux40  && ($REL_VER = 1301) ]] && TYPES="g O p"
+[[ $PLATFORM = 64-linux50  && ($REL_VER = 1401) ]] && TYPES="c g O"
+
+cd $BUILDDIR/dll${EXT}
+for TYPE in $TYPES
+ do
+  case $TYPE in
+    O) TARGET="opt" 
+       TEXT="optimized"
+       ;;
+    g) TARGET=debug
+       TEXT="debug"
+       ;;
+    p) TARGET=pg
+       TEXT="profile"
+       ;;
+    c) TARGET=gcov
+       TEXT="gcov"
+       ;;
+  esac
+
+  print "Making $TEXT dll's" >> $LOGFILE
+  print "make $TARGET $BITEXT VERBOSE=1 >> $LOGFILE 2>&1" >> $LOGFILE
+  make $TARGET $BITEXT VERBOSE=1 >> $LOGFILE 2>&1
+  ls $BUILDDIR/dll-64 >> $LOGFILE
+done
+
+print "/bin/rm $BUILDDIR/dll${EXT}/ldl*" >> $BUILDLOG
+/bin/rm $BUILDDIR/dll${EXT}/ldl* 2>/dev/null
+
+print "/bin/rm $COMPLOCK" >> $BUILDLOG
+/bin/rm $COMPLOCK  2> /dev/null
+/bin/rm -f /tmp/MAIL.$PID 2> /dev/null
+
+print "\n$SHELL_NAME: $RELEASE ending $(date +"%a %D %T") on $HOSTNAME ${SUFF}\n" | tee -a $BUILDLOG >> $LOGFILE
+goodbye

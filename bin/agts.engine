@@ -1,0 +1,1800 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: agts.engine
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#    DATE: 04/30/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 04/30/2012 EH  Initial coding.
+# 05/01/2012 EH  Added LogComponentEventShipb() and LogComponentEvent for
+#                ADVANCED_TO_SHIPB right after rsync completes.
+# 05/01/2012 GS  Updated to advance/bom check only components that are
+#                delivered and/or test_support.
+# 08/02/2012 EH  Replaced use of gargs script with an xargs command to fix 
+#                fix broken datetime sync (MDCMS00121204). 
+# 08/02/2012 EH  Introduced use of fixPerms script to sync permissions from
+#                tkb to shipb and tk to ship.
+# 08/02/2012 EH  Added use of chgProdLinks script to convert symlinks that
+#                point to prod/tools/14.1 to ../tools/14.1.
+# 08/02/2012 EH  Changed $nextToolKit from "14.1.n+1" to "14.1.build".
+# 08/02/2012 EH  Interim fix for TkCommon::convert_tkVersion (used to create 
+#                selfStore release).
+# 08/02/2012 EH  For validation of Tool Kit substituted READY stage for 
+#                DEVELOPMENT stage to work with new 14.1.build.
+# 08/06/2012 EH  Updated to copy files instead of symlinks for include and 
+#                private directories (MDCMS00125491). This results in 3 calls
+#                to rsync instead of one.
+# 08/07/2012 EH  Disabled execution of cr.updateTk script.
+# 08/07/2012 EH  Changed toolkit to 14.1.build for branchDelete and 
+#                branchAdd commands.
+# 08/07/2012 EH  Changed stage passed to getToolKits from READY to PREVIEW.
+# 08/07/2012 EH  Replaced branchUpdate with branchAdd.
+# 08/08/2012 EH  Added logic to skip rsync of include and private directories
+#                if they do not exist.
+# 08/08/2012 EH  Updated touch command argument used on Linux to handle blanks 
+#                embedded in file names. Unfortunately, this solution does
+#                not work on AIX. 
+# 08/08/2012 EH  Added logic to skip this component if it has already been 
+#                processed.
+# 08/08/2012 EH  Added exception that disables special rsync processing of 
+#                include and private directories for satsyn and xml4c56
+#                components.
+# 08/15/2012 EH  Changed the touch command argument used to update file 
+#                timestamps so that it works correctly on both AIX and Linux. 
+#                File names with embedded spaces are also processed correctly  
+#                now. This resolves MDCMS00121204.
+# 10/22/2012 EH  Added call to chgIncludeLinks to selectively convert symlinks
+#                in include and private directories as appropriate. Also
+#                removed previous rsync solution for symlinks in include and
+#                private directories.
+# 11/16/2012 GS  Combined LogComponentEvent functions and removed -ft $toolKit
+#                from the svnLog call.
+# 01/31/2013 GS  Added CheckRevisions() function to ensure revisions match
+#                between prod, shipb and ship.
+# 02/05/2013 GS  Changed AGTS_START and AGTS_FAIL events from prod to shipb.
+#                Updated to save log file with event.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+# Global variables
+# TODO - may want to change dev to prod ...
+my $DEV_BIN      = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $SVN          = "/afs/eda/tools/bin/svn";
+#my $SVN = "svn";
+my $svnReposUrl  = "https://greenjiffy.fishkill.ibm.com/eda/tk";
+my $excludeDir   = "/afs/eda/data/edainfra/rsync_excludes";
+my $logDir       = "";
+my $authorizedId = "svnlib";
+
+# Program variables
+my $appName = "agts.engine";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $noCmdExec       = 0;
+my $dryRun          = 0;
+my $toolKit         = "";
+my $component       = "";
+my $dbMode          = ""; # default is prod if empty (GS)
+my $dbType          = "";
+my $branch          = "";
+my $release         = "";
+my $selfStoreRls    = "";
+my $devFlg          = "";
+my $dbgFlg          = "";
+my $logFile         = "";
+my $nextToolKit     = "";
+my $excludeFile     = "";
+my $revision        = "";
+my $cmdLineArgs     = "";
+my $dryRunMsg       = "";
+my $isDelivered     = 1;
+my $noRevCheck      = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc  = $ERROR;
+my $startDir = $ENV{"PWD"};
+my $progRC = "";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleDIE(); };
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Enable logging
+$rc = setupLogging();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to complete $appName initalization", $ERROR);
+}
+
+# Exit immediately if this component has already been processed
+# $rc = 1 from BranchCheck() when the tk14.1.n branch already exists.
+chomp($rc = BranchCheck());
+if ($rc == 1) {
+  print "Component $component has already completed AGTS processing\n";
+  chomp(my $logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  CleanExit("\n$logDate $appName complete", $OK);
+}
+
+# Log AGTS start event for this TK/component <SUPPRESS FOR DRY RUN>
+LogComponentEvent("AGTS_START", $logFile, "shipb");
+
+# Lock prod directory if not already locked <SUPPRESS FOR DRY RUN>
+#   compLockMgr has replaced the previous prodLockMgr script.
+$rc = ProdLockMgr("l");
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to lock prod directory", $ERROR);
+}
+
+# Rsync prod to new tk14.1.n/component directory
+$rc = RsyncProd2Shipb();
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to copy contents of prod/$component/14.1 to tk$toolKit/$component/14.1", $ERROR);
+}
+
+# Create new tk14.1.n branch in SVN (turn off CM then turn back on)
+$rc = CreateBranch();
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to create $component branch $branch in SVN", $ERROR);
+}
+
+# Convert new tk14.1.n/component directory to SVN repos by checking out new branch [scheckout]
+$rc = CreateSvnWC();
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to create SVN working copy", $ERROR);
+}
+
+# Update timestamps in new tk14.1.n/component directory
+$rc = UpdateTimeStamps();
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to update timestamps", $ERROR);
+}
+
+# Selectively replace symlinks with files for include and private directories if object is 
+# a file in prod location.
+$rc = ChgIncludeLinks();
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to convert include/private symlinks", $ERROR);
+}
+
+# Create shipb symlink to new tk14.1.n/component directory ***
+# Run update_lc_complink script to create symlink
+$rc = CreateSymlink();
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to create symlink", $ERROR);
+}
+
+# Change Makefile symlinks in shipb that point to prod
+$rc = ChgProdLinks();
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to correct Makefile symlinks", $ERROR);
+}
+
+# Synchronize shipb permissions to match tkb permissions
+$rc = SyncPermissions("tkb", "shipb");
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to update shipb permissions to match tkb permissions.", $ERROR);
+}
+
+# Determine if this component is required in ship.
+$isDelivered = SetDelivered();
+
+# Advance shipb to ship (only for delivered components)
+#   Also runs setup_xmit_dirs for creating .ship* directories.
+$rc = AdvanceShipb2Ship();
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to advance $component", $ERROR);
+}
+
+# Synchronize ship permissions to match tk permissions
+#   This is only executed for delivered components.
+$rc = SyncPermissions("tk", "ship");
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to update ship permissions to match tk permissions.", $ERROR);
+}
+
+# Execute BOM check to compare ship deliverables to tk deliverables (previous Tool Kit version).
+#   This is only executed for delivered components.
+$rc = BomChecker();
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Differences were found between ship and tk instances of $component", $ERROR);
+}
+
+# New script from Gregg (on hold)
+# Invocation is:  cr.updateTk -c component
+#$rc = CrUpdateTk();
+#if ($rc > 0) {
+#  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+#  CleanExit("ERROR: cr.updateTk failed", $ERROR);
+#}
+
+# Add branch for 14.1.n/component <SUPPRESS FOR DRY RUN>
+# Added this branchAdd at Gregg's 20120807 request 
+$rc = AddBranch2();
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to add the branch name to $toolKit for this component", $ERROR);
+}
+
+# Update contents of the .update file (for CNYA use)
+$rc = CreateUpdateFile();
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to update the .update file", $ERROR);
+}
+
+# Unlock prod directory (only if no errors) <SUPPRESS FOR DRY RUN>
+#   compLockMgr has replaced the previous prodLockMgr script.
+$rc = ProdLockMgr("u");
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to unlock prod directory", $ERROR);
+}
+
+# Update TK 14.1.n component stage to preview <SUPPRESS FOR DRY RUN>
+$rc = SetStageName($toolKit, "preview");
+if ($rc > 0) {
+  LogComponentEvent("AGTS_FAIL", $logFile, "shipb");
+  CleanExit("ERROR: Unable to set TK stage to preview", $ERROR);
+}
+
+# Log AGTS end event for this TK/component <SUPPRESS FOR DRY RUN>
+LogComponentEvent("AGTS_SUCCESS", $logFile, "shipb");
+chomp(my $logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+
+CleanExit("\n$logDate $appName complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  CleanExit("\n[$appName] Caught an unexpected die - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+  print "$message\n";
+  print "Return code: $rc\n";
+  close (STDOUT);
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script executes the AGTS process for an individual component. It is 
+run to transition a component from the Development stage to the Preview stage.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> <-c component> [-dryrun] [-db dbmode] [-norevcheck]
+            [-h] [-k] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit  = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+  component = name of component (e.g., einstimer)
+  -dryrun     (optional) Dry run (disables commands that write to CM DB)
+  dbmode    = database mode (e.g., prod or dev) default: prod
+  -norevcheck = Turn off prod to shipb revision check
+  -h          (optional) application help
+  -k          (optional) Suppress execution of significant commands for debugging
+  -y          (optional) Verbose (print the invocation of each command)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  my $rc = $OK;
+  my $command = "";
+
+  # Capture command line arguments for logging (before GetOptions deletes them)
+  $cmdLineArgs = join(' ', @ARGV);
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'      => \$toolKit,
+              'component|c=s' => \$component,
+              'dryrun'      => \$dryRun,
+              'db=s'        => \$dbMode,
+              'k'           => \$noCmdExec,
+              'norevcheck'  => \$noRevCheck,
+              'y'           => \$verbose,
+              'help|h|?'    => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) must be specified\n";
+    return $ERROR;
+  }
+  if (! $component) {
+    print "ERROR: component (-c) must be specified\n";
+    return $ERROR;
+  }
+
+  # Get the current PRODUCTION Tool Kit version from CM DB
+  #   DEVELOPMENT will always be 14.1.build
+  #   READY       will be the version to be created during AGTS
+  #   PREVIEW     will always be one version higher than PRODUCTION
+  $command = "$DEV_BIN/getToolKits";
+  $command .= " -r 14.1";
+  $command .= " -s PREVIEW";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  chomp(my $readyToolkit = `$command`);
+  $rc = $? >> 8;
+
+  if ($rc > 0) {
+    print "ERROR: Unable to validate specified Tool Kit $toolKit (could not determine PREVIEW TK version)\n";
+    return $ERROR;
+  }
+
+  if ($toolKit ne $readyToolkit) {
+    print "ERROR: Tool Kit $toolKit is not permitted for this process\n";
+    return $ERROR;
+  }
+
+  $logDir = "/afs/eda/data/edainfra/logs/$toolKit/agts";
+
+  # Validate that specified component is in DEVELOPMENT Tool Kit version (14.1.build).
+  # Since getComponents outputs a csv list of valid components, translate the
+  # commas to new line characters and grep for the component name.
+  $command = "$DEV_BIN/getComponents";
+  $command .= " -t 14.1.build";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+  $command .= " |tr \",\" \"\\n\"";
+  $command .= " |grep \"^$component\$\"";
+
+  # Run the command
+  `$command`;
+  $rc = $? >> 8;
+
+  if ($rc != 0) {
+    print "ERROR: Component $component does not exist in Tool Kit $toolKit\n";
+    return $ERROR;
+  }
+
+  # Define Tool Kit release in 14.x format
+  #($rc, $release) = TkCommon::convert_tkVersion ($toolKit, "release"); # 14.1.build broke TkCommon::convert_tkVersion
+  ($rc, $release) = convert_tkVersion ($toolKit, "release");
+  if ($rc != 0) {
+    print "ERROR: Tool Kit $toolKit could not be converted to a release version\n";
+    return $ERROR;
+  }
+
+  # Define Tool Kit release in 140x format (used by selfstore and for invoking svnAdvance and .update)
+  #($rc, $selfStoreRls) = TkCommon::convert_tkVersion ($toolKit, "selfstore"); # 14.1.build broke TkCommon::convert_tkVersion
+  ($rc, $selfStoreRls) = convert_tkVersion ($toolKit, "selfstore");
+  if ($rc != 0) {
+    print "ERROR: Tool Kit $toolKit could not be converted to a selfstore version\n";
+    return $ERROR;
+  }
+
+  # Define the next toolKit version to be worked on in the Development stage
+  # when AGTS processing is completed.
+  $nextToolKit = $release;
+  $nextToolKit .= ".";
+  $nextToolKit .= "build";
+
+  $branch = "tk" . $toolKit;
+
+  $dryRunMsg = "[disabled by dryrun option]" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RsyncProd2Shipb()
+# Purpose: Copy prod content to tk14.1.x repository (which is linked to by
+#          component versions in shipb).
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub RsyncProd2Shipb {
+
+  my $rc = 0;
+
+  # Exclude based on the filter file.
+  # TODO: Need to document requirement to add filter file or symlink when a new
+  # component is created.
+  my $excludeDef="--exclude-from $excludeDir/$component";
+
+  print "Copying contents of prod/$component/14.1 to tk$toolKit/$component/14.1\n";
+
+  # Construct the command
+  my $command  = "/usr/bin/rsync";
+  $command = "/afs/eda/tools/bin/rsync" if (! -e "/usr/bin/rsync");
+  $command .= " -rlptvz";
+  $command .= " --delete-excluded $excludeDef";
+  $command .= " /afs/eda/prod/$component/$release/";
+  $command .= " /afs/eda/$branch/$component/$release";
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to copy contents of prod/$component/14.1 to tk$toolKit/$component/14.1\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+
+  # Log the advance prod to shipb event ... will update revisions in the DB
+  LogComponentEvent("ADVANCED_TO_SHIPB", "Advanced by $appName", "prod");
+  if (CheckRevisions("prod", "shipb") != $OK) {
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateBranch()
+# Purpose: Create toolKit version branch in SVN
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateBranch {
+
+  my $rc = $OK;
+  my $svnCompBranchExists = 0;
+
+  print "Creating $component branch $branch in SVN\n";
+
+  # Retrieve latest revision for component in prod from CM DB.
+  ($rc, $revision) = GetLatestRevision("prod");
+
+  # Return immediately if there is a bad rc.
+  if ($rc > 0) {
+    print "ERROR: Unable to get revision for $component in prod.\n";
+    return $ERROR;
+  }
+
+  print "Latest $component revision in prod: $revision\n";
+
+  # Turn off Change Management temporarily if it is already on.
+  # This is required because SVN copy does a SVN commit under the covers which
+  # would normally require a CR.
+  $rc = SetChgMgtOff();
+  if ($rc > 0) {
+
+    # Subroutine writes error message if it fails
+    return $ERROR;
+  }
+
+  # Check if the SVN component branch already exists
+  $svnCompBranchExists = CheckSvnCompBranch();
+
+  # Delete the SVN component branch before attempting a new SVN copy.
+  # Otherwise, the trunk gets copied under the existing tk14.1.n branch.
+  # Further attempts to do SVN copy without removing the existing one result in
+  # "svn: Path 'branches/tk14.1.1/trunk' already exists" error msgs.
+  DeleteSvnCompBranch() if ($svnCompBranchExists);
+
+  # Now proceed with the SVN copy. 
+  # Construct the command that creates the branch
+  my $command = "$SVN copy";
+  $command .= " $svnReposUrl/$component/trunk\@$revision";
+  $command .= " $svnReposUrl/$component/branches/$branch";
+  $command .= " -m \"creating branch $branch\"";
+  $command .= " 2>&1";
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  # Capture results, but only print if rc is bad.
+  unless ($noCmdExec) {
+    chomp(my @results = `$command`);
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to create $component branch $branch in SVN.\n";
+      print join("\n", @results);
+
+      # Turn on Change Management
+      $rc = SetChgMgtOn();
+      if ($rc > 0) {
+
+        # SetChgMgtOn() writes error message if it fails
+        return $ERROR;
+      }
+
+      return $ERROR;
+    }
+  }
+
+  # Turn on Change Management  <-- Gregg proposes not doing this... EJH
+  $rc = SetChgMgtOn();
+  if ($rc > 0) {
+
+    # Subroutine writes error message if it fails
+    return $ERROR;
+  }
+
+  # Verify that Change Management did get turned on
+  chomp(my $cmState = getCmState());
+  unless ($cmState) {
+    print "ERROR: Not able to verify that Change Management is ON for $component in toolkit $toolKit\n";
+    $rc = $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : getCmState()
+# Purpose: Determine if Change Management is on or off for the current
+#          component and branch.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub getCmState {
+
+  # Construct the command
+  my $command = "$DEV_BIN/branchCheck";
+  $command .= " -c $component";
+  $command .= " -b trunk";
+  $command .= " -db $dbMode" if ($dbMode); # FORCE TO PROD FOR TESTING. Uncomment later.
+
+  print "Running $command\n" if ($verbose);
+
+  my $cmState = `$command`;
+  #my $rc = $? >> 8;
+
+  # $cmState is 0 when CM is off
+  # $cmState is 1 when CM is on
+  return $cmState;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateSvnWC()
+# Purpose: Retrieve source code from SVN toolKit version branch
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateSvnWC {
+
+  my $rc = 0;
+  my @results = ();
+
+  print "Creating SVN working copy in $branch/$component/$release\n";
+
+  # Construct the command
+  my $command = "$DEV_BIN/scheckout";
+  $command .= " $component";
+  $command .= " $svnReposUrl/$component/branches/$branch";
+  $command .= " /afs/eda/$branch/$component/$release";
+  $command .= " 2>&1";
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to create working copy in $branch/$component/$release\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+
+  # Validate the files checked out from SVN.  
+  # We got a good rc from svn copy, now validate the results.
+  #
+  # Use equivalent functionality found in validate_svn_file_checkout() in runAGTS script.
+  #   Examples of raw svn copy msgs are in ...filelist files
+  #   /afs/eda/u/svnlib/logs/dec/dec14.verity.1401.checkout.filelist
+  #   Examples of scrubbed results are in ...results files
+  #   /afs/eda/u/svnlib/logs/dec/dec14.verity.1401.checkout.results
+  #
+  # The following are acceptable results:
+  #   An "E" in  column 1.
+  #   An "U" in  column 2.
+  #   The string "Checked" at the beginning of the line.
+  #   The string "Updated" at the beginning of the line.
+  # Anything else is a problem and needs to be corrected.
+  #
+  # Note that if a rerun of AGTS is made for a component, the original SVN 
+  # branch has to be deleted and then recreated. After that point, there are
+  # no messages returned from the svn copy (via scheckout), even if there
+  # is unusual file status that would have been expected.
+  my $line = "";
+  my @filteredResults = ();
+  foreach $line (@results) {
+    next if (substr($line, 0, 1) eq "E");
+    next if ($line =~ /^Checked/);
+    next if ($line =~ /^Updated/);
+    next if (substr($line, 0, 2) eq " U");
+    push (@filteredResults, $line);
+  }
+
+  if (@filteredResults) {
+    print "ERROR: The following objects had unexpected codes from SVN copy that need to be corrected:\n";
+    print join("\n", @filteredResults);
+    return $ERROR;
+  }
+
+  #print "\nFORCED results follow: \n\n"; # DEBUG
+  #print @results; # DEBUG
+  #print "\nFORCED filtered results follow: \n\n"; # DEBUG
+  #print @filteredResults; # DEBUG
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateSymlink()
+# Purpose: Create symlinks from shipb to tk repository
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CreateSymlink {
+
+  #my ($component, $toolKit) = @_;
+  my $rc = 0;
+
+  print "Creating symlink from shipb/$component/14.1 to $branch/$component/14.1\n";
+
+  # update_lc_complink -t 14.1.<x> -c etreetest3 -s shipb -O create -g
+  # update_lc_complink -t 14.1.<x> -c etreetest3 -s shipb -O delete -g
+  my $command = "$DEV_BIN/update_lc_complink";
+  $command .= " -t $toolKit";
+  $command .= " -c $component";
+  $command .= " -s shipb";
+  $command .= " -O create";
+  # -d will cause symlinks to only be written to sandbox!
+  # We should just let it default to PRODDB since we are already
+  # validating each component.
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to create symlink from shipb/$component/14.1 " .
+	" to $branch/$component/14.1\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetLatestRevision($loc)
+# Purpose: Retrieve latest revision for component in $loc
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub GetLatestRevision {
+
+  my ($loc) = @_;
+  my $rc = 0;
+
+  # Construct the command
+  my $command = "$BIN/getRevisionsTk";
+  $command .= " -c $component";
+  $command .= " -l $loc";
+  $command .= " -latest"; 
+  $command .= " -db $dbMode" if ($dbMode); # FORCE TO PROD FOR TESTING. Uncomment later.
+
+  print "Running $command\n" if ($verbose);
+
+  chomp(my $revision = `$command`);
+  $rc = $? >> 8;
+
+  return ($rc, $revision);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : AdvanceShipb2Ship()
+# Purpose: Advance from shipb to ship
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub AdvanceShipb2Ship {
+
+  my $rc = 0;
+
+  print "Advancing $component from shipb to ship\n";
+
+  # If this component is not delivered then don't advance it
+  if (! $isDelivered) {
+    print " * This component should NOT be advanced to ship\n";
+    return $rc;
+  }
+
+  # Construct the command
+  my $command = "$DEV_BIN/svnAdvance";
+  $command .= " -r $component.$selfStoreRls";
+  $command .= " -s shipb";
+  $command .= " -d ship";
+
+  # For dryrun, disable the use of svnLog in svnAdvance to log events in CM DB
+  $command .= " -z" if ($dryRun);
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to advance $component from shipb to ship.\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+
+  # Verify revisions in ship match shipb
+  if (CheckRevisions("ship", "shipb") != $OK) {
+    return $ERROR;
+  }
+
+  # Create .ship* directories for transmittal window
+  SetupXmitDirs();
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : BomChecker()
+# Purpose: Compare Bill of Materials between ship and tk levels
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub BomChecker {
+
+  my $rc = 0;
+
+  print "Executing BOM comparison between $component in ship and tk (previous Tool Kit)\n";
+
+  # If this component is not delivered then it wasn't advanced to ship and we
+  # don't need to run this bom check
+  if (! $isDelivered) {
+    print " * This component was NOT be advanced to ship and doesn't ";
+    print "   require BOM checking.\n";
+    return $rc;
+  }
+
+  my $command = "$DEV_BIN/bomChecker";
+  $command .= " -c $component";
+
+  print "Running $command\n" if ($verbose);
+  
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "Differences were found\n";
+      print @results;
+      return $OK;
+    }
+  }  
+
+  return $OK;
+  
+}
+
+
+
+#------------------------------------------------------------------------------
+# Name   : setupLogging()
+# Purpose: Enable logging
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub setupLogging {
+
+  # Create $logDir if it does not already exist
+  mkpath($logDir) if (! -d $logDir);
+
+  # Open log file for script messages
+  chomp(my $logDate = `date +%C%y%m%d\_%H%M%S`);
+  $logFile = "$logDir/" . $appName . "_" . $component . "_" . $logDate . ".log";
+
+  # Open a filehandle for a log file only
+  #open(LOGFILE, ">$logFile") || die "open $logFile failed";
+
+  # Open a filehandle for both stdout and a log file
+  # tee: 0652-044 Cannot open /afs/eda/u/ehull/logs/test/agts.engine_etreetest3_20120428_211919.log.
+  open (STDOUT, "| tee -a $logFile") || die "ERROR: unable to open log file $logFile  $!\n";
+
+  my $afsId = (getpwuid($<)) [0];
+  if ($afsId ne "$authorizedId") {
+    print "\nERROR: Only the $authorizedId AFS ID is permitted to run this script\n";
+    return $ERROR;
+  }
+
+  chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  chomp(my $machine = `hostname`);
+  print "\n$dateTime $afsId on $machine invoked $appName $cmdLineArgs\n\n";
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LogComponentEvent($event, $message, $location)
+# Purpose: Log a tool kit/component specific event and location
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub LogComponentEvent {
+
+  my ($event, $message, $location) = @_;
+
+  # Don't process if dry run ...
+  return if  ($dryRun);
+
+  # Construct the command
+  my $command = "$DEV_BIN/svnLog";
+  $command .= " -c $component";
+  $command .= " -e $event";
+  $command .= " -l $location";
+  $command .= " -m \"$message\"" if ($message);
+  $command .= " -db $dbMode" if ($dbMode);
+
+  print "Running $command\n" if ($verbose);
+
+  unless ($noCmdExec || $dryRun) {
+    # Run the command
+    my @results = `$command`;
+    my $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to log component event $event\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+  
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetChgMgtOff()
+# Purpose: Turn off Change Management if it is already on (it should be).
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub SetChgMgtOff {
+
+  my $command = "";
+
+  # Get current state of Change Management
+  chomp(my $cmState = getCmState());
+  
+  # Construct the command
+  # $cmState is TRUE when CM is on.
+  if ($cmState) {
+    $command = "$DEV_BIN/branchDelete";
+    #$command .= " -t $toolKit";
+    $command .= " -t 14.1.build";
+    $command .= " -c $component";
+    $command .= " -b trunk";
+    $command .= " -db dbmode" if ($dbMode); # FORCE TO PROD FOR TESTING. Uncomment later.
+    $command .= " 2>&1";
+
+    print "Running $command\n" if ($verbose);
+    
+    # Skip command execution if the -k option was specified
+    # Capture results, but only print if rc is bad.
+    unless ($noCmdExec) {
+      my @results = `$command`;
+      $rc = $? >> 8;
+    
+      if ($rc > 0) {
+        print "ERROR: Unable to turn off Change Management for $component in toolkit $toolKit\n";
+        print @results;
+        return $ERROR;
+      }
+    }  
+  }  
+  
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetChgMgtOn()
+# Purpose: Turn on Change Management.
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub SetChgMgtOn {
+
+  # Construct the command   
+  my $command = "$DEV_BIN/branchAdd";
+  #$command .= " -t $toolKit";
+  $command .= " -t 14.1.build";
+  $command .= " -c $component";
+  $command .= " -b trunk";
+  $command .= " -db $dbMode" if ($dbMode); # FORCE TO PROD FOR TESTING. Uncomment later.
+  $command .= " 2>&1";
+  
+  print "Running $command\n" if ($verbose);
+  
+  # Run the command
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+    if ($rc > 0) {
+      print "ERROR: Unable to turn on Change Management for $component in toolkit $toolKit\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+    
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : BranchAdd()
+# Purpose: Set a component branch name of "trunk" in the CM DB for the new
+#          Tool Kit version "14.1.build" to be worked on in the "development" 
+#          stage following this AGTS.
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub BranchAdd {
+
+  my $rc = 0;
+
+  print "Adding TK $nextToolKit $component branch name \"trunk\" in CM DB $dryRunMsg\n";
+  
+  # Construct the command
+  my $command = "$DEV_BIN/branchAdd";
+  $command .= " -t $nextToolKit";
+  $command .= " -c $component";
+  $command .= " -b trunk";
+  $command .= " -db $dbMode" if ($dbMode);
+  $command .= " 2>&1";
+  
+  print "Running $command\n" if ($verbose);
+  
+  # Run the command
+  unless ($noCmdExec || $dryRun) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+    if ($rc > 0) {
+      print "ERROR: Unable to add TK $nextToolKit $component branch name \"trunk\" in CM DB\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+     
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CreateUpdateFile()
+# Purpose: Create .update file
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub CreateUpdateFile {
+
+  my $rc = 0;
+ 
+  print "Updating contents of the .update file (for CNYA use)\n";
+ 
+  # Construct the command
+  chomp(my $timedate = `(date +"%D %H:%M")`);
+  my $command = "echo";
+  $command .= " \"$component.$selfStoreRls $timedate advance\"";
+  $command .= " > /afs/eda/$branch/$component/$release/.update";
+  $command .= " 2>&1";
+  
+  print "Running $command\n" if ($verbose);  
+ 
+  # Run the command
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+    if ($rc > 0) {
+      print "ERROR: Unable to create or update .update file\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+     
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetStageName()
+# Purpose: Update TK component stage
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub SetStageName {
+
+  my ($tkVersion, $stageName) = @_;
+  my $rc = 0;
+
+  print "Updating TK $tkVersion $component stage to \"$stageName\" in CM DB $dryRunMsg\n";
+ 
+  # Construct the command
+  my $command = "$DEV_BIN/updateTkComp";
+  $command .= " -t $tkVersion";
+  $command .= " -s $stageName";
+  $command .= " -c $component";
+  $command .= " -db $dbMode" if ($dbMode); # FORCE TO PROD FOR TESTING. Uncomment later.
+  
+  print "Running $command\n" if ($verbose);  
+ 
+  # Run the command
+  unless ($noCmdExec || $dryRun) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+    if ($rc > 0) {
+      print "ERROR: Unable to update TK $tkVersion $component stage to \"$stageName\" in CM DB\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+     
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : BranchCheck()
+# Purpose: Determine if a branch for this component already exists with 
+#          the tk14.1.n name.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub BranchCheck {
+
+  # Construct the command
+  my $command = "$DEV_BIN/branchCheck";
+  $command .= " -c $component";
+  $command .= " -b $branch";
+  $command .= " -db $dbMode" if ($dbMode); # FORCE TO PROD FOR TESTING. Uncomment later.
+  
+  print "Running $command\n" if ($verbose);
+  
+  my $branchPresent = `$command`;
+  #my $rc = $? >> 8;
+  
+  # $branchPresent is 0 when branch is off
+  # $branchPresent is 1 when branch is on
+  return $branchPresent;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateBranch()
+# Purpose: Update the branch name for this component from trunk to tk14.1.n
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub UpdateBranch {
+
+  my $command = "";
+
+  print "Updating TK $toolKit $component branch name from \"trunk\" to \"$branch\" in CM DB $dryRunMsg\n";
+  
+  # Determine if a branch for this component already exists with the name tk14.1.n
+  chomp(my $branchPresent = BranchCheck());
+  
+  # Construct the command
+  # $branchPresent is TRUE when the tk14.1.n branch already exists.
+  unless ($branchPresent) {
+    $command = "$DEV_BIN/branchUpdate";
+    $command .= " -t $toolKit";
+    $command .= " -c $component";
+    $command .= " -b trunk";
+    $command .= " -n $branch";
+    $command .= " -db dbmode" if ($dbMode); # FORCE TO PROD FOR TESTING. Uncomment later.
+    $command .= " 2>&1";
+
+    print "Running $command\n" if ($verbose);
+    
+    # Skip command execution if the -k option was specified
+    # Capture results, but only print if rc is bad.
+    unless ($noCmdExec || $dryRun) {
+      my @results = `$command`;
+      $rc = $? >> 8;
+    
+      if ($rc > 0) {
+        print "ERROR: Unable to update TK $toolKit $component branch name from \"trunk\" to \"$branch\" in CM DB\n";
+        print @results;
+        return $ERROR;
+      }
+    }  
+  }  
+  
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : AddBranch2()
+# Purpose: Add the branch name to toolkit for this component
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub AddBranch2 {
+
+  my $command = "";
+
+  print "Adding branch name $branch to TK $toolKit $component in CM DB $dryRunMsg\n";
+  
+  # Determine if a branch for this component already exists with the name tk14.1.n
+  chomp(my $branchPresent = BranchCheck());
+  
+  # Construct the command
+  # $branchPresent is TRUE when the tk14.1.n branch already exists.
+  #if ($branchPresent) { # this was the broken logic that was fixed on 20120806
+  unless ($branchPresent) {
+    $command = "$DEV_BIN/branchAdd";
+    $command .= " -t $toolKit";
+    $command .= " -b $branch";
+    $command .= " -c $component";
+    $command .= " -db dbmode" if ($dbMode); # FORCE TO PROD FOR TESTING. Uncomment later.
+    $command .= " 2>&1";
+
+    print "Running $command\n" if ($verbose);
+    
+    # Skip command execution if the -k option was specified
+    # Capture results, but only print if rc is bad.
+    unless ($noCmdExec || $dryRun) {
+      my @results = `$command`;
+      $rc = $? >> 8;
+    
+      if ($rc > 0) {
+        print "ERROR: Unable to add branch name $branch to TK $toolKit $component in CM DB\n";
+        print @results;
+        return $ERROR;
+      }
+    }  
+  }  
+  
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateTimeStamps()
+# Purpose: Update the file timestamps in tk14.1.n to match prod.
+#          Files and directories are updated, but not symlinks.
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub UpdateTimeStamps {
+
+  my $command = "";
+  my $refTree = "/afs/eda/prod/$component/$release";
+  my $tgtTree = "/afs/eda/$branch/$component/$release";
+
+  print "Updating timestamps under $branch/$component/$release directory to match timestamps in prod\n";
+  
+  # Verify reference and target trees exist. Need to end up with $reftree as
+  #   the current directory for the find command below.
+  chdir("$tgtTree") || die "ERROR: unable to cd to $tgtTree  $!";
+  chdir("$refTree") || die "ERROR: unable to cd to $refTree  $!";  
+
+  # Construct the commands used update the file timestamps.
+  #
+  # The touch -r option replicates the times found on files and directories in
+  #   $refTree to the matching file in $tgtTree.
+  # The touch -c option avoids the creation of empty files that do not already
+  #   exist in $tgtTree.
+  # Double quotes around {} are required to handle spaces embedded in file names.
+  # Symlinks are ignored (! -type l).
+  $command = "find . ! -type l |xargs -i sh -c \"touch -r \\\"{}\\\" -c \\\"$tgtTree/{}\\\"\"";
+  $command .= " 2>&1";
+
+  print "Running $command\n" if ($verbose);
+  
+  # Skip command execution if the -k option was specified.
+  # Capture results, but only print if rc is bad.
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+  
+    if ($rc > 0) {
+      print "ERROR: Unable to update timestamps below $branch/$component/$release directory to match timestamps in prod\n";
+      print @results;
+      return $ERROR;
+    }
+  }  
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CheckSvnCompBranch()
+# Purpose: Check for presence of component branch in SVN
+# RCs    : 0 = Component branch in SVN is not present
+#          1 = Component branch in SVN is present (and needs to be deleted
+#          before another svn copy can be done).
+#------------------------------------------------------------------------------
+sub CheckSvnCompBranch {
+
+  my $svnCompBranchExists = 0;
+  
+  # Construct the command that checks for presence of old component branch in SVN
+  my $command = "$SVN info";
+  $command .= " https://greenjiffy.fishkill.ibm.com/eda/tk/$component/branches/$branch";
+  $command .= " > /dev/null";
+  $command .= " 2>&1";
+  
+  print "Running $command\n" if ($verbose);
+
+  # Run the command
+  `$command`;
+  
+  my $rc = $? >> 8;
+  
+  if ($rc == 0) {
+    $svnCompBranchExists = 1;
+    #print "DEBUG: svnCompBranch is present - it needs to be deleted\n"; # DEBUG
+  }
+
+  return $svnCompBranchExists;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : DeleteSvnCompBranch()
+# Purpose: Delete component branch in SVN
+# RCs    : 0 = OK
+#          8 = 
+#------------------------------------------------------------------------------
+sub DeleteSvnCompBranch {
+
+  # Construct the command that deletes the old component branch in SVN
+  my $command = "$SVN delete";
+  $command .= " --force";
+  $command .= " -m \"Deleting AGTS branch prior to rerun of testing\"";
+  $command .= " https://greenjiffy.fishkill.ibm.com/eda/tk/$component/branches/$branch";
+  $command .= " 2>&1";
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  # Capture results, but only print if rc is bad.
+  unless ($noCmdExec) {  
+
+    my @results = `$command`;
+    my $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to delete the old component branch in SVN\n";
+      print @results;
+      return $ERROR;
+    }
+  }  
+  
+  #print "DEBUG: svnCompBranch was successfully deleted\n"; # DEBUG
+  
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ProdLockMgr()
+# Purpose: Lock or unlock prod directory (change ACLs and set/remove lock file)
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub ProdLockMgr {
+
+  my ($lockParm) = @_;
+  
+  my $keyWord = "lock";
+  $keyWord = "unlock" if ($lockParm eq "u");
+  
+  # Don't attempt to lock prod if a lock file already exists.
+  # Attempting to lock prod when it is already locked results in an error from
+  # the ProdLockMgr script.
+  #my $lockFile = "/afs/eda/prod/$component/$release/.lock_prodLockMgr";
+  my $lockFile = "/afs/eda/prod/$component/$release/.lock_compLockMgr";
+  if (($lockParm eq "l") && (-e $lockFile)) {
+    return $OK;
+  }
+  
+  print "Initiating $keyWord of prod $dryRunMsg\n";
+
+  # Construct the command
+  #my $command = "$DEV_BIN/prodLockMgr";
+  #$command .= " -t $toolKit";
+  #$command .= " -c $component";
+  #$command .= " -$lockParm";
+  #$command .= " 2>&1";
+  
+  my $command = "$DEV_BIN/compLockMgr";
+  $command .= " -c $component";
+  $command .= " -level prod";
+  $command .= " -$lockParm";
+  $command .= " 2>&1";
+  
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k or dryrun option was specified
+  # Capture results, but only print if rc is bad.
+  unless ($noCmdExec || $dryRun) {  
+
+    my @results = `$command`;
+    my $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to $keyWord prod directory\n";
+      print @results;
+      return $ERROR;
+    }
+  }  
+   
+  return $OK;
+  
+}
+
+#------------------------------------------------------------------------------
+# Name   : SetupXmitDirs()
+# Purpose: Create .ship* dirs for transmittal window
+# RCs    : 0 = OK
+#          8 = 
+#------------------------------------------------------------------------------
+sub SetupXmitDirs {
+
+  # Construct the command that creates the .ship* dirs that provide a 
+  # transmittal window
+  my $command = "$DEV_BIN/setup_xmit_dirs";
+  $command .= " -t $toolKit";
+  $command .= " -c $component";
+  $command .= " -x ship";
+  $command .= " 2>&1";
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  # Capture results, but only print if rc is bad.
+  unless ($noCmdExec) {  
+
+    my @results = `$command`;
+    my $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to create .ship* dirs for transmittal window\n";
+      print @results;
+      return $ERROR;
+    }
+  }  
+  
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetDelivered()
+# Purpose: Determine if this component should be advanced to ship
+# RCs    : 1 = delivered
+#          0 = not delivered
+#------------------------------------------------------------------------------
+sub SetDelivered {
+
+  # Construct a list of delivered components
+  my $command = "$DEV_BIN/getComponents";
+  $command .= " -t $toolKit";
+  $command .= " -ct DELIVERED,TEST_SUPPORT";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+  print "Running $command\n" if ($verbose);
+
+  my @results = `$command`;
+  my @delComps = split(/,/, $results[0]);
+
+  my $rc = 0;
+  $rc = 1 if (grep(/^$component$/, @delComps));
+
+  print "Is delivered: $rc\n" if ($verbose);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SyncPermissions()
+# Purpose: Synchronize AFS directory ACLs beneath target level/component/release
+#          directory to match AFS ACLs for equivalent subdirectories under a 
+#          reference level/component/release directory.
+# RCs    : 0 = OK
+#          8 = 
+#------------------------------------------------------------------------------
+sub SyncPermissions {
+
+  my ($reflevel, $tgtlevel) = @_;
+  #my $rc = 0;
+  
+  # If this component is not delivered then it wasn't advanced to ship and we
+  # don't need to synchronize ship ACLs with tk ACLs.
+  if (! $isDelivered) {
+    print " * This component was NOT be advanced to ship and therefore does not ";
+    print "   require ship AFS directory ACLs to be synchronized with tk.\n";
+    return $rc;
+  }
+  
+  # Construct the command that synchronizes shipb permissions to match tkb permissions
+  my $command = "$DEV_BIN/fixPerms";
+  $command .= " -reflevel $reflevel";
+  $command .= " -tgtlevel $tgtlevel";
+  $command .= " -c $component";
+  $command .= " -r $release";
+  $command .= " 2>&1";
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  # Capture results, but only print if rc is bad.
+  unless ($noCmdExec) {  
+
+    my @results = `$command`;
+    my $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to complete synchronization of $tgtlevel permissions to match $reflevel permissions\n";
+      print @results;
+      return $ERROR;
+    }
+  }  
+  
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ChgProdLinks()
+# Purpose: Find symlinks that point to prod/tools/14.1 and convert to
+#          point to ../tools/14.1
+# RCs    : 0 = OK
+#          8 = 
+#------------------------------------------------------------------------------
+sub ChgProdLinks {
+
+  #my $rc = 0;
+
+  # Construct the command that fixes prod/tools/14.1 synlinks
+  my $command = "$DEV_BIN/chgProdLinks";
+  $command .= " -t $toolKit";
+  $command .= " -l shipb";
+  $command .= " -c $component";
+  $command .= " 2>&1";
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  # Capture results, but only print if rc is bad.
+  unless ($noCmdExec) {  
+
+    my @results = `$command`;
+    my $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to fix prod/tools/14.1 synlinks\n";
+      print @results;
+      return $ERROR;
+    }
+  }  
+  
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# [08/02/2012: COPIED FROM TkCommon.pm and updated here for a quick fix]
+#
+#   FUNCTION: convert_tkVersion (tkVer, verType)  
+#    PURPOSE: Convert tkVersion to other formats based on verType
+#
+#  PARAMS IN: tkVer    = Toolkit version (e.g. 14.1.{n})
+#             verType  = type to convert into:
+#                        "release"   : 14.1
+#                        "selfstore" : 1401
+#                        "underscore": 14_1_{n}
+#
+# PARAMS OUT: rc       = return code
+#             newVer   = converted format 
+#
+# RETURN CODES: 0 = TK version was converted
+#               1 = TK version was not converted
+#------------------------------------------------------------------------------
+sub convert_tkVersion {
+
+  my ($tkVer, $verType) = @_;
+  
+  my ($maj, $min, $ver);
+  my $newVer;
+  my $rc = $ERROR;      # Default: not converted
+  my $us = "_";
+  my $dot = ".";
+  my $zero = "0";
+  
+  # Is tkVer in correct format?
+  #if ($tkVer =~ m/(\d\d).(\d).(\d)/) {
+  if ( ($tkVer =~ m/(\d\d).(\d).(\d)/) || ($tkVer =~ m/(\d\d).(\d).build/) ) {
+    
+    # Split into three parts
+    ($maj, $min, $ver) = split (/\./, $tkVer);
+    
+    # Reassemble based on verType
+    if ($verType eq "underscore") {
+      $newVer = "$maj$us$min$us$ver";
+      $rc = 0;
+    }
+    elsif ($verType eq "selfstore") {
+      $newVer = "$maj$zero$min";
+      $rc = 0;  
+    }
+    elsif ($verType eq "release") {
+      $newVer = "$maj$dot$min";
+      $rc = 0;  
+    }
+    return ($rc, $newVer);
+  }
+  else {
+    print "TK version \"$tkVer\" is not in correct format.\n"; 
+  }
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CrUpdateTk()
+# Purpose: Run cr.updateTk
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CrUpdateTk {
+
+  my $rc = 0;
+
+  print "Executing cr.updateTk\n";
+
+  my $command = "$DEV_BIN/cr.updateTk";
+  $command .= " -c $component";
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Bad return code from cr.updateTk\n";
+      print @results;
+      return $OK;
+    }
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ChgIncludeLinks()
+# Purpose: Selectively replace symlinks with files for include and private directories
+#          if object is a file in prod location.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub ChgIncludeLinks {
+
+  my $rc = 0;
+
+  # Construct the command
+  my $command = "$DEV_BIN/chgIncludeLinks";
+  $command .= " -t $toolKit";
+  $command .= " -c $component";
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Bad return code from chgIncludeLinks\n";
+      print @results;
+      return $OK;
+    }
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CheckRevisions($loc1, $loc2)
+# Purpose: Verifies the latest revision in $loc1 matches latest revision
+#          in $loc2
+# RCs    : 0 = OK
+#          8 = ERROR (no match)
+#------------------------------------------------------------------------------
+sub CheckRevisions {
+
+  my($loc1, $loc2) = @_;
+
+  if ($noRevCheck) {
+    print "WARNING: skipping $loc1:$loc2 revision check.\n";
+    return $OK;
+  }
+
+  # Get the latest revision for each location
+  my $rev1 = GetLatestRevision($loc1);
+  my $rev2 = GetLatestRevision($loc2);
+
+  # Retrun error they don't match
+  if ($rev1 != $rev2) {
+    print "ERROR: revisions in $loc1 and $loc2 do not match.\n";
+    print "       $loc1 revision: $rev1\n";
+    print "       $loc2 revision: $rev2\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+

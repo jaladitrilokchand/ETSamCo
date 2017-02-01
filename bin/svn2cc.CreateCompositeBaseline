@@ -1,0 +1,372 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: svn2cc.CreateCompositeBaseline
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#    DATE: 09/18/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+# ASSUMPTIONS
+# 1. This script is being run from a process on a machine in Burlington that
+#    has the ClearCase client installed.
+# 2. The ClearCase client is configured to point to the desired ClearCase 
+#    environment (production or test). Use the "cleartool hostinfo -l"
+#    command to verify.
+# 3. The svnlib AFS ID is running this script.
+#      svnlib AFS tokens for the btv.ibm.com and eda.fishkill.ibm.com cells are 
+#      present.
+# 4. New components have already been added to ClearCase.
+# 5. The following dynamic views already exist:
+#   edatk14.1_int (integration view associated with the 14.1 stream)
+#   edatk14.1.x   (view associated with the Tool Kit version of interest,
+#                  where x is the minor version (e.g., like 2 in 14.1.2)
+# 6. A ClearCase activity has already been created and is set in the 
+#    edatk14.1.x view.
+# 7. The policy POLICY_CHSTREAM_UNRESTRICTED is enabled on the integration 
+#    stream.
+# 
+#  Can use -fmt %[rec_bls]CXp to view recommended baselines.
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 09/18/2012 EH  Initial coding.
+# 06/25/2013 EH  Removed unused code and extraneous comments.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+# Global variables
+my $svnlibFshAfsId = 66027;
+my $svnlibBtvAfsId = 21821;
+my $svnlibBtvUid   = 21821;
+my $CT             = "/opt/rational/clearcase/bin/cleartool";
+my $logDir         = "";
+my $authorizedId   = "svnlib";
+my $ccIntView      = "edatk14.1_int";
+my $ccView         = "";
+my @finalFdBls     = ();
+my $projectVobTag  = "/vobs/iptk3";
+
+# Program variables
+my $appName = "svn2cc.CreateCompositeBaseline";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $noCmdExec       = 0;
+my $toolKit         = "";
+my $component       = "";
+my $logFile         = ""; 
+my $cmdLineArgs     = "";
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc  = $ERROR;
+my $startDir = $ENV{"PWD"};
+my $progRC = "";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleDIE(); };
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+$rc = UpdateCompositeBl();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to add new components (dependencies) to composite BL ", $ERROR);
+}
+
+chomp(my $logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+CleanExit("\n$logDate $appName complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  CleanExit("\n[$appName] Caught an unexpected die - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+  print "$message\n";
+  print "Return code: $rc\n";
+  close (STDOUT);
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script creates/updates a composite baseline. It is intended to be run
+after new Tool Kit components have been added to ClearCase.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-h] [-k] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit  = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+  -h          (optional) application help
+  -k          (optional) Suppress execution of significant commands for debugging
+  -y          (optional) Verbose (print the invocation of each command)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  my $rc = $OK;
+  my $command = "";
+  
+  # Capture command line arguments for logging (before GetOptions deletes them)
+  $cmdLineArgs = join(' ', @ARGV);
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'      => \$toolKit,
+              'component|c=s' => \$component,        
+              'k'           => \$noCmdExec,
+              'y'           => \$verbose,
+              'help|h|?'    => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) must be specified\n";
+    return $ERROR;
+  }
+
+  $ccView = "edatk" . $toolKit;
+
+  $logDir = "/afs/eda/data/edainfra/logs/$toolKit/agts";
+  
+  # Check eda.fishkill AFS token
+  my $fshAfsId = `/usr/afsws/bin/tokens |grep eda.fishkill.ibm.com |cut -d")" -f1 |cut -d" " -f4`;
+  if ($fshAfsId != $svnlibFshAfsId) {
+    print "ERROR: eda.fishkill.ibm.com AFS token for svnlib is required\n";
+    return $ERROR;
+  }
+  
+  # Check btv AFS token
+  my $btvAfsId = `/usr/afsws/bin/tokens |grep btv.ibm.com |cut -d")" -f1 |cut -d" " -f4`;
+  if ($btvAfsId != $svnlibBtvAfsId) {
+    print "ERROR: btv.ibm.com AFS token for svnlib is required\n";
+    return $ERROR;
+  }
+
+  # Check GID (used by ClearCase).
+  my $gid = `/usr/bin/id -u`;
+  if ($gid != $svnlibBtvUid) {
+    print "ERROR: svnlib Burlington UID is required\n";
+    return $ERROR;
+  }
+  
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetCcFoundationBlList()
+# Purpose: Create list of existing foundation baselines
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub GetFdBlList {
+
+  my $rc = 0;
+  my $fdBl = "";
+  my $tokens = ();
+  
+  print "Creating list of existing foundation baselines\n";
+
+  # TODO: Add a "ct mount /vobs/eda_tksource3" before running the first CC command...
+
+  my $lsStreamCmd = "$CT lsstream";
+  $lsStreamCmd .= " -fmt \"%[found_bls]CXp\"";
+  $lsStreamCmd .= " stream:14.1_int" . "@" . $projectVobTag;
+  
+  my $command = "$CT setview";
+  $command .= " -exec";
+  $command .= " \"$lsStreamCmd\"";
+  $command .= " $ccIntView";
+  $command .= " 2>&1";
+
+  print "Running $command\n" if ($verbose);
+  
+  my @fdBlResults = `$command`;
+  $rc = $? >> 8;
+
+  if ($rc > 0) {
+    print "ERROR: Unable to create list of existing foundation baselines\n";
+    return $ERROR;
+  }    
+
+  # Put existing foundation baselines in a hash
+  @finalFdBls = ();
+  chomp(my $fdBlCSV = $fdBlResults[0]);
+  my @tokens = split(/, /, $fdBlCSV);
+  foreach $fdBl (@tokens) {
+  
+    # Get rid of baseline: prefix
+    $fdBl =~ s/baseline\://;
+    $fdBl =~ s/\_INITIAL//;
+    push (@finalFdBls, $fdBl);  
+  } 
+  
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateCompositeBl()
+# Purpose: Add new components (dependencies) to composite BL
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub UpdateCompositeBl {
+
+  my $rc = 0;
+  my $listOfBaselines = "";
+  my $bl = "";
+
+  # Need a fresh list of current baselines.
+  $rc = GetFdBlList();
+  if ($rc > 0) {
+      print "ERROR: Unable to recommend foundation baselines for the 14.1_int stream\n";
+      return $ERROR;
+  }  
+
+  print "\nAdding new components (dependencies) to composite BL\n";
+
+  # TODO: Add a "ct mount /vobs/eda_tksource3" before running the first CC command.
+ 
+  foreach $bl (@finalFdBls) {
+    next if ($bl =~ /DevCompositeBaselines/);
+    if ($listOfBaselines eq "") {
+      $listOfBaselines = $bl;
+    }
+    else {
+      $listOfBaselines = $listOfBaselines . "," . $bl;
+    }
+  }
+
+  my $mkblCmd = "$CT mkbl";
+  $mkblCmd .= " -nact";
+  $mkblCmd .= " -component DevCompositeBaselines@/vobs/iptk3";
+  $mkblCmd .= " -adepends";
+  $mkblCmd .= " $listOfBaselines";
+  
+  my $command = "$CT setview";
+  $command .= " -exec";
+  $command .= " \"$mkblCmd\"";
+  $command .= " $ccView";
+  $command .= " 2>&1";
+
+  print "\nRunning $command\n" if ($verbose);
+  
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+    
+    print @results;
+    
+    if ($rc > 0) {
+      print "ERROR: Unable to add new components (dependencies) to composite BL\n";
+      return $ERROR;
+    }    
+  }
+
+  return $OK;
+  
+}

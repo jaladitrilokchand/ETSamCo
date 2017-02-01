@@ -1,0 +1,607 @@
+#!/usr/bin/env perl
+use warnings;
+#use strict;
+#=============================================================================
+#    FILE: testAGTS
+#
+# CREATOR: Art Magnan
+#    DEPT: AZYX
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# Perform the dry run testing of the PREVIEW Toolkit release flow from EDA PROD
+# through the transmittal step for the specified EDA tool component.
+#
+#-NOTES---------------------------------------------------------------------
+# (1) This script must be run by AFS ID svnlib.
+# (2) The Toolkit version is hard-coded for this testing.
+# (3) The component(s) must be defined, and associated with this Toolkit version in the
+#     CM DB.
+#     (a) This script needs to support the "delivered" component definition.
+#     (b) This script needs to support the "build_support" component definition.
+# (4) Test steps 1 thru 6 need to be run for "delivered" components.
+# (5) Test steps 1 thru 4 only should be run for "build_support" components.
+# (6) The initialized TK version tree must already exist for all defined components.
+# (7) The processing sequence can be executed as Stop on Fail with -s switch.
+# (8) The processing sequence currently consists of six steps.
+#
+# PROCESSING SEQUENCE
+#
+# STEP 01  Lock the component tree in EDA PROD.
+# STEP 02  Save a copy of the EDA PROD component tree for later comparison with EDA SHIPB.
+# STEP 03  Run the AGTS flow until all steps are RC=0.
+# STEP 04  Unlock the component tree in EDA PROD.
+# STEP 05  Advance component from EDA SHIPB to SHIP.
+# STEP 06  Transmit component to PI&R.
+# STEP xx  [FUTURE]
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 09/22/2011 AM  Initial version
+#
+#=============================================================================
+#=============================================================================
+#			       FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub help {
+        print "\nScript to run Phase 2 dry run testing from EDA PROD thru transmittal on one component.\n";
+        print "\nUsage: testAGTS -c <component> [-d] [-g] [-h]\n";
+        print "\nInput parameters:\n";
+        print "  -c   <component_name> or \"full_TK\" for all components.\n";
+				print "  -d   Development Mode ON\n";
+				print "  -g   Debug mode ON - no execution of data updates - will see what would execute.\n";
+				print "  -h   This help\n";
+        print "\nNOTES:\n";
+				print "   1) The EDA tool component name is required, use the -c switch.\n";
+				print "\nSPECIAL OPTIONS:\n";
+				print "  -s   Stop on Fail\n";
+				print "  -i   Display the AGTS step definition\n";
+				print "  -b   <beginning step #>      for use in single step mode.\n";
+				print "  -e   <ending step #>         for use in single step mode.\n";
+        exit 1;
+} # end help
+
+sub process_rc {
+	#
+  # Handle return code processing from TK common
+  #
+	my ($opName, $errMsg, $doExit, $rc) = @_;
+	
+	if ($rc == 0) {
+		print "Operation successful for \"$opName\". rc=$rc\n";
+	}
+	else {
+		print "ERROR: Return code $rc from \"$opName\".\n";
+		if ($errMsg ne "") {
+			print "$errMsg\n";
+		}
+    if ($doExit) {
+			exit $rc;
+		}		
+	}
+} # end process_rc
+
+sub max_rc {
+	#
+	# return the rolling maximum return code
+	#
+	my ($rc, $maxrc) = @_;
+	
+	if ($rc > $maxrc) {
+		$maxrc = $rc;
+	}
+	return ($maxrc);
+} # end max_rc
+
+sub check_userID {
+	#
+	# AFS ID svnlib must be used to execute this script
+	#
+	my ($userID, $debug, @authID) = @_;
+  my ($found) = 1;
+	my $id;
+	
+	foreach $id (@authID) {
+		if ($debug) {
+			print "userID: \"$userID\"  authID: \"$id\"\n";
+		}
+		if ( $userID eq $id ) {
+			$found = 0;
+			last;
+		}
+	}
+  return ($found);
+} # end check_userID
+
+sub create_timestamp {
+	#
+	# Get date and time info from system
+	#
+	
+	my @months = qw(jan feb mar apr may jun jul aug sep oct nov dec);
+  my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+	my $newmin;
+	my $newsec;
+
+	$year = $year + 1900;
+	
+	my $month = $mon + 1;
+  my $monthName = $months[$mon];
+	my $monthDay = $monthName . $mday;
+	
+  my $date_now = $month . "/" . $mday . "/" . $year;
+	
+  if ($min < 10) {
+    $newmin = "0" . $min;
+  }
+  else {
+    $newmin = $min;
+  }
+
+	if ($sec < 10) {
+    $newsec = "0" . $sec;
+  }
+  else {
+    $newsec = $sec;
+  }
+	
+  my $time_now = $hour . ":" . $newmin . ":" . $newsec;
+	
+  return ($date_now, $time_now, $monthName, $monthDay);
+	
+} # end create_timestamp
+
+sub get_OS {
+	#
+	# Determine if script is running on Linux or AIX
+  #
+	my $osName = "";
+	my $osStr = "";
+
+	$osStr = `uname -a`;
+	
+	if ($osStr =~ /^AIX/) {
+		$osName = "aix";
+	} elsif ($osStr =~ /Linux/) {
+		$osName = "linux";
+	} else {
+		$osName = "undef";
+	}
+	return ($osName);
+} # end get_OS
+
+sub log_execution {
+	#
+	# Define the logging, execution timestamps
+	#
+	my ($when, $compType) = @_;
+	my $tkVer = "";
+	my ($date_now, $time_now, $monthName, $monthDay);
+	my $datetime;
+	
+	if ($when eq "start") {
+
+    # Convert tkVersion for use in log file name
+    $tkVer = TkCommon::convert_tkVersion ($main::tkVersion, "selfstore");
+
+		# Set up the log file
+		($date_now, $time_now, $monthName, $monthDay) = create_timestamp;
+		$datetime = "$date_now at $time_now";
+
+		my $logTop  = "/afs/eda/u/svnlib/logs/${monthName}";
+		if (! -d $logTop) {
+			`mkdir -p $logTop`;
+		}
+		$main::logFile = "$logTop/${monthDay}.${compType}.${tkVer}.${main::scriptName}.log";
+		unless (open(STDOUT, "| tee -ai $main::logFile")) {
+			die ("Output file $main::logFile cannot be opened.\n");
+		}
+		
+		# Log the start time
+		print ("#\n");
+		print ("# $main::fullScrName started at $datetime by $main::userID\n");
+		print ("#\n");
+		
+		# Display the command line input parms
+		display_script_parms ($compName, $tkVersion);
+
+		# List the steps to be processed
+		print "*=====================================================*\n";
+		print "**** Executing PREVIEW Flow test steps $strtStep through $stopStep ****\n";
+		print "*=====================================================*\n\n";
+		
+	} elsif ($when eq "end") {
+
+		($date_now, $time_now, $monthName, $monthDay) = create_timestamp;
+		$datetime = "$date_now at $time_now";
+		
+		# Log the end time
+		print ("#\n");
+		print ("# $main::fullScrName ended at $datetime by $main::userID\n");
+		print ("#\n");
+		
+	} else {
+		print "ERROR: log_execution: Can't figure out when I need to log!\n";
+	}
+} # end log_execution
+
+sub define_steps {
+	#
+	# Define the AGTS steps (step numbers, step text)
+	#
+  %stepData = (
+							 "01" => "Lock the component tree in EDA PROD.",
+							 "02" => "Save a copy of the EDA PROD component tree for later comparison with EDA SHIPB.",
+							 "03" => "Run the AGTS flow until all of its defined steps are RC=0.",
+							 "04" => "Unlock the component tree in EDA PROD.",
+							 "05" => "Advance EDA SHIPB to SHIP.",
+							 "06" => "Transmit component to PI&R",
+							);
+	
+} # end define_steps
+
+sub display_steps {
+	#
+	# Display the AGTS steps and their corresonding step numbers.
+	#
+	my $stepNum;
+
+	define_steps;
+
+	print "\nThese are the Preview Flow test steps (Step #, function):\n\n";
+	foreach $stepNum (sort keys %stepData) {
+		print "Step $stepNum: $stepData{$stepNum}\n";
+	}
+	print "\n";
+	exit 1;
+} # end display_steps
+
+sub process_cmd_line {
+  # --------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+  # Parms defined:  -c  <component_name; e.g. hdp>
+  #                 -d  [Development mode ON - using code from DEV area]
+  #                 -g  [Debug mode ON - no execution of data updates - will see what would execute.]
+  #                 -h  [help]
+	#                 -s  [stopOnFail mode ON]
+	#		              -i  Display the test step definition
+	#                 -b  <beginning step #>      for use in single step mode.
+	#                 -e  <ending step #>         for use in single step mode.
+  # --------------------------------------------------------------
+	$opt_c = "";
+
+	getopts('b:c:de:ighs');
+
+  $compName = "$opt_c";
+	
+  # Activate Stop on Fail mode
+	if ( ${opt_s} ) {
+		$stopOnFail = 1;
+	}
+	else {
+		$stopOnFail = 0;
+	}
+
+  # Set DEV mode
+	if ( ${opt_d} ) {
+		$main::devMode = 1;
+		$devFlg = "-d";
+	}
+	else {
+		$main::devMode = 0;
+		$devFlg = "";
+	}
+
+  # Set DEBUG mode
+	if ( ${opt_g} ) {
+		$main::DEBUG = 1;
+		$dbgFlg = "-g";
+	}
+	else {
+		$main::DEBUG = 0;
+		$dbgFlg = "";
+	}
+
+	# Set steps
+	if ( ${opt_b} ) {
+		$strtStep  = "$opt_b";
+	}
+	if ( ${opt_e} ) {
+		$stopStep  = "$opt_e";
+	}
+	
+	if ( ${opt_h} ) { help(); }
+	if ( ${opt_i} ) { display_steps(); }
+
+} # end process_cmd_line
+
+sub display_script_parms {
+	#
+	# Display the input parameters entered on the command line
+	#
+	my ($compName, $tkVersion) = @_;
+
+	print "------------------------------------------------------ \n";
+	print " Parms Read By Program:        \n";
+	print " $fullScrName \n";
+	print "------------------------------------------------------ \n";
+	print "Component name = \"$compName\" \n";
+	print "TK Version     = \"$tkVersion\"\n";
+	if ($opt_b) { print "Start Step     = \"$strtStep\" \n"; }
+	if ($opt_e) { print "Stop Step      = \"$stopStep\" \n"; }
+	if ($opt_s) { print "Stop On Fail   = \"ON\" \n"; }
+	else { print "Stop On Fail   = \"OFF\" \n"; }
+	if ($opt_d) { print "DEV Mode       = \"ON\" \n"; }
+	else { print "DEV Mode       = \"OFF\" \n"; }
+	if ($opt_g) { print "DEBUG Mode     = \"ON\" \n"; }
+	else { print "DEBUG Mode     = \"OFF\" \n"; }
+	print "------------------------------------------------------ \n\n";
+
+} # end display_script_parms
+
+#============================================================================================
+#					MAIN ROUTINE
+#============================================================================================
+use Env;
+use Getopt::Std;
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TkCommon;
+
+my $rc = 0;
+my $maxRC = 0;
+
+our $tkVersion = "14.1.0";
+our $scriptName = "testAGTS";
+our $fullScrName = $0;
+
+our $DEBUG = 1;
+our $devMode = 1;
+
+our %compList = ();
+our $logFile;
+
+our $SSH = "/usr/bin/ssh";
+
+our $codePath = "/afs/eda/data";      # Top path of script location.
+#our $codePath = "/afs/eda/u/amagnan";
+
+my $compCnt = 0;
+my $comp;
+my $rsyncCmd;
+my $errMsg;
+
+our %stepData = ();
+our $stepMin = 1;           # Minimum step number that can be run in this script
+our $stepMax = 6;          # Maximum step number that can be run in this script
+our $strtStep = $stepMin;   # Default start step
+our $stopStep = $stepMax;   # Default stop step
+
+# Only AFS ID svnlib should run this script to update the TK version tree!!!
+our $userID = $LOGNAME;
+our $mainAuthID = "svnlib";
+my (@authID) = ($mainAuthID);
+$rc = check_userID ($userID, 0, @authID);
+if ($rc) {
+  print "\nERROR: You MUST run this script as AFS ID \"@authID\" to execute the Aug Dry Run!!!\n\n";
+  exit 8;
+} else {
+	print "\nINFO: Running script using authorized AFS ID.\n";
+}
+
+# Get inputs from command line
+process_cmd_line;
+
+# Check for a component name
+if ($compName eq "") {
+  print "\nERROR: Missing component name.\n";
+  print "       You must specify the EDA TK component name, using the -c switch.\n\n";
+  exit 8;
+}
+# Check start and stop step ranges
+if (($strtStep < $stepMin) || ($strtStep > $stepMax)) {
+  print "\nERROR: You must specify a starting step from $stepMin to $stepMax.\n\n";
+  exit 8;
+}
+if (($stopStep < $stepMin) || ($stopStep > $stepMax)) {
+  print "\nERROR: You must specify an stop step from $stepMin to $stepMax.\n\n";
+  exit 8;
+}
+if (($stopStep < $strtStep) || ($strtStep > $stopStep)) {
+  print "\nERROR: You must specify a start step less than or equal to a stop step.\n\n";
+  exit 8;
+}
+
+# Determine the OS since some sytem commands are OS-specific
+$osType = get_OS;
+
+#
+# Get the TK version-specific component definition
+#
+my $compDefPath = "/afs/eda/u/svnlib/toolkit/data";
+($rc, %compList) = TkCommon::read_compdef_files ($tkVersion, $compDefPath, "both", $DEBUG);
+if ($rc != 0) {
+	print "ERROR: Unable to get the TK version-specific component definition.\n";
+}
+
+# Define the locations of the PROD component tree (SRC_DIR) and its SAVE location (TGT_DIR)
+my $SRC_DIR = "/afs/eda/prod/$compName/14.1";
+my $TGT_DIR = "/data/svnlib/tk14.1.0/$compName/14.1";  # local space on GREENJIFFY
+
+#my $TGT_DIR = "/afs/eda/tkrepos/14.1.1";    # Quota here is 25 GB - should handle largest comp
+#my $TGT_DIR = "svnlib\@edasvn.fishkill.ibm.com:/data/svnlib/tk14.1.0/$compName/14.1";
+#my $TGT_DIR = "/afs/eda/u/svnlib/tk14.1.0/prodsave";
+
+# Set location of enablement code based on DEV or PRODUCTION (default) mode
+if ($devMode) {
+	$scriptPath = "${codePath}/edainfra/tools/enablement/dev/bin";
+  $logSuffix = "devlog";
+}
+else {
+	$scriptPath = "${codePath}/edainfra/tools/enablement/prod/bin";
+  $logSuffix = "log";
+}
+
+#
+# Run the set of test steps on one component defined in this TK version.
+#
+log_execution ("start", "$compName");
+
+#--- STEP 01 ---
+$thisStep = 1;
+if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+	#
+	# Lock the PROD component tree for the specified component
+	#
+	$opName = "Lock component tree";
+	print "Locking PROD component tree for $compName/14.1\n";
+	$lockCmd = "$scriptPath/prodLockMgr -t $tkVersion -c $compName -l $devFlg $dbgFlg";
+	
+	# Execute the command
+	TkCommon::runcmd("$lockCmd", "$DEBUG");
+	$rc = $? >> 8;
+	
+	$errMsg = "ERROR: Unable to lock component \"$compName\" for TK version $tkVersion";
+	process_rc ($opName, $errMsg, $stopOnFail, $rc);
+	
+	print "  *******\n\n";
+} # end Step 01
+
+#--- STEP 02 ---
+$thisStep = 2;
+if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+	#
+	# Copy the component tree into a SAVED location for subsequent use
+	#
+	if ($rc == 0) {
+		$opName = "Save PROD component tree";
+		print "Saving PROD component tree for $compName/14.1\n";
+		
+		$rsyncCmd = "/usr/bin/rsync -rlptvz --delete $SRC_DIR/ $TGT_DIR 2>&1";
+		
+		# Execute the command
+		TkCommon::runcmd ("$rsyncCmd", "$DEBUG");
+		$rc = $? >> 8;
+		
+		$errMsg = "Unable to save the EDA PROD component tree for $compName";
+		process_rc ($opName, $errMsg, 0, $rc);
+		
+		print "  *******\n\n" ;
+	}
+} # end Step 02
+
+#--- STEP 03 ---
+$thisStep = 3;
+if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+	#
+	# Run the AGTS flow
+	#
+	if ($rc == 0) {
+		$opName = "AGTS Flow";
+		print "Running the AGTS flow for $compName/14.1\n";
+		
+		# TEST NOTE (09/21/11): Gregg says that Step 11 in AGTS is not needed at this time - so end at step 10.
+
+		$agtsCmd = "$scriptPath/runAGTS -t $tkVersion -c $compName -s -e 10 $devFlg $dbgFlg";
+		
+		# Execute the command
+		TkCommon::runcmd("$agtsCmd", "$DEBUG");
+		$rc = $? >> 8;
+		
+		$errMsg = "ERROR: The AGTS flow encountered errors for component \"$compName\" in TK version $tkVersion";
+		process_rc ($opName, $errMsg, $stopOnFail, $rc);
+		
+		print "  *******\n\n";
+	}
+} # end Step 03
+
+#--- STEP 04 ---
+$thisStep = 4;
+if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+	#
+	# Unlock the PROD component tree for the specified component
+	#
+	if ($rc == 0) {
+		$opName = "Unlock component tree";
+		print "Unlocking PROD component tree for $compName/14.1\n";
+		
+		$unlockCmd = "$scriptPath/prodLockMgr -t 14.1.0 -c $compName -u $devFlg $dbgFlg";
+		
+		# Execute the command
+		TkCommon::runcmd("$unlockCmd", "$DEBUG");
+		$rc = $? >> 8;
+		
+		$errMsg = "ERROR: Unable to unlock component \"$compName\" for TK version $tkVersion";
+		process_rc ($opName, $errMsg, $stopOnFail, $rc);
+		
+		print "  *******\n\n";
+	}
+} # end Step 04
+
+#--- STEP 05 ---
+$thisStep = 5;
+if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+	#
+	# Advance EDA SHIPB to SHIP
+	#
+	if ($rc == 0) {
+		$opName = "Advance EDA SHIPB to SHIP";
+		print "Advancing EDA SHIPB to SHIP for $compName/14.1\n";
+		
+		$advCmd = "$scriptPath/svnAdvance -r \"$compName.1401\" -s shipb -d ship";
+		
+		# Execute the command
+		TkCommon::runcmd("$advCmd", "$DEBUG");
+		$rc = $? >> 8;
+		
+		$errMsg = "ERROR: Unable to advance component \"$compName\" from SHIPB to SHIP on TK version $tkVersion";
+		process_rc ($opName, $errMsg, $stopOnFail, $rc);
+		
+		print "  *******\n\n";
+	}
+} # end Step 05
+
+#--- STEP 06 ---
+$thisStep = 6;
+if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+	#
+	# Transmit component to PI&R
+	#
+	if ($rc == 0) {
+		$opName = "Transmit component to PI&R";
+		print "Transmitting $compName/14.1 to PI&R\n";
+
+		# Call OS-specific command syntax
+		if ($osType eq "linux") {
+			# Linux version
+			$txCmd = "$SSH mogul.fishkill.ibm.com $scriptPath/transmit -v $tkVersion -c $compName -s $devFlg $dbgFlg";
+		} elsif ($osType eq "aix") {
+			# AIX version
+			$txCmd = "$scriptPath/transmit -v $tkVersion -c $compName -s $devFlg $dbgFlg";
+		} else {
+			$rc = 4;
+		}
+		
+		if ($rc == 0) {
+			# Execute the command
+			TkCommon::runcmd("$txCmd", "$DEBUG");
+			$rc = $? >> 8;
+			
+			$errMsg = "ERROR: Unable to transmit component \"$compName\" for TK version $tkVersion";
+			process_rc ($opName, $errMsg, $stopOnFail, $rc);
+			
+			print "  *******\n\n";
+		}
+		else {
+			print "[ERROR]: Invalid OS type detected...transmit not run!";
+		}
+	}
+} # end Step 06
+
+log_execution ("end", "$compName");
+print "LOG file located at $logFile.\n\n";
+close (STDOUT);
+exit ($rc);
+
+
+

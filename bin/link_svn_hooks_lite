@@ -1,0 +1,12 @@
+#!/usr/bin/ksh
+
+ENABLEDIR=/afs/eda.fishkill.ibm.com/data/edainfra/tools/enablement/prod
+
+echo "linking pre-commit to prod lite"
+rm pre-commit
+ln -s $ENABLEDIR/bin/pre-commit-lite pre-commit
+
+echo "linking post-commit to prod lite"
+rm post-commit
+ln -s $ENABLEDIR/bin/post-commit-lite post-commit
+

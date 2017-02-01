@@ -1,0 +1,442 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: tkb2ctkb.master
+# CREATOR: Gregg Stadtlander
+#    DATE: 09/23/2013
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 09/23/2013 GS  Initial coding.
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TKutils;
+
+
+# Global variables
+my $BIN_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $DATA_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/data";
+my $CHECKS_DIR = "/afs/eda/data/edainfra/checks";
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+my $MGR_INCLUDED = 1;
+my $MGR_IGNORE = 0;
+
+# Program variables
+my $appName = "tkb2ctkb.master";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $srcToolKit      = "";
+my $dbMode          = ""; # default is prod if empty
+my @components      = ();
+my $component       = "";
+my $appErrorMessage = "";
+my $startDir = $ENV{"PWD"};
+my $dryRun          = 0;
+my $reverse         = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+my $tgtLocation = "tkb";
+
+
+# Create list of components to process
+@components = SetComponents($srcToolKit, $component);
+if (scalar(@components) < 1) {
+  CleanExit("No components to process ... exiting\n", $ERROR);
+}
+
+
+# Process each component
+foreach $component (@components) {
+
+  print "\nProcessing ... $component\n";
+
+  # Get this component's status
+  my $status = GetStatus($srcToolKit, $component);
+  if ($status eq "Pass") {
+    print "  Skipping ... this component already passed!\n";
+    next;
+  }
+  if ($status eq "WIP") {
+    print "  Skipping ... this component's processing is underway!\n";
+    next;
+  }
+
+  # Run the engine script for this TK and component
+  my $myRc = RunEngine($component);
+
+}
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  #LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script migrates a production Tool Kit (src tk) from TKB to a customtkb
+location with out changing the TK name. Under the covers this script call
+tkb2ctkb.engine for each component in the tool kit.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-src src_tk> [-reverse] [-c component]
+                  [-dryrun] [-y] [-db dbMode] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  src_tk     = Source Tool Kit version which must exist (ie, 14.1.7 ...)
+  -reverse   = (optional) Reverse sort the component list (z .. a)
+  -component = (optional) Process a single component (ess, edif, svntest1 ... )
+  -dryrun    = (optional) Run script in dryrun mode
+  dbMode     = (optional) Database mode [default = PROD] (PROD, DEV, TEST)
+  -h           (optional) application help
+  -y           (optional) verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('src=s'      => \$srcToolKit,
+	      'c=s'        => \$component,
+	      'db=s'       => \$dbMode,
+	      'dryrun'     => \$dryRun,
+	      'reverse'    => \$reverse,
+	      'y'          => \$verbose,
+	      'help|h|?'   => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $srcToolKit) {
+    print "ERROR: Source Tool Kit (-src) is a required parameter\n";
+    return $ERROR;
+  }
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents()
+# Purpose: Create a list of components ready for this Tool Kit
+# RCs    : List of component names or empty list
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  my ($tk, $comp) = @_;
+  print " Querying for components in $tk ...\n" if ($verbose);
+
+  # Query the DB for tk/components for the src tool kit
+  my @list = TKutils::GetComponents($tk, $comp, "");
+  print "Found " . scalar(@list) . " components\n" if ($verbose);
+
+  return reverse(@list) if ($reverse);
+
+  return @list;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LogAppEvent($event)
+# Purpose: Log an application specific event
+# RCs    : 0 = ok
+#          1 = error or if start instance already running
+#------------------------------------------------------------------------------
+sub LogAppEvent {
+
+  my ($event) = @_;
+
+  print " Logging application event ($event) ...\n" if ($verbose);
+
+  # Log in the DB that this application is running or has completed
+  # Construct the command
+  my $command = "$BIN_DIR/appLog";
+  $command .= " -a $appName";
+  if ($event eq "start") {
+    $command .= " -start";
+  }
+  else {
+    $command .= " -end";
+  }
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+  if ($rc > 0) {
+    print join("\n", @results);
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RunEngine()
+# Purpose: Run the engine script for the specified tool kit and component
+# RCs    : rc from engine script
+#------------------------------------------------------------------------------
+sub RunEngine {
+
+  my ($myComponent) = @_;
+
+  print " Running engine script ...\n" if ($verbose);
+
+  # Construct the command
+  my $command = "$BIN_DIR/tkb2ctkb.engine";
+  $command .= " -src $srcToolKit";
+  $command .= " -c $myComponent";
+  $command .= " -y " if ($verbose);
+  $command .= " -dryrun " if ($dryRun);
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my $rc = TKutils::RunSystem($command, $dryRun, $verbose);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : AlertOwner($component, $notifyManager, $failed)
+# Purpose: Notifies the component owner and/or their manager that this process
+#          failed or could not be executed for this component.
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub AlertOwner {
+
+  print " Alerting Component owner/mgr ...\n" if ($verbose);
+
+  my ($myComp, $notifyMgr, $failed) = @_;
+
+  # Create the sender list
+  my @list = ();
+  my $owner = GetOwner($myComp);
+  push(@list, $owner);
+
+  my $manager = GetManager($owner);
+  if ($notifyMgr) {
+    push(@list, $owner);
+  }
+
+  #
+  # WARNING!!!
+  #
+  # All emails will be sent to Gregg for the time being.  He will
+  # review emails and forward to owner/mgr if necessary
+  #
+  @list = ('stadtlag@us.ibm.com');
+
+
+  # Create the email body
+  my $body = "Hello,\n\n";
+  $body .= GetFailBody($myComp);
+  $body .= "\n";
+  $body .= "Please contact Gregg Stadtlander/Eric Hull if you have any \n";
+  $body .= "quesitons.\n";
+  $body .= "\n";
+  $body .= "Thank you,\n";
+  $body .= "EDA Software Release Team\n";
+  $body .= "\n";
+  $body .= "Owner/mgr: $owner, $manager\n";
+
+  # Send the email
+  my $address;
+  foreach $address (@list) {
+    $address =~ s/\@/\\\@/;
+
+    my $subject = "\"Action Required: CTK $srcToolKit failure - $myComp\"" if ($failed);
+
+    `/bin/mailx -s $subject $address << EOF
+$body
+`;
+  }
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetStatus($srcToolKit, $component)
+# Purpose: Query the DB for this component's CTK status
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetStatus {
+
+  my ($tk, $comp) = @_;
+
+  print " Reading customtk status ...\n" if ($verbose);
+
+  # Construct the command
+  my $command = "$BIN_DIR/statusXtinct";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command and show results
+  my $status = "";
+  my @results;
+  my $rc = TKutils::RunCommand($command, \@results, 0, $verbose);
+  if ($rc == 0) {
+    foreach my $line(@results) {
+      next if ($line !~ /$comp/);
+      my @tokens = split(/ +/, $line);
+      $status = $tokens[2];
+    }
+  }
+
+  print " Status: $status\n" if ($verbose);
+
+  return $status;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetFailBody()
+# Purpose: Get the email text for the fail email
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetFailBody {
+
+  my ($myComp) = @_;
+  my $body = "";
+
+  $body .= "Our records indicate you are the owner/manager of an EDA Tool \n";
+  $body .= "Kit component that failed the Tool Kit creation process.\n";
+
+
+  return $body;
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : GetLog($component)
+# Purpose: Locate the engine's log file
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetLog {
+
+  my ($myComp) = @_;
+
+  my $glob = "$LOGS_DIR/$srcToolKit/ctk/customtk.engine_" . $myComp . "_*.log";
+  my (@files) = glob $glob;
+
+  my $file = "";
+  my $newestFile = "";
+  my $newestAge = 365;
+  foreach $file (@files) {
+    my $age = -M $file;
+    $newestFile = $file if ($age < $newestAge);
+  }
+
+  return $newestFile;
+
+}
+

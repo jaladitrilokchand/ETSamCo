@@ -1,0 +1,7 @@
+comp=$1
+file=$2
+cp -pP /afs/eda/tkb/$comp/14.1/.bin-aix64/${file} /afs/eda/tk/$comp/14.1/.bin-aix64/.
+cp -pP /afs/eda/tkb/$comp/14.1/.bin-aix64/${file}-g /afs/eda/tk/$comp/14.1/.bin-aix64/.
+cp -pP /afs/eda/tkb/$comp/14.1/.bin-linux64/${file} /afs/eda/tk/$comp/14.1/.bin-linux64/.
+cp -pP /afs/eda/tkb/$comp/14.1/.bin-linux64/${file}-g /afs/eda/tk/$comp/14.1/.bin-linux64/.
+

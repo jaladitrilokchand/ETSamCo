@@ -1,0 +1,262 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+#    FILE: timeIt.summarize
+#  SYNTAX: See "printSyntax" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# Benchmarks a scipr/application
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 05/20/2011 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+
+use Getopt::Long;
+Getopt::Long::Configure ("pass_through");
+use File::Path;
+
+#
+# Global variables
+#
+
+# Program name
+my $progName = "timeIt.summarize";
+my $progInvocation = $progName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $maxTime   = 0;
+my $minTime   = 0;
+my $avgTime   = 0;
+my $startLoad = 0;
+my $verbose   = 0;
+my $help      = "";
+my $log;
+my $logDir;
+my $logName;
+my $outFile;
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+my @results = ();
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+  printSyntax();
+  print "\n[$progName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+
+#
+# Display initial information.
+#
+if ($verbose) {
+    print "\n";
+    print "Program     : $progName\n";
+    print "Log dir     : $logDir\n";
+    print "Log name    : $logName\n";
+}
+
+
+# Locate the log directory
+if (! -d $logDir) {
+    print "ERROR: unable to locate log directory\n";
+    print "DIR: $logDir\n";
+    exit $ERROR;
+}
+
+
+# Read the log files
+$logName = "timeIt" if (! $logName);
+
+
+
+# Read the results a generate a CDL file
+my @files = <$logDir/$logName.*>;
+foreach $entry (sort(@files)) {
+    #print "File: $entry\n";
+    
+    @tokens = split(/\//, $entry);
+    my $fileName = pop @tokens;
+
+    @tokens = split(/\./, $fileName);
+    my $date = $tokens[1];
+    my $time = $tokens[2];
+     
+    @tokens = split(/_/, $date);
+    $date = $tokens[1] . "/" . $tokens[2] . "/" . $tokens[0];
+
+    # Read the file to get min, avg and max time
+    open FILE, "<$entry" or die $!;
+    my @lines = <FILE>;
+    close FILE;
+
+    foreach $entry (@lines) {
+	chomp $entry;
+	$avgTime = &parseTime($entry) if ($entry =~ /Avg/);
+	$minTime = &parseTime($entry) if ($entry =~ /Min/);
+	$maxTime = &parseTime($entry) if ($entry =~ /Max/);
+	if ($entry =~ /Start Load/) {
+	    @tokens = split(/load average: /, $entry);
+	    @tokens = split(/, /, $tokens[1]);
+	    $startLoad = $tokens[0];
+	}
+    }
+
+    my $entry = sprintf("%s %s;%s;%s;%s;%s", $date, $time, $startLoad, $minTime, $avgTime, $maxTime);
+    push(@results, $entry);
+
+}
+
+
+
+if ($outFile) {
+  open OUT, ">$outFile";
+  print OUT join("\n", @results);
+  close OUT;
+  print "\nResults logged to $outFile\n";
+}
+print join("\n", @results);
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+
+# ------------------------------------------------------------------------------
+# Name   : printSyntax()
+# Purpose: Print syntax to console
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub printSyntax {
+
+  my $syntax = "
+SYNTAX:
+  $progName <-d logDir> [-l logName] [-o outFile] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  print $syntax;
+
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+# ------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Parses timing log files produced by timeIt and generates a CDL file containing 
+the date, time, min time, avg time and max time.";
+
+  my $where ="
+WHERE:
+  -d Log directory
+  -l Log name if empty log name is timeIt (optional)
+  -o Full path to output file if empty writes to stdout (optional)
+  -h Application help (optional)
+  -y Verbose mode (optional)
+";
+
+  print "$progDescription\n";
+  printSyntax();
+  print $where;
+
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+# ------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('o=s'        => \$outFile,
+	      'l=s'        => \$logName,
+	      'd=s'        => \$logDir,
+              'verbose|y'  => \$verbose,
+              'help|h|?'   => \$help
+	      ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify the testApp
+  my $msg = "";
+  if (! $logDir) {
+    $msg .= "[$progName] logDir (-d) must be specified.\n";
+  }
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+# ------------------------------------------------------------------------------
+# Name   : parseTime()
+# Purpose: Parse the time from the log entry
+# RCs    : 0 = OK
+#          8 = ERROR
+# ------------------------------------------------------------------------------
+sub parseTime() {
+
+    my ($line) = @_;
+    my @tokens = split(/ +/, $line);
+
+    return pop @tokens;
+
+}
+
+
+

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CqListDBs>
+	<login>
+		<username>asuren</username>
+		<password>fake</password>
+	</login>
+	<client>
+		<app-name>CQServiceTest</app-name>
+	</client>
+</CqListDBs>

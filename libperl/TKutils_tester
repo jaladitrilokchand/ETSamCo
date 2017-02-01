@@ -1,0 +1,183 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: TKutils_tester
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 04/03/2013
+#
+# PURPOSE ---------------------------------------------------------------------
+# Test rig for TKutils.pm
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 04/03/2013 GFS  Initial coding.
+# 05/13/2013 GFS  Added GetTkLocation function.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+
+use lib '/afseda/data/edainfra/tools/enablement/dev/libperl';
+#use lib '/afs/btv/u/stadtlag/public/ETREE/dev/libperl';
+#use lib '/afs/eda/u/navechan/toolkit/dev_sandbox/libperl';
+use TKutils;
+
+# Variables
+my $toolKit   = "";
+my $component = "";
+my $verbose   = 0;
+my $dryRun    = 0;
+my $help      = 0;
+
+# Globals
+my $OK = 0;
+my $ERROR = 8;
+my $appName = "TKutils_tester";
+
+# Read the command line arguments
+if (ProcessArgs() == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Test RunCommand
+my $command = "/usr/bin/ls -l";
+my @results = ();
+my $rc = TKutils::RunCommand($command, \@results, $dryRun, $verbose);
+print "[RunCommand] command run ... $command\n";
+print join("", @results) . "\n";
+
+# Test RunSystem
+$command = "/usr/bin/ls -l";
+@results = ();
+$rc = TKutils::RunSystem($command, $dryRun, $verbose);
+print "[RunSystem] command run ... $command\n";
+print join("\n", @results) . "\n";
+
+# Test IsAuthorized
+print "[IsAuthorized] svnlib test .. fail?\n";
+TKutils::IsAuthorized("svnlib", $dryRun);
+print "[IsAuthorized] getlogin() test .. pass?\n";
+TKutils::IsAuthorized(getlogin(), $dryRun);
+
+# Test Trim
+my $string = "  data  ";
+print "[Trim] testing |$string| to |" . TKutils::Trim($string) . "|\n";
+$string = "data";
+print "[Trim] testing |$string| to |" . TKutils::Trim($string) . "|\n";
+
+# Test GetRelease
+print "Release for $toolKit is " . TKutils::GetRelease($toolKit, ".") . "\n";
+print "Release for $toolKit is " . TKutils::GetRelease($toolKit, "0") . "\n";
+
+# Test GetComponents
+print "Components for $toolKit ... \n";
+my @components = TKutils::GetComponents($toolKit, $component, "");
+print join("\n", @components) . "\n";
+
+#Test GetOwner
+my $owner = TKutils::GetOwner($component);
+print "Owner for $component is $owner\n";
+
+#Test GetManager
+my $manager = TKutils::GetManager($owner);
+print "Manager of $owner is $manager\n";
+
+# Test ValidateTkComp
+if (! TKutils::ValidateTkComp($toolKit, $component)) {
+  print "[ValidateTkComp]: $component is NOT a member of $toolKit\n";
+}
+else {
+  print "[ValidateTkComp]: $component is a member of $toolKit\n";
+}
+
+# Test GetTkStage
+my $stage = "";
+TKutils::GetTkStage($toolKit, \$stage);
+print "Stage of $toolKit is $stage\n";
+
+# Test GetTkLocation
+my $location = "";
+TKutils::GetTkLocation($toolKit, \$location);
+print "Location of $toolKit is $location\n";
+
+# Test LogComponentEvent
+TKutils::LogComponentEvent($component, $location, "XMIT_SUCCESS",
+			   "Some test message", $verbose, 1);
+			   
+# Test GetShipPlatforms
+print "Ship Platforms for $toolKit ... \n";
+my @platforms = TKutils::GetShipPlatforms($toolKit);
+print join("\n", @platforms) . "\n";
+
+
+#------------------------------------------------------------------------------
+# Name   : PrintHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub PrintHelp {
+
+  my $progDescription = "
+This script tests functions in TKutils.pm";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-c component] [-dryrun] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit  = An EDA Tool Kit (ie, 14.1.1 ...)
+  component = Component name to be processed (e.g., einstimer)
+  -dryrun     (optional) Dry run (disables commands that write to CM DB)
+  -h          (optional) application help
+  -y          (optional) Verbose (print the invocation of each command)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ProcessArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub ProcessArgs {
+
+  # Parse command line arguments
+  GetOptions ('t=s'         => \$toolKit,
+              'comp|c=s'    => \$component,
+              'dryrun|g'    => \$dryRun,
+              'y'           => \$verbose,
+              'help|h|?'    => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    PrintHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) must be specified\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}

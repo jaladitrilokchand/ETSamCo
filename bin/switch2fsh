@@ -1,0 +1,80 @@
+#!/usr/bin/perl
+
+#############################################
+# Script to switch svn working copy reference 
+# to greenjiffy server
+# ###########################################
+
+
+ use Getopt::Std;
+
+ getopts("ch");
+
+ if ($opt_h) {
+   help();
+   exit 1;
+ }
+
+ $bpath = "/afs/eda/tools/bin";
+ my $line;
+ my ($rv, $p, $server, $envmt, $url);
+
+ if ($opt_c) {print  "\nsvn info:\n---------\n";}
+ @svninfo = `$bpath/svn info `;
+ if ( $? != 0 ) {die "Error with getting svn info.\n$svninfo\nExiting...\n";}
+ if ($opt_c) {
+   print "@svninfo\n";
+ }
+ foreach $line (@svninfo)
+ {
+	print LOG "$line";
+	#if($line =~ m|^URL:\s+\S+/eda(dev)?/([\d\.]+)/(\w+)/trunk(/(\S+))*|)
+        if ($line =~ /^URL/ ) {
+          chomp($line);
+          if ( $line !~ /trunk$/ ) { die "\nSwitching must be done at the tree top of the working copy directory, exiting... \n\n" ; }
+         
+	    $line =~ m|^URL:\s+https://(\S+).ibm.com/(\w+)/([\d\.]+)/(\w+)/trunk| ;
+	    $server = $1; $envmt = $2; $rv = $3; $p = $4; 
+	    $url = $line;
+            $url =~ s/^URL:\s+//;
+
+            if ($opt_c) {
+               print  "server=$server, env=$envmt, v=$rv, comp=$p,\nurl=$url\n"; 
+            }
+            if ( $server ne 'bluejiffium.btv' ) {
+               die "\nCurrent working copy reference is not bluejiffium.btv.ibm.com, exiting...\n";
+            }
+            if($rv ne "14.1") {
+               die "\nThe svn working copy is not 14.1, exiting...\n"; }
+         
+            if ( $envmt eq "eda" ) { $newenv = "tk"; }
+            else { $newenv = "dev"; }  
+            $newurl = "https://greenjiffy.fishkill.ibm.com/eda/$newenv/$p/trunk";
+
+            if ($opt_c) {print "\nSwitching to $newurl\n";}
+            $cmdstr = "$bpath/svn switch --relocate $url $newurl";
+            if ($opt_c) { print "CMD: $cmdstr\n";}
+            else { 
+               print `$cmdstr`; 
+               if ( $? ) { print "Error with switching to $newurl, exiting...\n";}
+               else { print "\nSwitched to $newurl.\n\n";}
+            }
+
+            break;
+         }
+ }
+
+###############################
+# subroutine: help
+##############################
+ sub help
+ {
+    print "\n  switch2fsh :\n";
+    print "  Script to switch 14.1 components' working copy reference to greenjiffy server.\n";
+    print "  This script needs to be run at the tree top of the working copy directory.\n";
+    print "  Command: switch2fsh [-c] [-h] \n";
+    print "\t-h\t\t this help\n";
+    print "\t-c\t\t check mode only\n";
+    print "\n\n";
+  }
+

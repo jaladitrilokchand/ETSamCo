@@ -1,0 +1,986 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: updateTkSrc
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#    DATE: 07/16/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 07/16/2012 EH  Initial coding.
+# 10/26/2012 EH  Fixed setting of admin ACL for 13.1 components.
+# 10/26/2012 EH  Added logic to copy AFS ACLs for all directories from source
+#                location to tk_src location.
+# 10/26/2012 EH  Fixed relative Make* symlinks that pointed to external tools
+#                directories.
+# 01/18/2013 EH  Changed rsync path (/usr/bin/rsync not available on AIX 6.1).
+# 01/18/2013 EH  Added email notification to ehull.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use File::Basename;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+# Global variables
+my $PROD_BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $refDir  = "";
+my $tgtDir = "";
+my $logDirPrefix  = "/afs/eda/data/edainfra/logs";
+my $logDir = "";
+my $logFile     = "";
+my $errFile     = "";
+my $resultsFile = "";
+my %authorizedIds_131 = ("edautils", "einslib",
+                         "einstimer", "einslib",
+                         "vss", "hdplib");
+
+my $edaDir = "/afs/eda";                         
+my $dir = "";
+my @dirList = ();
+my $dateTime = "";
+my $refFile = "";
+my @refAcls = ();
+my %refLevelAclsHash = ();
+#my $RSYNC = "/usr/bin/rsync"; # This path not available on AIX 6.1 image
+my $RSYNC = "/afs/eda/tools/apps/rsync/3.0.9/bin/rsync";
+
+# Program variables
+my $appName = "updateTkSrc";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $noCmdExec       = 0;
+my $component       = "";
+my $release         = "";
+my $cmdLineArgs     = "";
+my $msg             = "";
+my $curDir          = "";
+my $filesUpdated    = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc  = $ERROR;
+my $startDir = $ENV{"PWD"};
+my $progRC = "";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+#$SIG{__DIE__} = sub { handleDIE(); };
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Enable logging
+$rc = SetupLogging();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to complete $appName initalization", $ERROR);
+}
+
+# Is reference location readable?
+$rc = CheckReferenceLocation();
+if ($rc > 0) {
+  CleanExit("ERROR: Reference location is unusable", $ERROR);
+}
+
+# Is target location writable?
+$rc = CheckTargetLocation();
+if ($rc > 0) {
+  CleanExit("ERROR: Target location is unusable", $ERROR);
+}
+
+# Rsync tkb to tk_ref target directory
+$rc = RsyncTkb2TkSrc();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to copy contents of $refDir to $tgtDir", $ERROR);
+}
+
+# $filesUpdated == 0 indicates that no files were updated in $tgtDir
+unless ($filesUpdated) {
+  CleanExit("$appName complete. \n\nLog files are in $logDir\n", $OK);
+}
+
+# Replace symlinks that have targets external to tk_src area
+$rc = CopyExternalLinks();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to replace symlinks that have targets external to tk_src area", $ERROR);
+}
+
+# Set permissions on all directories
+$rc = SetPermissions();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to set permissions on all directories", $ERROR);
+}
+
+# Normal exit
+CleanExit("[$appName] complete. Log files are in $logDir\n", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  CleanExit("\n[$appName] Caught an unexpected die - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any application clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+  chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  print         "$dateTime $message\n";
+  print LOGFILE "$dateTime $message\n";
+  print         "Return code: $rc\n";
+  print LOGFILE "Return code: $rc\n";
+  close (LOGFILE);
+  close (STDERR);
+  #if ($rc > 0) {
+    SendEmailAlert($component, $logFile, $errFile, $resultsFile, $rc);
+  #}
+  chdir($startDir) if (defined($startDir));
+  
+  # Remove error log file if it is empty
+  `rm $errFile` if (-z $errFile);
+  exit $rc;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script executes the rsync command to update the contents of a component/release 
+directory under the tk_src level to match the contents of the component/release 
+directory under the tkb level.
+
+The .svn directories are not copied to the tk_src repository.
+
+Any file in tk_src that is not identical to what exists in tkb will be overlaid
+or deleted when this script is run.
+
+The following admin IDs must be used when running this script:
+
+  ID       component/release
+  -------  -----------------
+  svnlib   edautils/14.1
+  svnlib   einstimer/14.1
+  svnlib   vss/14.1
+
+  einslib  edautils/13.1
+  einslib  einstimer/13.1
+  hdplib   vss/13.1
+
+Only the following components are enabled in this script:
+
+  edautils
+  einstimer
+  vss
+  
+Log files are written to /afs/eda/data/edainfra/logs/<Tool Kit version>/tkb2tk_src  
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-c component> <-r release> [-h] [-k]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  release   = Tool Kit release (13.1 or 14.1)
+  component = name of component (e.g., einstimer)
+  -h          (optional) application help
+  -y          (optional) verbose messages
+  -k          (optional) suppress execution of significant commands for debugging
+";
+
+  my $example ="
+FOR EXAMPLE:
+  $appName -c vss -r 14.1
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+  print $example;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  my $rc = $OK;
+  my $command = "";
+  my $idPerm = "";
+  
+  # Capture command line arguments for logging (before GetOptions deletes them)
+  $cmdLineArgs = join(' ', @ARGV);
+
+  # Parse command line arguments
+  GetOptions ('r=s'         => \$release,
+              'c=s'         => \$component,       
+              'k'           => \$noCmdExec,
+              'y'           => \$verbose,
+              'help|h|?'    => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $release) {
+    print "ERROR: Tool Kit release (-r) must be specified\n";
+    return $ERROR;
+  }
+  if (! $component) {
+    print "ERROR: component (-c) must be specified\n";
+    return $ERROR;
+  }
+
+  # Validate specified Tool Kit release.
+  if (($release ne "13.1") && ($release ne "14.1")) {
+    print "ERROR: Either Tool Kit release 14.1 or 13.1 must be specified with -r\n";
+    return $ERROR;  
+  }
+   
+  $refDir  = "/afs/eda/tkb/$component/$release";
+  $tgtDir  = "/afs/eda/tk_src/$component/$release";
+   
+  # Verify that the designated admin ID (or group) for the current release and
+  # component has admin permissions on the tgtDir.
+  if ($release eq "14.1") {
+    $idPerm = "svnlib rlidwka";
+  }
+  elsif ($release eq "13.1") {
+    $idPerm = "einslib rlidwka" if (($component eq "einstimer") || ($component eq "edautils"));
+    $idPerm = "hdplib:admin rlidwka" if ($component eq "vss");
+  }
+  else {
+    print "ERROR: Release $release not supported\n";
+    return $ERROR; 
+  }
+  $command = "fs la $tgtDir |grep -q \"$idPerm\"";
+  `$command`;
+  $rc = $? >> 8;
+  if ($rc == 1) {
+    print "ERROR: Permissions on $tgtDir must include $idPerm before this script can be run.\n";
+    return $ERROR;  
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RsyncTkb2TkSrc()
+# Purpose: Copy tkb content to tk_src repository
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub RsyncTkb2TkSrc {
+
+  my $rc = 0;
+  my @results =();
+  my $msg = "";
+  my $line = "";
+  
+  chomp($dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  $msg = "$dateTime Copying content from $refDir to $tgtDir";
+  print "$msg\n";
+  print LOGFILE "$msg\n\n";
+
+  # Construct the command
+  # -r                 recurse into directories
+  # -l                 copy symlinks as symlinks
+  # -p                 preserve permissions
+  # -t                 preserve modification times
+  # -v                 verbose
+  # -z                 compress file data during the transfer
+  # --delete           delete extraneous files from tgt dirs
+  # --exclude=.svn     exclude .svn directories
+  # --delete-excluded  also delete excluded files from tgt dirs
+  my $command = "$RSYNC";
+  $command .= " -rlptvz";
+  $command .= " --delete";
+  $command .= " --exclude=.svn";
+  $command .= " --delete-excluded";
+  $command .= " $refDir/";
+  $command .= " $tgtDir";
+
+  print         "Running $command\n" if ($verbose);
+  print LOGFILE "Running $command\n";
+ 
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc == 0) {
+      # Check output of rsync command for objects
+      foreach $line (@results) {
+      
+        # Ignore extraneous lines
+        next if ($line =~ /^building file list/);
+        next if ($line =~ /^sent /);
+        next if ($line =~ /^total size is /);
+        next if ($line =~ /^\s*$/);
+        
+        # If the process gets here it means that there is at least one object that rsync
+        #   is copying or deleting in $tgtDir.
+        $filesUpdated = 1;
+        last;
+      }
+
+      unless ($filesUpdated) {
+        $msg = "\nThe contents of $tgtDir already matches the contents of $refDir\n";
+        $msg .= "There are no objects that need to be copied to or deleted in the target location.\n";
+        $msg .= "ACLs will not be copied from $refDir to $tgtDir.";
+        print         "$msg\n\n";
+        print LOGFILE "$msg\n\n";
+      }
+    }    
+    elsif ($rc > 0) {
+      print "ERROR: Unable to copy contents of $refDir to $tgtDir\n";
+      print @results;   
+      return $ERROR;
+    }  
+  }
+
+  print RESULTS @results;
+  
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CheckReferenceLocation()
+# Purpose: Verify that reference location is readable
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CheckReferenceLocation {
+  die "$refDir is not readable. $!" unless (-R $refDir);
+  return $OK;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CheckTargetLocation()
+# Purpose: Verify that target location is writable
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CheckTargetLocation {
+  die "$tgtDir is not writable. $!" unless (-W $tgtDir);
+  return $OK;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetupLogging()
+# Purpose: Enable logging
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SetupLogging {
+
+  my $toolkit = "";
+  
+  # Determine which Tool Kit version is in production and create path to log 
+  # directory.
+  if ($release >= 14.1) {
+    chomp($toolkit = `$PROD_BIN/getToolKits -r $release -s production -q`);
+    my $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to determine Tool Kit version\n";
+      return $ERROR;
+    }
+  }
+  else {
+    $toolkit = "13.1.20";
+  }
+  $logDir = "$logDirPrefix/$toolkit/tkb2tk_src";
+  
+  # Create $logDir if it does not already exist
+  mkpath($logDir) if (! -d $logDir);
+
+  # Open log file for script messages
+  chomp(my $logDate = `date +%C%y%m%d\_%H%M%S`);
+  $logFile     = "$logDir/" . $appName . "_" . $component . "_" . $logDate . ".log";
+  $errFile     = "$logDir/" . $appName . "_" . $component . "_" . $logDate . ".err";
+  $resultsFile = "$logDir/" . $appName . "_" . $component . "_" . $logDate . ".results";
+
+  # Disable buffering for stderr
+  select((select(STDERR), $|=1)[0]);
+
+  # Open a filehandle for logging stdout and rsync messages to separate files
+  open(LOGFILE, ">$logFile") || die "open $logFile failed";
+  open(RESULTS, ">$resultsFile") || die "open $resultsFile failed";
+  
+  # Open a filehandle for stderr and pipe to tee so that console and log file
+  # get stderr messages.
+  open (STDERR, "| tee -a $errFile") || die "ERROR: unable to open log file $errFile.";
+  
+  # Only allow authorized AFS IDs to continue (depends on component and release being run)
+  my $afsId = (getpwuid($<)) [0];  
+  if (($release eq "14.1") && ($afsId ne "svnlib")) {
+    my $msg = "ERROR: $afsId is not authorized to run this script.\n";
+    $msg .= "Only the svnlib ID is permitted to run this script for $component in $release";
+    print STDERR "$msg\n";  
+    return $ERROR;
+  }
+  elsif (($release eq "13.1") && ($afsId ne $authorizedIds_131{$component})) {
+    my $msg = "ERROR: $afsId is not authorized to run this script.\n";
+    $msg .= "Only the " . $authorizedIds_131{$component};
+    $msg .= " ID is permitted to run this script for $component in $release";
+    print STDERR "$msg\n";  
+    return $ERROR;
+  }
+
+  chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  chomp(my $machine = `hostname`);
+  print LOGFILE "$dateTime $afsId on $machine invoked $appName $cmdLineArgs\n\n";
+  
+  if ($noCmdExec) {
+    $msg = "Suppressing execution of significant commands";
+    print "\n$msg\n\n";
+    print LOGFILE "\n$msg\n\n";
+  }
+  
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetAccessFromRefLevel()
+# Purpose: Set access from reference level
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SetAccessFromRefLevel {
+
+  my ($dir) = @_;
+  
+  my $grp = "";
+  my $permissions = "";
+  my $command = "";
+  my @results = ();
+  my $msg = "";
+
+  # Clear the existing ACL and add admin ID access first to insure that
+  # we will have authority to add the remaining group/permission pairs.
+  # svnlib:write and svnlib:read are also being added here because in some
+  # cases they are not present in the reference directories.
+  
+  if ($release eq "14.1") {
+    $command = "fs sa -clear $dir svnlib rlidwka";
+    $command .= " svnlib:write rlidwk";
+    $command .= " svnlib:read rl";
+    $command .= " system:administrators rlidwka";
+  }
+  elsif ($release eq "13.1") {
+    $command = "fs sa -clear $dir $authorizedIds_131{$component} rlidwka";
+    $command .= " system:administrators rlidwka";
+  }
+
+  print "\n$command\n" if ($verbose);
+  print LOGFILE "\n$command\n";
+  
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      $msg = "ERROR: Unable to set initial ACL for $dir";
+      print         "$msg\n";
+      print STDERR  "$msg\n";
+      print LOGFILE "$msg\n";
+      print STDERR @results;   
+      return $ERROR;
+    }  
+  }  
+
+  # Iterate through each reference group/access pair for current directory
+  foreach $grp (sort(keys %{$refLevelAclsHash{$dir}})) {  
+
+    # Don't need bradmin id at this time. Since it is a member of 
+    # system:administrators group, it already has admin rights.
+    next if ($grp eq "bradmin");
+    
+    # Don't bother with svnlib AFS ID since it was either added above or is not needed.
+    # Same for svnlib:write and svnlib:read.
+    next if ($grp eq "svnlib");
+    next if ($grp eq "svnlib:write");
+    next if ($grp eq "svnlib:read");
+
+    # Get the permissions associated with this group
+    $permissions = $refLevelAclsHash{$dir}{$grp};
+    
+    # Set the group/access found in the reference to the current target
+    # directory.
+    $command = "fs sa $dir $grp $permissions";
+    print "$command\n" if ($verbose);
+    print LOGFILE "$command\n";
+    
+    # Skip command execution if the -k option was specified
+    unless ($noCmdExec) {
+      @results = `$command`;
+      $rc = $? >> 8;
+
+      if ($rc > 0) {
+        $msg = "ERROR: fs sa $dir $grp $permissions failed";
+        print         "$msg\n";
+        print STDERR  "$msg\n";
+        print LOGFILE "$msg\n";
+        print STDERR @results;   
+        return $ERROR;
+      }  
+    } 
+  }
+  return $OK;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CopyAclFromDestCompRlsDir()
+# Purpose: Copy ACL from target component release directory
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub CopyAclFromDestCompRlsDir {
+
+  my ($dir) = @_;
+  my $command = "";
+  my @results = ();
+  my $msg = "";
+  
+  # When the current target directory does not exist in the reference location,
+  # copy the ACL from the target component/release directory to current 
+  # directory.
+  #
+  # Use the fs sa -clear option to remove existing permissions before setting
+  # the new permissions.
+  $command = "fs copyacl -clear -f $tgtDir -t $dir";
+  print "$command\n";
+  print LOGFILE "$command\n";
+  
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      $msg = "ERROR: fs copyacl -clear -f $tgtDir -t $dir failed";
+      print         "$msg\n";
+      print STDERR  "$msg\n";
+      print LOGFILE "$msg\n";
+      print STDERR @results;   
+      return $ERROR;
+    }  
+  }
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetAclsHash()
+# Purpose: Read ACL for each subdirectory under component/release and write
+#          the ACL to a hash.
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub GetAclsHash {
+
+  my ($level) = @_;
+
+  my @acl = ();
+  my $grp = "";
+  my $permissions = "";
+  my %AclsHash = ();
+  my $msg = "";
+  my $line = "";
+
+  # Return immediately if the component release directory is not readable
+  return %AclsHash unless ( -R "$edaDir/$level/$component/$release");
+  
+  chdir("$edaDir/$level/$component/$release");
+
+  # Recursively identify all of the subdirectories below the current directory
+  chomp(my @dirList = `find . -type d `);
+
+  # Iterate through each subdirectory below <component>/<release>
+  foreach $dir (@dirList) {
+
+    # Don't need .svn directories
+    next if ($dir =~ /\.svn/);
+  
+    my @tokens = ();
+
+    # Remove the leading ./ from directory entry returned by find command.
+    # Without this, $dir looks like "./essinc".
+    $dir =~ s,^.\/,,;
+
+    if (-d $dir) {
+
+      # Get ACL for current directory
+      chomp(@acl = `fs la $dir |grep -v "Access list for" |grep -v "Normal rights"`);
+    }
+    else {
+      $msg = "WARNING: $edaDir/$level/$component/$release/$dir directory does not exist";
+      print         "$msg\n";
+      print LOGFILE "$msg\n";
+    }
+
+    # @acl contains fs la output
+    foreach $line (@acl) {
+
+        # Remove leading and trailing spaces
+        $line =~ s/(^\s+|\s+$)//g;
+
+        @tokens = split(/ +/, $line);
+        $grp = $tokens[0];
+        $permissions = $tokens[1];
+        $AclsHash{$dir}{$grp} = $permissions;
+        
+        #print "dir: $dir - grp: $grp - perms: $permissions\n";  # DEBUG
+    }
+  }
+  return %AclsHash;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CopyExternalLinks()
+# Purpose: Find symlinks with "tools" in path
+# RCs    : List of symlinks
+#------------------------------------------------------------------------------
+sub CopyExternalLinks {
+
+  my $fixCmd = "";
+  my $symlinkName = "";
+  my $symlinkTgt = "";
+  my $symlinkRelDir = "";
+  my $symlinkPath = "";
+  my $rc = $ERROR;
+
+  $msg = "\nReplacing symlinks with external targets";
+  print         "$msg\n\n" if ($verbose);
+  print LOGFILE "$msg\n\n";
+
+  # Make the target component release directory the current directory
+  unless (chdir("$tgtDir")) {
+    $msg = "ERROR: Unable to cd to $tgtDir";
+    print LOGFILE "$msg\n\n";
+    print         "$msg\n\n";
+    return $ERROR;
+  }
+
+  # Construct the command
+  my $command = "find .";
+  $command .= " -type l";
+  $command .= " -exec ls -l {} \\;";
+  $command .= " | grep \"tools\"";
+
+  print "$command\n" if ($verbose);
+  
+  # Run the command
+  chomp(my @results = `$command`);
+  $rc = $? >> 8;
+  if ($rc > 0) {
+    $msg = "ERROR: Unable to find external symlinks";
+    print LOGFILE "$msg\n\n";
+    print         "$msg\n\n";
+    return $ERROR;
+  }
+
+  my $symlink;
+  foreach $symlink (@results) {
+    my @tokens = split(/ +/, $symlink);
+
+    $symlinkName = $tokens[8];
+    $symlinkTgt  = $tokens[10];
+
+    # Remove the leading ./ from symlinkName entry returned by find command.
+    # Without this, $symlinkName looks like "./testcases/unit_main/Makefile".
+    $symlinkName =~ s,^.\/,,;
+    $symlinkPath = "$tgtDir/$symlinkName";
+    
+    # Determine if it is a absolute link or a relative link
+    if ($symlinkTgt =~ /\/afs\/eda/) {
+    
+      # Remove symlink first
+      $msg = "\nRemoving symlink $symlinkPath";
+      print "$msg\n" if ($verbose);
+      print LOGFILE "$msg\n";
+      unlink($symlinkPath) unless ($noCmdExec);
+      
+      # Replace symlink with file that is target of symlink
+      $fixCmd = "cp -p $symlinkTgt  $symlinkPath";
+      $rc = RunSignificantCommand($fixCmd);
+      if ($rc > 0) {
+        $msg = "ERROR: Unable to replace symlink with file that is target of symlink";
+        print LOGFILE "$msg\n\n";
+        print         "$msg\n\n";
+        return $ERROR;
+      }      
+    }
+    else {
+      $symlinkRelDir = dirname($symlinkName);
+      $symlinkRelDir = "" if ($symlinkRelDir eq ".");
+      $symlinkRelDir = "$symlinkRelDir/" unless ($symlinkRelDir eq "");
+
+      # Need to remove link first
+      $msg = "\nRemoving symlink $symlinkPath";
+      print "$msg\n" if ($verbose);
+      print LOGFILE "$msg\n";
+      unlink($symlinkPath) unless ($noCmdExec);
+      
+      # Replace symlink with file that is target of symlink
+      # Construct the command that will copy the target of the relative symlink to replace the symlink
+      $fixCmd = "cp -p /afs/eda/tkb/$component/$release/$symlinkRelDir" . "$symlinkTgt  $symlinkPath";
+
+      $rc = RunSignificantCommand($fixCmd);
+      if ($rc > 0) {
+        $msg = "ERROR: Unable to replace symlink with file that is target of symlink";
+        print LOGFILE "$msg\n\n";
+        print         "$msg\n\n";
+        return $ERROR;
+      }
+    }
+  }
+  return $OK;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RunSignificantCommand($command)
+# Purpose: Executes the command and returns the command's return code
+# RCs    : return code
+#------------------------------------------------------------------------------
+sub RunSignificantCommand {
+
+  my ($command) = @_;
+
+  my $rc = $OK;
+  my @results = ();
+  
+  print "Running: $command\n" if ($verbose);
+  print LOGFILE "Running $command\n";
+  
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    @results = `$command 2>&1`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      $msg = "ERROR: $command failed";
+      print         "$msg\n";
+      print STDERR  "$msg\n";
+      print LOGFILE "$msg\n";
+      print STDERR @results;   
+      return $ERROR;
+    }  
+  } 
+  return $rc;
+}
+
+
+#---------------------------------------------------------------------------------
+# Name   : SendEmailAlert($component, $logFile, $errFile, $resultsFile, $rc)
+# Purpose: Send e-mail containing URL to log files
+#
+#---------------------------------------------------------------------------------
+sub SendEmailAlert {
+
+  my ($component, $logFile, $errFile, $resultsFile, $rc) = @_;
+
+  # Don't send mail if in debug mode.
+  #return if ($debug);
+
+  my $mailList = "";
+
+  # Get datetime for email
+  chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+
+  # Define email body
+  my $body = "See details at:\n\n";
+  $body .= "https://w3.eda.ibm.com$logFile\n";
+  $body .= "https://w3.eda.ibm.com$errFile\n" unless (-z $errFile);
+  $body .= "https://w3.eda.ibm.com$resultsFile\n";
+
+  # Set the email subject
+  my $subject = "$appName rc=$rc";
+
+  `mailx -s "$component $subject ($dateTime)" $mailList << EOF
+
+$body
+
+EOF`;
+
+  print "\nEmail sent: mailx -s \"$component $subject ($dateTime)\" $mailList\n";
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetPermissions()
+# Purpose: Set permissions on all directories
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub SetPermissions {
+
+  # Get reference ACLs (that will be applied to target location)
+  chomp($dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  $msg = "$dateTime Getting ACLs from $refDir reference location";
+  print         "\n$msg\n\n";
+  print LOGFILE "\n$msg\n\n";
+
+  print LOGFILE "Reference path: $refDir\n";
+  print LOGFILE "Target path:    $tgtDir\n\n";
+
+  %refLevelAclsHash = GetAclsHash("tkb");
+
+  print LOGFILE "fs commands will be executed from the target path\n\n";
+
+  #-------------------------------------------------------------------------------
+  # Shift focus to target level where access is to be set
+  #-------------------------------------------------------------------------------
+
+  # Check if start directory exists
+  unless (-d $tgtDir) {
+    $msg = "ERROR: $tgtDir does not exist";
+    print LOGFILE "$msg\n\n";
+    print         "$msg\n\n";
+    return $ERROR;
+  }
+
+  # Make the target component release directory the current directory
+  unless (chdir("$tgtDir")) {
+    $msg = "ERROR: Unable to cd to $tgtDir";
+    print LOGFILE "$msg\n\n";
+    print         "$msg\n\n";
+    return $ERROR;
+  }
+
+  chomp($curDir = `pwd`);
+  $msg = "Current directory is $curDir";
+  print LOGFILE "$msg\n\n";
+  print         "$msg\n\n" if ($verbose);
+
+  $msg = "$dateTime Setting ACLs on $tgtDir with ACLs from $refDir reference location";
+  print LOGFILE "$msg\n";
+  print         "$msg\n\n";
+
+
+  # Set permissions on $tgtDir top level directory first
+  if (exists $refLevelAclsHash{"."}) {
+    SetAccessFromRefLevel(".");
+  }
+  else {
+    print "Top level component directory \".\" was not found in refLevelAclsHash\n";
+    return $ERROR;
+    #CleanExit("\n[$appName] failed. Log files are in $logDir\n", $ERROR);
+  }
+
+  # Recursively identify all of the subdirectories below the target 
+  # component release directory (current directory).
+  chomp(@dirList = `find . -type d `);
+
+  # Iterate through each subdirectory below <component>/<release>
+  foreach $dir (sort(@dirList)) { 
+
+    # Remove the leading ./ from directory entry returned by find command.
+    # Without this, $dir looks like "./essinc".
+    $dir =~ s,^.\/,,;
+    
+    # Ignore the case of the component/version root directory by itself
+    next if ($dir eq "."); 
+
+    # Run the appropriate subroutine depending on whether the current directory 
+    # exists in the reference location.
+    if (exists $refLevelAclsHash{$dir}) {
+      SetAccessFromRefLevel($dir);
+    }
+    else {
+      CopyAclFromDestCompRlsDir($dir);
+    }
+    print LOGFILE "\n";
+  }
+  return $OK;
+}

@@ -1,0 +1,769 @@
+#!/usr/bin/perl
+
+$myCMD = $0;
+
+use Getopt::Std;
+use File::Basename;
+#use IO::Tee;
+
+getopts("ht:x:isfcT");
+
+# major release : 18.1
+$major1 = "18";
+$major2 = "1";
+
+$EDADIST    = "/afs/eda/edadist/ebusiness/ASIC";
+$pdir       = "/afs/eda/tkbld/tkinstall";
+$filepath   = "/afs/eda/u/integ/maketar";
+$binpath    = "$pdir/scripts";
+$installBIN = "/afs/btv/data/edatools/bin/fdc/install/tki_18.1";
+$detaildir  = "/afs/eda/u/integ/tkpatch/makefiles";
+$versionfl  = "/afs/eda/u/integ/maketar/VERSION";
+@plats      = ("aix61_64", "lnx26_64_rh5");
+$lPlat      = "lin64b_x86";
+
+$theDate = `date +%m/%d/%Y`;
+chomp($theDate);
+
+@tarlist = ();
+@fileChkList = ();
+
+#-------------------------------------------------------------------------------
+# Display help
+#-------------------------------------------------------------------------------
+sub help{
+   print "\n$myCMD - Help:\n";
+   print "Script to generate TK patch level install tarball and send to ICC.\n";
+   print "Usage:\n";
+   print "$myCMD <-t tkversion> [-c ] [-i] [-s] [-x] [-T] [-h] \n";
+   print "  -h   this help\n";
+   print "  -t   TK version, e.g. 18.1.3.0\n";
+   print "  -i   run patch install at icc site\n";
+   print "  -s   Stage only, no generating tarball\n";
+   print "  -f   create tar file only, no platforms file, do not send to icc\n";
+   print "  -c   check mode, no actual run\n";
+   print "  -T   Test using ICCFIX area, platform_toolkits file is \n";
+   print "       at ~integ/workspace/icc\n";
+   print "  -x	 suffix for shown in ICC as a different release, \n";
+   print "       e.g. with '-t 18.1.3p.0 -x p', 18.1.3.0 install is tarred \n";
+   print "       to tk18.1.3p.0_<plat>.tar.gz, and shown as 18.1.3p.0 in ICC\n";
+   print "Example: \n";
+   print "  - 18.1.3p FCS: $myCMD -c -t 18.1.3p.0 -x p\n";
+   print "  - 18.1.3p 1st patch with install: $myCMD -c -t 18.1.3p.1 -i -x p\n";
+   exit 1;
+}
+
+
+#-------------------------------------------------------------------------------
+# Run command
+#-------------------------------------------------------------------------------
+sub runcmd {
+
+  $thecmd = $_[0];
+  chomp($thecmd);
+  print "Run command: $thecmd\n";
+  if ( ! $CHECKONLY ) {
+    print `$thecmd`;
+    if ($?) {
+       print "Status: Failed\n" ;
+       print "\n==== $thecmd \n";
+       #push (@errmsg,"`$thecmd 2>&1`);
+       exit 1;
+    }
+  }
+
+}
+
+
+#-------------------------------------------------------------------------------
+# Get file size
+#-------------------------------------------------------------------------------
+sub getFileSize {
+
+  $theFile = $_[0];
+  #$tarls = `ls -l $EDADIST/${tarfile}`;
+  $thels = `ls -l ${theFile}`;
+  @lsstr = split (/\s+/, $thels);
+  $thesize = $lsstr[4];
+  print "file $theFile size is $thesize\n";
+
+  $thesize2 = -s $theFile;
+  print "file $theFile size is $thesize2\n";
+
+  return $thesize;
+
+}
+
+
+#-------------------------------------------------------------------------------
+# Special processing for releases like 18.1.3p
+#-------------------------------------------------------------------------------
+sub versionSuffix {
+
+  # opt_x
+  if ( $opt_x ) {
+    if ( $newrel =~ /${major1}\.${major2}\.(\d+)${opt_x}\.(\d+)/ ) {
+      $patchVer = $2;
+      $tkrel = "${major1}.${major2}.$1${opt_x}";
+      $install_tkrel ="${major1}.${major2}.$1";
+      $install_newrel = "${install_tkrel}.${patchVer}";
+      print "patchVer=$patchVer, tkrel=$tkrel, install_tkrel=$install_tkrel, install_newrel=$install_newrel\n";
+
+      # Processing that is unique to patch level 0
+      if ( $patchVer == 0 ) {
+        if ( ! -e "$detaildir/tk${tkrel}_file" &&
+             -e "$detaildir/tk${install_tkrel}_file" ) {
+           $cmdstr = "cp -p $detaildir/tk${install_tkrel}_file  $detaildir/tk${tkrel}_file";
+           runcmd("$cmdstr");
+        }
+      }
+      else {
+        if ( ! -e "$detaildir/tk${newrel}_file" &&
+             -e "$detaildir/tk${install_newrel}_file" ) {
+          $cmdstr = "cp -p $detaildir/tk${install_newrel}_file $detaildir/tk${newrel}_file";
+          runcmd("$cmdstr");
+        }
+      }
+    }
+    else {
+      print "Please specify a valid toolkit version by the -t option.\n";
+      help();
+    }
+  }
+
+  # Not opt_x
+  else {
+
+    my @tokens = split(/\./, $newrel);
+    if ($tokens[0] ne $major1 || $tokens[1] ne $major2 ||
+        scalar(@tokens) != 4) {
+      print "Please specify a valid toolkit version by the -t option.\n";
+      help();
+    }
+    #if ( $newrel =~ /${major1}\.${major2}\.(\d+)\.(\d+)/ ||
+    #     $newrel =~ /${major1}\.${major2}\.(\d+)e\.(\d+)/) {
+    $tkrel = "${major1}.${major2}.$tokens[2]";
+    $patchVer = $tokens[3];
+    $install_tkrel = $tkrel;
+    $install_newrel = "${install_tkrel}.${patchVer}";
+
+  }
+
+  print "tkrel = $tkrel\n";
+  print "patchVer = $patchVer\n";
+  print "install_tkrel = $install_tkrel\n";
+  print "install_newrel = $install_newrel\n";
+
+}
+
+
+#-------------------------------------------------------------------------------
+# Make sure have enough space for tar files
+#-------------------------------------------------------------------------------
+sub chkSpace {
+
+  $chkrc = 1;
+  $dir2chk = "$_[0]";
+  $goodsize = $_[1];  #3000000 ; #3GB
+  $isAFS = `fs exam $dir2chk 2>&1`;
+  if ( ! -e $dir2chk ) {
+    print "$dir2chk does not exist\n";
+    $chkrc = 0;
+  }
+
+  # Not an AFS directory
+  if ( $isAFS =~ /is not in AFS/ ) {
+    $cmdrc = `df -k $dir2chk |tail -1`;
+    $avail = (split(/\s+/, $cmdrc))[3];
+    if ( $avail < $goodsize ) { $chkrc = 0;}
+  }
+
+  # An AFS directory
+  else {
+    $cmdrc = `fs lq $dir2chk |tail -1`;
+    ($quota, $used) = (split(/\s+/, $cmdrc))[1,2];
+    if ( ($quota - $used) < $goodsize ) { $chkrc = 0;}
+  }
+  if ( $chkrc == 0 ) {
+    print "==============================================\n";
+    print "Available space in $dir2chk is less than needed size $goodsize !!!\n";
+    print "==============================================\n";
+  }
+  else {
+    print " Available space > $goodsize !!!\n";
+  }
+
+  return( $chkrc);
+
+}
+
+
+#-------------------------------------------------------------------------------
+# Get currect icc_site_install patch level
+#-------------------------------------------------------------------------------
+sub get_curr_patch_level  {
+
+  my($basepath) = @_;
+  my $pr, $patch_rev;
+
+  print "base install path: $basepath\n";
+
+  (@patchdirs) = glob("$basepath/*");
+  foreach $dir (@patchdirs)  {
+    # print "d: $dir\n";
+    $d = basename($dir);
+    next if ($d =~ /vol[AB]/);
+    if ($d =~ /^tk/) {
+      my @tokens = split(/\./, $d);
+      $pr = $tokens[3];
+        #(undef, undef, undef, $pr) = $d =~ /tk(\d+)\.(\d+)\.(\d+)\.(\d+)/;
+        print "patch rev: $pr\n";
+    }
+    else {
+      next;
+    }
+
+    if ($pr > $patch_rev || !$patch_rev)  {
+       $patch_rev = $pr;
+       $dir_patch_rev = $d;
+    }
+  }
+
+  return $patch_rev;
+
+}
+
+
+#-------------------------------------------------------------------------------
+# Cross check patch level
+#-------------------------------------------------------------------------------
+sub check_patch_level {
+
+  # Skip if patch level 0
+  return if ($patchVer eq "0" );
+
+  # Get BTV patch level
+  $patchLvlFl = "/afs/eda/u/integ/html/${install_tkrel}_patchlevel.txt";
+  if ( ! -e $patchLvlFl ) {
+    $btvPatchLevel = 0;
+  }
+  else {
+    $btvPatchLevel = `cat $patchLvlFl `;
+    chomp($btvPatchLevel);
+  }
+
+  # Get icc patch level
+  $iccPatchLevel = get_curr_patch_level("${pdir}/ptn/${lPlat}/tk${install_tkrel}");
+
+  # Shadow install should have already been completed
+  if ( ( $patchVer != $btvPatchLevel +1 ) || ( $iccPatchLevel != $patchVer )) {
+    print "Cross check of patch level failed:\n";
+    print "  btv patch level: $btvPatchLevel\n";
+    print "  icc patch level: $iccPatchLevel\n";
+    print "  input patch level: $patchVer\n";
+    print "  It should be: input_patch_level = icc_patch_level = btv_patch_level + 1\n";
+    exit 1;
+  }
+
+}
+
+
+#-------------------------------------------------------------------------------
+# Run patch level install to icc location
+#-------------------------------------------------------------------------------
+sub runInstall {
+
+  $instCHK = "-c" if ($opt_c);
+
+  # Only allow calling patch install from this script
+  $instCmd = "$installBIN $instCHK -t patch -l icc ${install_tkrel}";
+  print "Running command '$instCmd'\n";
+  system ("$instCmd");
+  $rc = $? >> 8;
+  if ($rc != 0) {
+    print "Error occurred with return_code=$rc, exiting...\n";
+    exit 1;
+  }
+
+}
+
+
+#-------------------------------------------------------------------------------
+# Generate tar files
+#-------------------------------------------------------------------------------
+sub genTar {
+
+  print "\n====== Generating TK patch level install tar files\n";
+
+  foreach $plat (@plats) {
+    if ( $plat eq "aix61_64" ) {
+      $cc_plat="aix_64";
+      $ccfile_plat="aix564";
+      $inst_plat="aix64b";
+      $platstr="AIX 64b";
+    }
+    elsif ( $plat eq  "lnx26_64_rh5" ) {
+      $cc_plat="linux_amd64";
+      $ccfile_plat="linuxamd64";
+      $inst_plat="lin64b_x86";
+      $platstr="Linux 64b";
+    }
+    if ( $patchVer == 0 ) {
+      $details = "${ccfile_plat}_fix_tk${tkrel}";
+    }
+    else {
+      $details = "${ccfile_plat}_fix_tk${newrel}";
+    }
+
+    $tarfile = "tk${newrel}_${inst_plat}.tar.gz";
+
+    # Not "stage only"
+    if ( ! $opt_s ) {
+      if ($opt_x) {
+        $cmdstr = "$binpath/tarUpTk4icc ${install_tkrel} $patchVer ${inst_plat} ${opt_x}";
+      }
+      else {
+        $cmdstr = "$binpath/tarUpTk4icc $tkrel $patchVer ${inst_plat}";
+      }
+      runcmd("$cmdstr");
+    }
+
+    # Not in "check mode"
+    if ( ! $CHECKONLY ) {
+      $tsize{$plat} = getFileSize("$EDADIST/${tarfile}");
+    }
+
+    print "push to tarlist: $EDADIST/${tarfile} ${details}\n";
+    push (@tarlist, "$EDADIST/${tarfile} ${details}");
+    push (@fileChkList, "$EDADIST/${tarfile}");
+
+    # Add miscellaneous downloadable files to tarlist when processing patch level 0
+    if ( $patchVer == 0 ) {
+
+      # Install readme file - ok
+      print "push to tarlist: ${detaildir}/${instReadmeFile} ${details}.install_readme\n";
+      push (@tarlist, "${detaildir}/${instReadmeFile} ${details}.install_readme");
+
+      # Install script - ok
+      print "push to tarlist: ${detaildir}/${instScriptFile} ${details}.installPatchLvlTK\n";
+      push (@tarlist, "${detaildir}/${instScriptFile} ${details}.installPatchLvlTK");
+
+      # pet script - ok
+      print "push to tarlist: ${detaildir}/${petScriptFile} ${details}.pet\n";
+      push (@tarlist, "${detaildir}/${petScriptFile} ${details}.pet");
+
+      # pet config file - ok
+      print "push to tarlist: ${detaildir}/${petConfFile} ${details}.PET_eda.conf\n";
+      push (@tarlist, "${detaildir}/${petConfFile} ${details}.PET_eda.conf");
+
+    }
+  }
+}
+
+#-------------------------------------------------------------------------------
+# Define individual lines in platforms_toolkits file
+#-------------------------------------------------------------------------------
+sub prtPlat {
+
+  $isBase = $_[0];
+
+  foreach $plat (@plats) {
+    if ( $plat eq "aix61_64" ) {
+      $cc_plat="aix_64";
+      $ccfile_plat="aix564";
+      $platstr="AIX 64b";
+    }
+    elsif ( $plat eq  "lnx26_64_rh5" ) {
+      $cc_plat="linux_amd64";
+      $ccfile_plat="linuxamd64";
+      $platstr="Linux 64b";
+    }
+
+    # Accommodate difference in TK release variable name (patch level 0 versus
+    # follow on patch levels).
+    if ( $patchVer == 0 ) {
+      $details = "${ccfile_plat}_fix_tk${tkrel}";
+    }
+    else {
+      $details = "${ccfile_plat}_fix_tk${newrel}";
+    }
+
+    # Write lines to platforms_toolkits file
+    if ( $isBase ) {
+      print PFILE "TOOLKIT_BASE;${cc_plat};${details};${detailsfile};ToolKit ${tkrel} $platstr Base Package;$tsize{$plat};;$theDate;Y;\n";
+      #print PFILE "TOOLKIT_PATCH;${cc_plat};${details}.install_readme;${instReadmeFile};ToolKit ${tkrel} $platstr Install readme;$reameSize;;$theDate;;\n";
+      #print PFILE "TOOLKIT_PATCH;${cc_plat};${details}.installPatchLvlTK;${instScriptFile};ToolKit ${tkrel} $platstr Install script;$instScriptSize;;$theDate;;\n";
+      #print PFILE "TOOLKIT_PATCH;${cc_plat};${details}.pet;${petScriptFile};ToolKit ${tkrel} $platstr PET script;$petScriptSize;;$theDate;;\n";
+      #print PFILE "TOOLKIT_PATCH;${cc_plat};${details}.PET_eda.conf;${petConfFile};ToolKit ${tkrel} $platstr PET conf file;$petConfSize;;$theDate;;\n";
+      print PFILE "TOOLKIT_PATCH;${cc_plat};${details}.install_readme;${instReadmeFile};ToolKit ${tkrel} $platstr Install readme;$reameSize;;$theDate;;\n";
+      print PFILE "TOOLKIT_PATCH;${cc_plat};${details}.installPatchLvlTK;${instScriptDetailFile};ToolKit ${tkrel} $platstr Install script;$instScriptSize;;$theDate;;\n";
+      print PFILE "TOOLKIT_PATCH;${cc_plat};${details}.pet;${petScriptDetailFile};ToolKit ${tkrel} $platstr PET script;$petScriptSize;;$theDate;;\n";
+      print PFILE "TOOLKIT_PATCH;${cc_plat};${details}.PET_eda.conf;${petConfDetailFile};ToolKit ${tkrel} $platstr PET conf file;$petConfSize;;$theDate;;\n";
+    }
+    else {
+      print PFILE "TOOLKIT_PATCH;${cc_plat};$details;${detailsfile};ToolKit ${newrel} $platstr Update Package;$tsize{$plat};;$theDate;;\n";
+    }
+  }
+}
+
+
+#-------------------------------------------------------------------------------
+# Create/update platforms_toolkits file
+#-------------------------------------------------------------------------------
+sub genPlat {
+
+  # Create a platform_toolkits file when neither option -f nor
+  # option -s were specified
+  if ( ! $opt_f  && ! $opt_s ) {
+
+    if ( $CHECKONLY ) {
+      system ("cp ${platfl} ${platfl}_ck");
+      $platfl = "${platfl}_ck";
+    }
+    else {
+
+      # Save a backup copy of the last platforms_toolkits file
+      $timestamp = `date +%F_%T`;
+      system("cp -p ${platfl} ${filepath}/platforms_bak/platforms_toolkits.${timestamp}");
+    }
+
+    open(PFILE, ">$platfl.wrk") or die "cannot open $platfl.wrk\n";
+    open(PPREV, "<$platfl") or die "cannot open $platfl\n";
+
+    # Processing that is unique to patch level 0
+    if ( $patchVer == 0 ) {
+      print PFILE "$tkrel\n";
+      prtPlat(1);
+
+      print PFILE "\n";
+      foreach $line (<PPREV>) {
+        print PFILE  "$line";
+      }
+    }
+
+    # Processing for patch levels > 0
+    else {
+      @platPrev = <PPREV> ;
+      $cc = 0;
+      while ( $cc <= $#platPrev ) {
+        chomp($platPrev[$cc]);
+        if ( $platPrev[$cc] ne "$tkrel" ) { # section of other TK release, so just copy/print it
+           print PFILE "$platPrev[$cc]\n";
+        }
+        else { # found the right TK release section
+           print PFILE "$platPrev[$cc]\n";
+           $cc++;
+           while ( ($platPrev[$cc] !~ /^$/) && ($platPrev[$cc] !~ /^\s+$/) ) {
+             print PFILE "$platPrev[$cc]";
+             $cc++;
+           }
+           prtPlat(0);
+           print PFILE "\n";
+        }
+        $cc++;
+      } #end while $cc <= $#platPrev
+    }
+    if (! $CHECKONLY ) {
+      system ("mv  ${platfl}.wrk  ${platfl}");
+      print "$platfl contents:\n";
+      system ("cat $platfl");
+    }
+    else {
+      print "${platfl}.wrk contents:\n";
+      system ("cat ${platfl}.wrk");
+    }
+  }
+
+}
+
+
+#-------------------------------------------------------------------------------
+# Send ICC Alert  (EH: this is not currently used)
+#-------------------------------------------------------------------------------
+sub sendICCalert {
+
+  print "- Send toolkit alert file to ICC....\n";
+  if ( $patchVer == 0 ) {
+    print "This is a base level Toolkit, not sending alert email\n";
+    #$alertfl = "$detaildir/toolkit_alert.tk${tkrel}";
+    #open(ALERTFILE, ">$alertfl") or die "cannot open $alertfl\n";
+    #print ALERTFILE "Tech: CU11, CU08, CU65HP, CU45HP, CU32HP\n";  #will change to Tech: NA in Sept ICC fixpack
+    #print ALERTFILE "Ver:  v13.0, v7.0, rel4.0, rel4.0, rel3.0\n"; #will change to Tech: NA in Sept ICC fixpack
+    #print ALERTFILE "Date: $theDate ToolKit $tkrel\n";
+    #print ALERTFILE "Subject: IBM Customer Connect: New ToolKit Released from IBM\n";
+  }
+  else {
+    $alertfl = "$detaildir/toolkitpatch_alert.tk${newrel}";
+    $cmdstr = "$ICCBIN/edci_fpdfile -f $alertfl";
+    # runcmd ("$cmdstr");
+  }
+  #disable TK alert email for now
+  #system("$ICCBIN/edci_fpdfile -f  $filepath/toolkitpatch_alert.${newrel}");
+}
+
+
+#-------------------------------------------------------------------------------
+# Check file existence
+#-------------------------------------------------------------------------------
+sub chkFileExist {
+
+  @notExist = ();
+
+  print "Checking existence of files before sending to ICC\n";
+  foreach $file2chk (@fileChkList) {
+    print "   $file2chk\n";
+      if ( ! -e $file2chk ) {
+        push (@notExist, "$file2chk");
+      }
+  }
+  if ( $#notExist >= 0 ) { # list not empty
+    print "The following file(s) cannot be found, exiting...\n";
+    foreach $notfound (@notExist) {
+      print "   $notfound\n";
+    }
+    exit 1;
+  }
+
+}
+
+
+#-------------------------------------------------------------------------------
+# Send to icc
+#-------------------------------------------------------------------------------
+sub send2icc {
+
+  # Check for existence of required files
+  push (@fileChkList, $platfl);
+  push (@fileChkList, "$detaildir/$detailsfile");
+  push (@fileChkList, "$detaildir/$instReadmeFile");
+  push (@fileChkList, "$detaildir/$instScriptFile");
+  push (@fileChkList, "$detaildir/$petScriptFile");
+  push (@fileChkList, "$detaildir/$petConfFile");
+  push (@fileChkList, "$detaildir/$instScriptDetailFile");
+  push (@fileChkList, "$detaildir/$petScriptDetailFile");
+  push (@fileChkList, "$detaildir/$petConfDetailFile");
+  push (@fileChkList, "$detaildir/$shortDescFile");
+  push (@fileChkList, "$detaildir/$longDescFile");
+  chkFileExist();
+
+  print "\n====== Stage files  to ICC....\n";
+
+  print "- Stage platforms file to ICC....\n";
+  $cmdstr = "$ICCBIN/edci_fpdfile -f  $platfl";
+  runcmd("$cmdstr");
+
+  print "- Stage details files to ICC....\n";
+  $cmdstr = "$ICCBIN/edci_fpdfile -f $detaildir/$detailsfile";
+  runcmd("$cmdstr");
+
+  # Handle detail files
+  if ( $patchVer == 0 ) {
+    print "- Stage readme details file to ICC....\n";
+    $cmdstr = "$ICCBIN/edci_fpdfile -f $detaildir/$instReadmeFile"; # ok
+    runcmd("$cmdstr");
+
+    print "- Stage install script details file to ICC....\n";
+    #$cmdstr = "$ICCBIN/edci_fpdfile -f $detaildir/$instScriptFile"; # FIX
+    $cmdstr = "$ICCBIN/edci_fpdfile -f $detaildir/$instScriptDetailFile"; # ok
+    runcmd("$cmdstr");
+
+    print "- Stage pet script details file to ICC....\n";
+    #$cmdstr = "$ICCBIN/edci_fpdfile -f $detaildir/$petScriptFile"; # FIX
+    $cmdstr = "$ICCBIN/edci_fpdfile -f $detaildir/$petScriptDetailFile"; # ok
+    runcmd("$cmdstr");
+
+    print "- Stage pet configuration details file to ICC....\n";
+    #$cmdstr = "$ICCBIN/edci_fpdfile -f $detaildir/$petConfFile"; # FIX
+    $cmdstr = "$ICCBIN/edci_fpdfile -f $detaildir/$petConfDetailFile"; # ok
+    runcmd("$cmdstr");
+
+    print "- Stage short description details file to ICC....\n";
+    #$cmdstr = "$ICCBIN/edci_fpdfile -f $detaildir/$shortDescFile"; # FIX
+    $cmdstr = "$ICCBIN/edci_fpdfile -f $detaildir/$shortDescFile"; # ok
+    runcmd("$cmdstr");  
+
+    print "- Stage long description details file to ICC....\n";
+    #$cmdstr = "$ICCBIN/edci_fpdfile -f $detaildir/$longDescFile"; # FIX
+    $cmdstr = "$ICCBIN/edci_fpdfile -f $detaildir/$longDescFile"; # ok
+    runcmd("$cmdstr");
+
+  }
+
+  print "- Stage downloadable files to ICC....\n";
+  foreach $tarfl (@tarlist) {
+    $cmdstr = "$ICCBIN/edci_fpdkit -f $tarfl";
+    runcmd ("$cmdstr");
+    $cmdstr = "$ICCBIN/edci_fpdLink -f $tarfl";
+    runcmd ("$cmdstr");
+  }
+
+}
+
+
+#-------------------------------------------------------------------------------
+# Prepare for future patch updates of this release
+#-------------------------------------------------------------------------------
+sub preparePatchUpdate {
+
+  if ( $patchVer == 0  && ! $opt_x ) {
+    print "\n==============================================\n";
+    print "Preparing for Patch Update of this new release\n";
+#    #create ptf dir
+#    $ptfparent = "/afs/eda/edadist/ptfs";
+#    $ptfdir = "tk${major1}/tk${tkrel}";
+#    if ( ! -e "${ptfparent}/${ptfdir}" ) {
+#       print "Creating ptf dir ${ptfparent}/${ptfdir}\n";
+#       if (  $CHECKONLY) {
+#          print "mkdir -p ${ptfparent}/${ptfdir}\n" ;
+#          print "ln -fs $ptfdir ${ptfparent}/tk${tkrel}\n";
+#       }
+#       else {
+#         system("mkdir -p ${ptfparent}/${ptfdir}");
+#         system("ln -fs $ptfdir ${ptfparent}/tk${tkrel}");
+#       }
+#    }
+
+    print "Generating data files for future Weekly Patch Updates of this release.\n";
+    print "---SS file levels:  /afs/eda/u/integ/tools/data/edadist_${tkrel} :\n";
+    if ($CHECKONLY) {
+      print "/bin/ls -1 /afs/eda/edadist/products/\*/14\* > /afs/eda/u/integ/tools/data/edadist_${tkrel}\n";
+    }
+    else {
+      system("/bin/ls -1 /afs/eda/edadist/products/*/14* > /afs/eda/u/integ/tools/data/edadist_${tkrel}");
+    }
+
+#    print "---TK${tkrel} tar file list: /afs/eda/u/integ/tools/data/tk${tkrel}_tarflist\n";
+#    if (  $CHECKONLY) {
+#       print "/bin/tar -tvf $EDADIST/${tarfileBase}_aix61_64.tar > /afs/eda/u/integ/tools/data/tk${tkrel}_tarflist\n";
+#    }
+#    else {
+#       system("/bin/tar -tvf $EDADIST/${tarfileBase}_aix61_64.tar > /afs/eda/u/integ/tools/data/tk${tkrel}_tarflist");
+#    }
+  }
+}
+
+
+################################################################################
+# Main
+################################################################################
+help() if ($opt_h);
+
+if ( ! $opt_t ) {
+  print "Please specify a toolkit version.\n";
+  help();
+}
+
+$CHECKONLY = 1 if ($opt_c);
+$newrel = $opt_t;
+
+# For special release like 18.1.3p
+versionSuffix();
+
+check_patch_level();
+
+# Processing that is unique to patch level 0
+if ( $patchVer == 0 ) {
+
+  if ( $opt_i ) {
+    print "Error: Only the \"patch\" type install is allowed from this script\n";
+    print "       To run prod install, please run install script directly\n";
+    print "       Exiting...\n";
+    exit 1;
+  }
+
+  $detailsfile = "tk${tkrel}_file";
+  $instReadmeFile = "tk${tkrel}.r_file";
+  $cmdstr = "cp -p ${pdir}/README.txt ${detaildir}/${instReadmeFile}";
+  runcmd("$cmdstr");
+  $reameSize = getFileSize("$pdir/README.txt");
+  $instScriptFile = "tk${tkrel}.i_file"; # FIX
+  $instScriptDetailFile = "tk${tkrel}.i_file"; # FIX
+  $cmdstr = "cp -p ${pdir}/scripts/installPatchLvlTK ${detaildir}/${instScriptFile}";
+  runcmd("$cmdstr");
+  $instScriptSize = getFileSize("$pdir/icc_svn/installPatchLvlTK");
+
+  $petDir= "${pdir}/ptn/${lPlat}/tk${install_tkrel}/tk${install_tkrel}.${patchVer}_${lPlat}/pet/14.1";
+
+  $petScriptFile = "tk${tkrel}.p_file"; # FIX
+  $petScriptDetailFile = "tk${tkrel}.p_file"; # FIX
+  $cmdstr = "cp -p ${petDir}/pet ${detaildir}/${petScriptFile}";
+  runcmd("$cmdstr");
+  $petScriptSize = getFileSize("${petDir}/pet");
+
+  $petConfFile = "tk${tkrel}.c_file"; # FIX
+  $petConfDetailFile = "tk${tkrel}.c_file"; # FIX
+  $cmdstr = "cp -p ${petDir}/PET_eda.conf ${detaildir}/${petConfFile}";
+  runcmd("$cmdstr");
+  $petConfSize = getFileSize("${petDir}/PET_eda.conf");
+
+  $shortDescFile = "tk_shortdesc_${tkrel}";
+  $longDescFile = "tk_longdesc_${tkrel}";
+
+}
+else {
+  $detailsfile = "tk${newrel}_file";
+}
+
+#print "newrel=$newrel, tkrel=$tkrel, patchVer=$patchVer\n";
+
+# Use ICC FIX staging area if -T (test) was specified
+# Otherwise, use the production paths
+if ( $opt_T) {
+  $platfl="/afs/eda/u/integ/workspace/icc/platforms_toolkits";
+  $ICCBIN="/afs/btv/data/edesign/edsd/staging.fix/bin";
+}
+else {
+  $platfl="${filepath}/platforms_toolkits";
+  $ICCBIN="/afs/btv/data/edesign/edsd/staging/bin";
+}
+
+$logfile="/afs/eda/u/integ/maketar/ebiz_${newrel}.log";  # Not currently used
+
+# Check available space if this is not "stage only"
+if ( ! $opt_s ) {
+  print "\nChecking available space of $EDADIST for creating tar files...\n";
+  if ( !chkSpace($EDADIST, 3000000) ) {
+    if ( !$CHECKONLY ) { exit 1; }
+  }
+}
+
+chdir($filepath) or die "Cannot cd to $filepath $!";
+open(VERSIONFILE, ">$versionfl") or die "cannot open $versionfl\n";
+print VERSIONFILE "ASIC Toolkit $tkrel";
+
+print "The VERSION of this Toolkit will be ASIC Toolkit $tkrel\n";
+
+# Write a processing started message if this is not "stage only"
+if (! $opt_s)  {
+  print "-------------------------------------------------------\n";
+  $timestamp = `date`;
+  chomp($timestamp);
+  print "Processing started $timestamp for ASIC Toolkit $newrel\n";
+}
+
+# Run patch level install to icc location if -i was specified
+ #runInstall() if ($opt_i);
+
+# Generate tar files
+genTar();
+
+# Generate platforms_toolkits file
+genPlat();
+
+# Stage files to ICC if -f (tar file only) was not specified
+send2icc() if (! $opt_f);
+
+# Prepare for future patch updates of this release
+preparePatchUpdate();
+
+# Send email to release team
+#if ( ! $CHECKONLY ) {
+#  $ESUBJECT = "Weekly Patch Update for TK${newrel} is Completed";
+#  $emailDist = "nanhuo\@us.ibm.com,stadtlag\@us.ibm.com,jwcolem\@us.ibm.com,antolb\@us.ibm.com,deday\@us.ibm.com,bhawani.nayak\@in.ibm.com,lathakannan\@in.ibm.com,raymondb\@us.ibm.com";
+#  system("sed '/Subject:/d' $detaildir/${detailsfile} |mail -s \"${ESUBJECT}\" \"$emailDist\" ");
+#}
+
+# FCS details file  ~antolb/public/eda_releasenotes1401.Jun2012TK18.1.1.txt
+
+print "$myCMD  - Done\n";
+exit 0;

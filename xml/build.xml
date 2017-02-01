@@ -1,0 +1,449 @@
+<project name="prod" default="CleanFullBuild">
+
+	<!-- ******************************************************************** -->
+	<!-- Function : Provides the ANT build tasks for the etree development    -->
+	<!--            environment.  										      -->
+	<!-- Original Author   : stadtlag                                         -->
+	<!-- Current Version   : $                                                -->
+	<!-- Last Modified     : 04/12/2011                                       -->
+	<!-- Last Modified By  : stadtlag                                         -->
+	<!-- ******************************************************************** -->
+
+	<!-- taskdef resource="net/sf/antcontrib/antcontrib.properties" /-->
+
+	<presetdef name="javac"> 
+	  <javac includeantruntime="false" />
+	</presetdef>
+	
+	<property environment="env" />
+	<property name="afsbtvdatapath" location="/afs/btv.ibm.com/data" />
+
+	<property name="eda_dir" location="" />
+	<property name="eda_lib" location="${eda_dir}/lib" />
+	<property name="eda_libx" location="${eda_dir}/libx" />
+	<property name="eda_src" location="${eda_dir}/java/src/" />
+	<property name="eda_classes" location="${eda_dir}/java/classes" />
+
+	<property name="package_path" value="com/ibm/stg/eda" />
+	<property name="package_path_app" value="${package_path}/app" />
+	<property name="package_path_component" value="${package_path}/component" />
+
+	<property name="jar_tklevelhist" value="TkLevelHist.jar" />
+	<property name="jar_tkpatch" value="TkPatch.jar" />
+	<property name="jar_tketreebase" value="TkEtreeBase.jar" />
+	<property name="jar_tketreeobjs" value="TkEtreeObjects.jar" />
+	<property name="jar_tketreedb" value="TkEtreeDb.jar" />
+	<property name="jar_jfacebase" value="JfaceBase.jar" />
+
+	<!-- Define a variable to hold our jar files in lib and libx -->
+	<property name="local_jars" value="${eda_lib}/TkEtreeBase.jar;
+		                                ${eda_lib}/TkEtreeDb.jar;
+		                                ${eda_lib}/TkEtreeObjs.jar;
+		                                ${eda_lib}/TkLevelHist.jar;
+		                                ${eda_lib}/TkPatch.jar;
+										${eda_lib}/JfaceBase.jar;
+		                                ${eda_dir}/libx_platform/win32/swt.jar;
+		                                ${eda_dir}/libx/antExtensions/ant-contrib.jar;
+		                                ${eda_dir}/libx/db2/db2java.zip;
+		                                ${eda_dir}/libx/db2/db2jcc.jar;
+										${eda_dir}/libx/iipmds/ClearQuest.jar;
+										${eda_dir}/libx/iipmds/ClearQuestClient.jar;
+                                        ${eda_dir}/libx/iipmds/IcofCommon.jar;
+		                                ${eda_dir}/libx/iipmds/IcofMom.jar;
+		                                ${eda_dir}/libx/iipmds/IcofRole.jar;
+										${eda_dir}/libx/iipmds/IcofUtil.jar;
+									    ${eda_dir}/libx/ibm/bpjtk-v3.0.3_b20090914.jar;
+										${eda_dir}/libx/ibm/bpwrapper.jar;
+										${eda_dir}/libx/ibm/cwa2.jar;
+										${eda_dir}/libx/jface/org.eclipse.core.commands_3.2.0.jar;
+		       							${eda_dir}/libx/jface/org.eclipse.equinox.common_3.2.0.jar;
+										${eda_dir}/libx/jface/org.eclipse.osgi_3.2.3.jar;
+										${eda_dir}/libx/jface/org.eclipse.jface_3.2.2.jar;
+		                                ${eda_dir}/libx/runtimes/com.ibm.ws.webservices.thinclient_6.1.0.jar;
+                						${eda_dir}/libx/log4j/log4j-1.2.14.jar;
+										${eda_dir}/libx/javamail-1.2/mail.jar;"/>
+
+
+	<!-- ****************************************************************** -->
+	<!-- echo some meassages							                                                       -->
+	<!-- ****************************************************************** -->
+	<echo message="os = ${os.name}" level="info" />
+
+	
+	<!-- ****************************************************************** -->
+	<!-- Some path setup.							                                                               -->
+	<!-- ****************************************************************** -->
+	<record name="${eda_dir}/build.log" />
+
+
+	<!-- ****************************************************************** -->
+	<!-- Init							                                    -->
+	<!-- ****************************************************************** -->
+	<!-- Sets variables based on whether various files and directories      -->
+	<!-- are found.  If they aren't found, other targets will create them.	-->
+	<!-- ****************************************************************** -->
+	<target name="Init">
+		<description>	
+			Set ant properties based on file and directory availability
+		</description>
+
+		<!-- Create the time stamp -->
+		<tstamp />
+
+		<echo message="Setting initial properties for file and directory existence." level="info" />
+		<available file="${afsbtvdatapath}" type="dir" property="afs.present" />
+		<available file="${eda_classes}" type="dir" property="eda_classes.present" />
+		<available file="${eda_lib}" type="dir" property="eda_lib.present" />
+		<available file="${iipmds_lib}/${jar_tklevelhist}" type="file" property="jar_tklevelhist.present" />
+		<available file="${iipmds_lib}/${jar_tkpatch}" type="file" property="jar_tkpatch.present" />
+		<available file="${iipmds_lib}/${jar_tketreebase}" type="file" property="jar_tketreebase.present" />
+		<available file="${iipmds_lib}/${jar_tketreeobjs}" type="file" property="jar_tketreeobjs.present" />
+		<available file="${iipmds_lib}/${jar_tketreedb}" type="file" property="jar_tketreedb.present" />
+		<available file="${iipmds_lib}/${jar_jfacebase}" type="file" property="jar_jfacebase.present" />
+	</target>
+
+
+	<!-- ****************************************************************** -->
+	<!-- Clean, full build of libraries and applications	                -->
+	<!-- ****************************************************************** -->
+	<!-- Remove all *.class files and *.ser files.  Compile all libraries  	-->
+	<!-- and applications                                                   -->
+	<!-- ****************************************************************** -->
+	<target name="CleanFullBuild" depends="Init,
+							  		       EdaClassesDirPresent,
+										   EdaLibDirPresent">
+		<delete quiet="true">
+			<fileset dir="${eda_classes}" includes="**/*" casesensitive="yes" />
+		</delete>
+		<antcall target="CleanFullLibBuild" />
+		<antcall target="CleanFullAppBuild" />
+	</target>
+
+
+	<!-- ****************************************************************** -->
+	<!-- Clean, full build of applications					                -->
+	<!-- ****************************************************************** -->
+	<!-- Remove all *.class files.  Compile all applications				-->
+	<!-- ****************************************************************** -->
+	<target name="CleanFullAppBuild" depends="Init,
+	   						  		          EdaClassesDirPresent,
+										      EdaLibDirPresent">
+
+		<delete quiet="true">
+			<fileset dir="${eda_classes}/${eda_app}" includes="**/*" casesensitive="yes" />
+		</delete>
+		<antcall target="FullAppBuild" />
+	</target>
+
+	
+	<!-- ****************************************************************** -->
+	<!-- Clean, full library build							                -->
+	<!-- ****************************************************************** -->
+	<!-- Remove all *.class files.  Compile all libraries   				-->
+	<!-- ****************************************************************** -->
+	<target name="CleanFullLibBuild" depends="Init,
+											  EdaClassesDirPresent,
+											  EdaLibDirPresent">
+		<delete quiet="true">
+			<fileset dir="${eda_classes}/${package_path_component}" includes="**/*" casesensitive="yes" />
+			<fileset dir="${eda_lib}" includes="*.jar" />
+		</delete>
+		<antcall target="FullLibBuild" />
+	</target>
+
+
+	<!-- ****************************************************************** -->
+	<!-- Full Application build	 		                                    -->
+	<!-- ****************************************************************** -->
+	<!-- Compile all applications                                           -->
+	<!-- ****************************************************************** -->
+	<target name="FullAppBuild" depends="Init,
+										 EdaClassesDirPresent,
+										 EdaLibDirPresent">
+		<antcall target="BuildAllNonWebApps" />
+	</target>
+
+
+	<!-- ****************************************************************** -->
+	<!-- Full library build				                                    -->
+	<!-- ****************************************************************** -->
+	<!-- Compile all libraries                                              -->
+	<!-- ****************************************************************** -->
+	<target name="FullLibBuild" depends="Init,
+										 EdaClassesDirPresent,
+										 EdaLibDirPresent">
+		<antcall target="BuildTkEtreeBase" />
+		<antcall target="BuildTkEtreeDb" />
+		<antcall target="BuildTkEtreeObjs" />
+		<antcall target="BuildTkLevelHist" />
+	    <antcall target="BuildTkPatch" />
+	    <antcall target="BuildJfaceBase" />
+	</target>
+
+
+	<!-- ****************************************************************** -->
+	<!-- Build all non-web applications	                                    -->
+	<!-- ****************************************************************** -->
+	<!-- Compile all non-web applications                                   -->
+	<!-- ****************************************************************** -->
+	<target name="BuildAllNonWebApps" depends="Init,
+											   EdaClassesDirPresent,
+											   EdaLibDirPresent">
+		<antcall target="BuildEtree"/>
+		<antcall target="BuildInjectBuild"/>
+	</target>
+
+
+	<!-- ****************************************************************** -->
+	<!-- Build Etree application		                                    -->
+	<!-- ****************************************************************** -->
+	<!--               								             	        -->
+	<!-- ****************************************************************** -->
+	<target name="BuildEtree" depends="Init,
+						   			   EdaClassesDirPresent">
+		<antcall target="CompileDir">
+			<param name="includePattern" value="${package_path_app}/etree" />
+		</antcall>
+		<antcall target="CompileDir">
+			<param name="includePattern" value="${package_path_app}/etree/packaging" />
+		</antcall>
+	</target>
+
+
+	<!-- ****************************************************************** -->
+	<!-- Build InjectBuild application	                                    -->
+	<!-- ****************************************************************** -->
+	<!--               								             	        -->
+	<!-- ****************************************************************** -->
+	<target name="BuildInjectBuild" depends="Init,
+										  EdaClassesDirPresent">
+		<antcall target="CompileDir">
+			<param name="includePattern" value="${package_path_app}/injectBuild" />
+		</antcall>
+	</target>
+
+	
+	<!-- ****************************************************************** -->
+	<!-- Build TkLevelHist library 		                                    -->
+	<!-- ****************************************************************** -->
+	<!-- Compile the tkLevelHist library                                  	-->
+	<!-- ****************************************************************** -->
+	<target name="BuildTkLevelHist" depends="Init, EdaClassesDirPresent, EdaLibDirPresent">
+		<antcall target="CompileDir">
+			<param name="includePattern" value="${package_path_component}/tk_levelhist" />
+		</antcall>
+		<antcall target="JarDir">
+			<param name="dir_to_jar" value="${package_path_component}/tk_levelhist" />
+			<param name="jar_name" value="${eda_lib}/${jar_tklevelhist}" />
+		</antcall>
+	</target>
+
+	
+	<!-- ****************************************************************** -->
+	<!-- Build TkPatch library 		                                    -->
+	<!-- ****************************************************************** -->
+	<!-- Compile the tkPatch library                                  	-->
+	<!-- ****************************************************************** -->
+	<target name="BuildTkPatch" depends="Init, EdaClassesDirPresent, EdaLibDirPresent">
+		<antcall target="CompileDir">
+			<param name="includePattern" value="${package_path_component}/tk_patch" />
+		</antcall>
+		<antcall target="JarDir">
+			<param name="dir_to_jar" value="${package_path_component}/tk_patch" />
+			<param name="jar_name" value="${eda_lib}/${jar_tkpatch}" />
+		</antcall>
+	</target>
+
+	
+	<!-- ****************************************************************** -->
+	<!-- Build TkEtreeBase library 		                                    -->
+	<!-- ****************************************************************** -->
+	<!-- Compile the TkEtreeBase library                                   	-->
+	<!-- ****************************************************************** -->
+	<target name="BuildTkEtreeBase" depends="Init, EdaClassesDirPresent, EdaLibDirPresent">
+		<antcall target="CompileDir">
+			<param name="includePattern" value="${package_path_component}/tk_etreebase" />
+		</antcall>
+		<antcall target="JarDir">
+			<param name="dir_to_jar" value="${package_path_component}/tk_etreebase" />
+			<param name="jar_name" value="${eda_lib}/${jar_tketreebase}" />
+		</antcall>
+	</target>
+
+	
+	<!-- ****************************************************************** -->
+	<!-- Build TkEtreeObjs library 		                                    -->
+	<!-- ****************************************************************** -->
+	<!-- Compile the TkEtreeObjs library                                   	-->
+	<!-- ****************************************************************** -->
+	<target name="BuildTkEtreeObjs" depends="Init, EdaClassesDirPresent, EdaLibDirPresent">
+		<antcall target="CompileDir">
+			<param name="includePattern" value="${package_path_component}/tk_etreeobjs" />
+		</antcall>
+		<antcall target="JarDir">
+			<param name="dir_to_jar" value="${package_path_component}/tk_etreeobjs" />
+			<param name="jar_name" value="${eda_lib}/${jar_tketreeobjs}" />
+		</antcall>
+	</target>
+
+	
+	<!-- ****************************************************************** -->
+	<!-- Build TkEtreeDb library                                            -->
+	<!-- ****************************************************************** -->
+	<!-- Compile the tkEtreeDb library                                   	-->
+	<!-- ****************************************************************** -->
+	<target name="BuildTkEtreeDb" depends="Init, EdaClassesDirPresent, EdaLibDirPresent">
+		<antcall target="CompileDir">
+			<param name="includePattern" value="${package_path_component}/tk_etreedb" />
+		</antcall>
+		<antcall target="JarDir">
+			<param name="dir_to_jar" value="${package_path_component}/tk_etreedb" />
+			<param name="jar_name" value="${eda_lib}/${jar_tketreedb}" />
+		</antcall>
+	</target>
+
+
+	<!-- ****************************************************************** -->
+	<!-- Build JfaceBase library 		                                    -->
+	<!-- ****************************************************************** -->
+	<!-- Compile the JfaceBase library                                      -->
+	<!-- ****************************************************************** -->
+	<target name="BuildJfaceBase" depends="Init, EdaClassesDirPresent, EdaLibDirPresent">
+		<antcall target="CompileDir">
+			<param name="includePattern" value="${package_path_component}/jfacebase" />
+		</antcall>
+		<antcall target="JarDir">
+			<param name="dir_to_jar" value="${package_path_component}/jfacebase" />
+			<param name="jar_name" value="${eda_lib}/${jar_jfacebase}" />
+		</antcall>
+	</target>
+	
+	
+	<!-- ****************************************************************** -->
+	<!-- CompileDir    						                                -->
+	<!-- ****************************************************************** -->
+	<!-- Compile the *.java files in the specified directory           		-->
+	<!-- ****************************************************************** -->
+	<target name="CompileDir">
+		<description>	
+				Compile *.java source files.
+			</description>
+		<echo message = "java class path = ${java.class.path}" level="info"/>
+		<echo message="Compiling java files, ${includePattern}/**, in ${eda_src}" level="info" />
+		<javac srcdir="${eda_src}" destdir="${eda_classes}" classpath="${eda_classes};${eda_src};
+		 							${java.class.path};
+									${local_jars}" debug="on" optimize="off" verbose="off" source="1.7" target="1.7" failonerror="true" includes="${includePattern}/**" excludes="${excludePattern}/**">
+		</javac>
+
+	</target>
+
+
+	<!-- ****************************************************************** -->
+	<!-- JarDir        						                                -->
+	<!-- ****************************************************************** -->
+	<!-- Create a jar file with the specified name of the contents in the	-->
+	<!-- specified directory.  Only *.class and *.ser files will be 		-->
+	<!-- included in the jar file											-->
+	<!-- ****************************************************************** -->
+	<target name="JarDir">
+		<description>
+			Create jar file named ${jar_name} containing contents of ${dir_to_jar}
+		</description>
+		<jar destFile="${jar_name}" baseDir="${eda_classes}" filesOnly="true" includes="${dir_to_jar}/*.class">
+		</jar>
+		<echo>Created ${jar_name}</echo>
+	</target>
+
+
+	<!-- ****************************************************************** -->
+	<!-- EdaClassesDirPresent			   									-->
+	<!-- ****************************************************************** -->
+	<!-- Create eda_classes directory if it does not exist					-->
+	<!-- ****************************************************************** -->
+	<target name="EdaClassesDirPresent" depends="Init" unless="eda_classes_dir.present">
+		<description>	
+			Used to create the eda_classes directory if it does not exist.
+		</description>
+		<mkdir dir="${eda_classes}" />
+	</target>
+
+
+	<!-- ****************************************************************** -->
+	<!-- EdaLibDirPresent		   											-->
+	<!-- ****************************************************************** -->
+	<!-- Create eda_lib directory if it does not exist						-->
+	<!-- ****************************************************************** -->
+	<target name="EdaLibDirPresent" depends="Init" unless="eda_lib_dir.present">
+		<description>	
+			Used to create the eda_lib directory if it does not exist.
+		</description>
+		<mkdir dir="${eda_lib}" />
+	</target>
+
+
+	<!-- ****************************************************************** -->
+	<!-- TkLevelHistPresent			  										-->
+	<!-- ****************************************************************** -->
+	<!-- Ensure TK_LevelHist Jar exists										-->
+	<!-- ****************************************************************** -->
+	<target name="TkLevelHistPresent" depends="Init" unless="jar_tklevelhist.present">
+		<description>	
+			Create the TK_LevelHist.jar file if it does not exist.
+		</description>
+		<antcall target="BuildTkLevelHist" />
+	</target>
+
+	
+	<!-- ****************************************************************** -->
+	<!-- TkPatchPresent	    		  										-->
+	<!-- ****************************************************************** -->
+	<!-- Ensure TK_Patch Jar exists  										-->
+	<!-- ****************************************************************** -->
+	<target name="TkPatchPresent" depends="Init" unless="jar_tkpatch.present">
+		<description>	
+			Create the TK_Patch.jar file if it does not exist.
+		</description>
+		<antcall target="BuildTkPatch" />
+	</target>
+
+	
+	<!-- ****************************************************************** -->
+	<!-- TkEtreeBasePresent	    		  									-->
+	<!-- ****************************************************************** -->
+	<!-- Ensure TkEtreeBase Jar exists 										-->
+	<!-- ****************************************************************** -->
+	<target name="TkEtreeBasePresent" depends="Init" unless="jar_tketreebase.present">
+		<description>	
+			Create the TkEtreeBase.jar file if it does not exist.
+		</description>
+		<antcall target="BuildTkEtreeBase" />
+	</target>
+
+	
+	<!-- ****************************************************************** -->
+	<!-- TkEtreeObjsPresent	    		  									-->
+	<!-- ****************************************************************** -->
+	<!-- Ensure TkEtreeObjs Jar exists 										-->
+	<!-- ****************************************************************** -->
+	<target name="TkEtreeObjsPresent" depends="Init" unless="jar_tketreeobjs.present">
+		<description>	
+			Create the TkEtreeObjs.jar file if it does not exist.
+		</description>
+		<antcall target="BuildTkEtreeObjs" />
+	</target>
+
+	
+	<!-- ****************************************************************** -->
+	<!-- TkEtreeDbPresent    		  										-->
+	<!-- ****************************************************************** -->
+	<!-- Ensure TkEtreeDb Jar exists  										-->
+	<!-- ****************************************************************** -->
+	<target name="TkEtreeDbPresent" depends="Init" unless="jar_tketreedb.present">
+		<description>	
+			Create the TkEtreeDb.jar file if it does not exist.
+		</description>
+		<antcall target="BuildTkEtreeDb" />
+	</target>
+
+	
+</project>

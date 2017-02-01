@@ -1,0 +1,26 @@
+#!/usr/bin/ksh
+HOST=$1
+if [[ "$HOST" = "" ]]; then
+	echo "You must specify a hostname"
+	exit 1
+fi
+
+IP=`host $HOST | awk '{print $3}'`
+if [[ "$IP" = "" ]]; then
+	echo "Could not get ip address for $HOST"
+	exit 2
+else
+	echo "IP is $IP"
+	IP_SED=`echo $IP | sed -e "s/\./\\\\./g"`
+	echo "IP_SED is $IP_SED"
+fi
+
+SSH_KEY=`ssh-keyscan -t rsa $HOST`
+if [[ "$SSH_KEY" = "" ]]; then
+	echo "$HOST did not return an ssh key"
+	exit 3
+fi
+
+echo "adding to known_hosts:"
+echo $SSH_KEY | sed -e "s/ /\,$IP_SED /"
+echo $SSH_KEY | sed -e "s/ /\,$IP_SED /" >> ~/.ssh/known_hosts

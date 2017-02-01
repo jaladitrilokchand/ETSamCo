@@ -1,0 +1,52 @@
+#!/usr/bin/perl -w
+
+$ENV{LS_COLORS} = "";
+
+sub build_lsf_job ($$$$)
+{
+  my( $src, $tgt, $component, $logdir ) = @_;
+  `rm -f $logdir/$component.lsf.out`;
+  `rm -f $logdir/$component.lsf.err`;
+
+  my $cmd = "#!/bin/tcsh\n";
+  $cmd .= "cd $logdir\n";
+  $cmd .= "#BSUB -P EDA\n";
+  $cmd .= "#BSUB -G eda_chipbe\n";
+  $cmd .= "#BSUB -W 8:00\n";
+  $cmd .= "#BSUB -J $component\n";                      # job name
+  $cmd .= "#BSUB -N\n";                                 # enable e-mail notifications
+  $cmd .= "#BSUB -u naveen_mc\@in.ibm.com\n";     # e-mail address to sent notifications
+  $cmd .= "#BSUB -q normal\n";
+  $cmd .= "#BSUB -o $logdir/$component.lsf.out\n";
+  $cmd .= "#BSUB -e $logdir/$component.lsf.err\n";
+  $cmd .= "#BSUB -M 4\n";
+  $cmd .= "#BSUB -n 1\n";
+  $cmd .= "#BSUB -rn\n";                                # do not rerun automatically if a job gets killed
+  $cmd .= "#BSUB -R \"select[osname==linux]\"\n";
+
+  `touch $logdir/$component.running`;
+  $cmd .= "/afs/eda/data/edainfra/tools/enablement/dev/bin/customtk.engine_patch.nave -src $src -tgt $tgt -c $component -y -nolock > $logdir/$component.log\n";
+  $cmd .= "rm -f $logdir/$component.running\n";
+  return $cmd;
+}
+
+# 14.1.11, for instance
+my $src = $ARGV[0];
+my $tgt = $ARGV[1];
+
+my $logdir  = "/afs/eda/data/edainfra/tk_patches/tk$tgt";
+mkdir($logdir) if (! -d $logdir);
+opendir (DIR, "/afs/eda/patchTk/tk$tgt") or die "cannot access target directory\n";
+while (defined($component = readdir(DIR)))
+{
+   if (-d "/afs/eda/patchTk/tk$tgt/$component" && $component !~ /^\./ && $component ne "nutshell" && $component ne "tools" && $component ne "3dxutils")
+    {
+      $cmd = build_lsf_job($src, $tgt, $component, $logdir);
+      print "\nLSF cmd ($component): $cmd";
+      open (CMD, "|bsub");
+      print CMD $cmd;
+      close CMD;
+   }
+}
+
+print "\nLog Dir: $logdir";

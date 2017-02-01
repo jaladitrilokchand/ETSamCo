@@ -1,0 +1,789 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: agts.master
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 04/10/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 04/10/2012 GS  Initial coding.
+# 05/01/2012 GS  Updated to fix some run time errors and display AGTS status.
+# 08/07/2012 GS  Updated to ignore etreetest* components. Change statusAgts
+#                command.
+# 02/03/2013 GS  Updated to process etreetest3.
+# 02/05/2013 GS  Updated to check a component's AGTS status and not process
+#                WIP or Pass components. Added -reverse switch to reverse
+#                sort the component list .. handy for a 2nd parallel AGTS run.
+#                Updated to allow multiple parallel runs of this script.
+# =============================================================================
+#
+# FUTURE WORK -----------------------------------------------------------------
+# - Compare revs in prod, shipb and ship and they should match
+#
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+# Required for Blue Pages
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+require BPRecord;
+require BPQuery;
+
+# Global variables
+# TODO - may want to change dev to prod ...
+my $BIN = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+my $DEV_BIN = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $DATA_DIR = "/afs/eda/data/edainfra/tools/enablement/dev/data";
+my $CHECKS_DIR = "/afs/eda/data/edainfra/checks";
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+my $MGR_INCLUDED = 1;
+my $MGR_IGNORE = 0;
+
+# Program variables
+my $appName = "agts.master";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $toolKit         = "";
+my $dbMode          = ""; # default is prod if empty
+my @components      = ();
+my $component       = "";
+my @healthChecks    = ();
+my $appErrorMessage = "";
+my $startDir = $ENV{"PWD"};
+my $healthCheckUrl  = "";
+my $dryRunMode      = 0;
+my $testEmail       = "";
+my $testMode        = 0;
+my $reverse         = 0;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+print "Running in TEST mode ...\n" if ($testMode);
+print "Running in DRY RUN mode ...\n" if ($dryRunMode);
+
+# Log application start event
+LogAppEvent("start");
+
+# Create list of components to process
+@components = SetComponents();
+if (scalar(@components) < 1) {
+  CleanExit("No components to process ... exiting\n", $ERROR);
+}
+
+# Create list of required health checks
+@healthChecks = SetHealthChecks();
+
+# Process each component
+foreach $component (@components) {
+
+  # Skip the etreetest4 component
+  next if ($component =~ /etreetest/);
+
+  print "\nProcessing ... $component\n";
+
+  # Get this component's AGTS status
+  my $status = GetStatus($toolKit, $component);
+  if ($status eq "Pass") {
+    print "  Skipping ... this component already passed AGTS!\n";
+    next;
+  }
+  if ($status eq "WIP") {
+    print "  Skipping ... this component's AGTS process is underway!\n";
+    next;
+  }
+
+  # Verify Health Checks for this component have passed
+  my $checksPassed = VerifyHealthChecks($component);
+
+  # Either process this component or notify owner/manager that Health Checks
+  # haven't passed
+  if ($checksPassed) {
+
+    # Call AGTS engine
+    my $agtsRc = ExecuteAGTS($component);
+
+    # Notify component owner if AGTS failed
+    AlertOwner($component, $MGR_IGNORE, 1) if ($agtsRc != 0);
+
+  }
+  else {
+
+    # Log component fail Health Check event
+    LogComponentEvent($component, "AGTS_FAIL", "Failed AGTS Health Checks");
+
+    # Notify Component Owner/manager
+    AlertOwner($component, $MGR_INCLUDED, 0);
+
+  }
+
+}
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script executes the AGTS process for all components in 
+the given EDA Tool Kit.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> [-dryrun] [-testemail address] [-test] [-reverse] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit   = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+  -dryrun    = (optional) Run script in dryrun mode
+  -reverse   = (optional) Reverse sort the component list (z .. a)
+  -test      = (optional) Run script in test mode (doesn't exec most functions)
+  -testemail = (optional) Send test emails to 'address'
+  -h           (optional) application help
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'     => \$toolKit,
+	      'db=s'       => \$dbMode,
+	      'dryrun'     => \$dryRunMode,
+	      'reverse'    => \$reverse,
+	      'testemail'  => \$testEmail,
+	      'test'       => \$testMode,
+	      'y'          => \$verbose,
+	      'help|h|?'   => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Can't run in dryrun and test modes at the same time
+  if ($testMode && $dryRunMode) {
+    print "ERROR: Test and dryrun modes are not valid at the same time.\n";
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) is a required parameter\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents()
+# Purpose: Create a list of components ready for AGTS
+# RCs    : List of component names or empty list
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  print " Querying for components in $toolKit ...\n" if ($verbose);
+
+  # Query the DB for tk/components in the DEVELOPMENT state
+  # Construct the command
+  my $command = "$BIN/getComponents";
+  $command .= " -t $toolKit";
+  #$command .= " -s DEVELOPMENT";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  print "  TESTING ... $command\n" if ($testMode);
+  my @results = `$command`;
+  my $rc = $? >> 8;
+
+  my $comps = $results[0];
+  chomp $comps;
+  print "Results: $comps\n" if ($verbose);
+
+  my @list = ();
+  if ($rc == 0) {
+    @list = split(/,/, $comps);
+  }
+
+  print "Found " . scalar(@list) . " components\n" if ($verbose);
+
+  return reverse(@list) if ($reverse);
+
+  return @list;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LogAppEvent($event)
+# Purpose: Log an application specific event
+# RCs    : 0 = ok
+#          1 = error or if start instance already running
+#------------------------------------------------------------------------------
+sub LogAppEvent {
+
+  my ($event) = @_;
+
+  print " Logging application event ($event) ...\n" if ($verbose);
+
+  # Log in the DB that this application is running or has completed
+  # Construct the command
+  my $command = "$DEV_BIN/appLog";
+  $command .= " -a $appName";
+  if ($event eq "start") {
+    $command .= " -start";
+  }
+  else {
+    $command .= " -end";
+  }
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my @results = `$command`;
+  my $rc = $? >> 8;
+
+  if ($rc > 0) {
+    print join("\n", @results);
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LogComponentEvent($event, $message)
+# Purpose: Log a tool kit/component specific event
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub LogComponentEvent {
+
+  my ($myComponent, $event, $message) = @_;
+
+  print " Logging TK/Component event ($event) ...\n" if ($verbose);
+
+  # Construct the command
+  my $command = "$BIN/svnLog";
+  $command .= " -c $myComponent";
+  $command .= " -e $event";
+  $command .= " -l prod";
+  $command .= " -m \"$message\"" if ($message);
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  RunCommand($command);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : VerifyHealthChecks()
+# Purpose: Verifies the health checks have passed for the given TK/component
+# RCs    : $OK    = Health Checks passed
+#          $ERROR = 1 = ok
+#                   0 = 1 or more Health Check failed
+#------------------------------------------------------------------------------
+sub VerifyHealthChecks {
+
+  my ($myComponent) = @_;
+
+  print " Verifying Health Checks ..." if ($verbose);
+
+  # For testing ...
+  if ($testMode) {
+    if ($myComponent eq "etreetest1") {
+      print "  TESTING - forcing Health Check to fail ...\n";
+      print " Failed\n" if ($verbose);
+      return 0;
+    }
+  }
+
+
+  # Verify each required health check has passed for this component
+  my $messages = "";
+  my $check;
+  my $rc = 1;
+  foreach $check (@healthChecks) {
+    my $checkDir = "$CHECKS_DIR/$check";
+    my $failFile = "$checkDir/$myComponent" . "_FAIL.html";
+    if (-f $failFile) {
+      $messages .= "Failed Health Check: $check (see $failFile)\n";
+      $rc = 0;
+    }
+
+  }
+
+  if ($verbose) {
+    if ($rc) {
+      print " Passed\n";
+    }
+    else {
+      print " Failed\n";
+    }
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : ExecuteAGTS()
+# Purpose: Run the AGTS engine for the specified tool kit ann component
+# RCs    : rc from AGTS
+#------------------------------------------------------------------------------
+sub ExecuteAGTS {
+
+  my ($myComponent) = @_;
+
+  print " Running AGTS engine ...\n" if ($verbose);
+
+  # For testing ...
+  if ($testMode) {
+    if ($myComponent eq "etreetest3") {
+      print "  TESTING - forcing agts.engine to fail ...\n";
+      return 8;
+    }
+  }
+
+  # Construct the command
+  my $command = "$DEV_BIN/agts.engine_lnx6";
+  $command .= " -t $toolKit";
+  $command .= " -c $myComponent";
+  $command .= " -y " if ($verbose);
+  $command .= " -dryrun " if ($dryRunMode);
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command
+  my $rc = RunSystem($command);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : AlertOwner($component, $notifyManager, $agtsFail)
+# Purpose: Notifies the component owner and/or their manager that AGTS failed
+#          or could not be executed for this component.
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub AlertOwner {
+
+  print " Alerting Component owner/mgr ...\n" if ($verbose);
+
+  my ($myComp, $notifyMgr, $agtsFail) = @_;
+
+  # Create the sender list
+  my @list = ();
+  my $owner = GetOwner($myComp);
+  push(@list, $owner);
+
+  my $manager = GetManager($owner);
+  if ($notifyMgr) {
+    push(@list, $owner);
+  }
+
+  #
+  # WARNING!!!
+  #
+  # All emails will be sent to Eric and Gregg for the time being.  They will
+  # review the emails and forward to owner/mgr if necessary
+  #
+  @list = ('stadtlag@us.ibm.com');
+  push(@list, 'ehull@us.ibm.com') if (! $testMode);
+
+
+  # Create the email body
+  my $body = "Hello,\n\n";
+  if ($agtsFail) {
+    $body .= GetAgtsFailBody($myComp);
+  }
+  else {
+    $body .= GetHealthCheckFailBody($myComp);
+  }
+  $body .= "\n";
+  $body .= "Please contact Gregg Stadtlander/Eric Hull if you have any \n";
+  $body .= "quesitons.\n";
+  $body .= "\n";
+  $body .= "Thank you,\n";
+  $body .= "EDA Software Release Team\n";
+  $body .= "\n";
+  $body .= "Owner/mgr: $owner, $manager\n";
+
+  # Send the email
+  my $address;
+  foreach $address (@list) {
+
+    if ($testEmail) {
+      $body .= "\n\nIf not TEST would be send to $address\n";
+      $address = $testEmail;
+    }
+    $address =~ s/\@/\\\@/;
+    print "Sending test emails ... $address\n" if ($testEmail);
+
+    my $subject = "\"Action Required: AGTS $toolKit Health Check error - $myComp\"";
+    $subject = "\"Action Required: AGTS $toolKit failure - $myComp\"" if ($agtsFail);
+
+    `/bin/mailx -s $subject $address << EOF
+$body
+`;
+  }
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetStatus($toolKit, $component)
+# Purpose: Refresh the AGTS web status report
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetStatus {
+
+  my ($tk, $comp) = @_;
+
+  print " Reading AGTS status ...\n" if ($verbose);
+
+  # Construct the command
+  my $command = "$DEV_BIN/statusAgts";
+  $command .= " -t $tk";
+  $command .= " -c $comp";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+
+  # Run the command and show results
+  print "Running $command\n" if ($verbose);
+  my @results = `$command`;
+  my @token = split(/ +/, $results[0]);
+  my $status = $tokens[2];
+
+  return $status;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetHealthChecks()
+# Purpose: Create a list of required health checks
+# RCs    : list of check names
+#------------------------------------------------------------------------------
+sub SetHealthChecks {
+
+  my $dataFile = "$DATA_DIR/HealthCheck_14.1_build.data";
+
+  print " Querying for required 14.1 Health Checks ...\n" if ($verbose);
+
+  # Read the file.
+  open(DATA, "<$dataFile") ||
+    die "ERROR: unable to open Health Check file($dataFile)\n";
+  my @contents = <DATA>;
+  close DATA;
+
+  # Read the Health Checks
+  my @checkList = ();
+  foreach $entry (@contents) {
+
+    if ($entry =~ /^OUTPUT/) {
+      @tokens = split(/;/, $entry);
+      $healthCheckUrl = $tokens[1];
+    }
+    next if ($entry !~ /^CHECK/);
+
+    @tokens = split(/;/, $entry);
+    my $checkName = $tokens[1];
+
+    # Skip the buildRevs health check for now since for 14.1.1 there may
+    # be some false errors
+    next if ($checkName eq "buildRevs");
+
+    push(@checkList, $checkName);
+
+  }
+
+  return @checkList;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RunCommand($command)
+# Purpose: Executes the command and returns the command's return code
+# RCs    : return code
+#------------------------------------------------------------------------------
+sub RunCommand {
+
+  my ($command) = @_;
+
+  my $rc = $OK;
+  if ($testMode) {
+    print "  TESTING ... $command\n";
+  }
+  else {
+    print "  Command: $command\n";
+    `$command`;
+    $rc = $? >> 8;
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RunSystem($command)
+# Purpose: Executes the command and returns the command's return code
+# RCs    : return code
+#------------------------------------------------------------------------------
+sub RunSystem {
+
+  my ($command) = @_;
+
+  my $rc = $OK;
+  if ($testMode) {
+    print "  TESTING ... $command\n";
+  }
+  else {
+    print "  Command: $command\n";
+    system($command);
+    $rc = $? >> 8;
+  }
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetOwner()
+# Purpose: Look up the Component owner from the database
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetOwner {
+
+  my ($myComponent) = @_;
+
+  # Construct the command
+  my $command = "$BIN/showComponent";
+  $command .= " -r 14.1";
+  $command .= " -c $myComponent";
+  $command .= " -db $dbMode" if ($dbMode);
+  $command .= " | grep \"OWNER\"";
+  print "  TESTING ... $command\n" if ($testMode);
+
+  # Run the command
+  my @results = `$command`;
+  my ($junk, $owner) = split(/\:/, $results[0]);
+
+  # Remove leading and trailing spaces
+  $owner =~ s/(^\s+|\s+$)//g;
+
+  return $owner;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetManager()
+# Purpose: Determine the owner's manager
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetManager {
+
+  my ($owner) = @_;
+
+  return "" if ($owner eq "");
+
+  # Query BluePages for owners email address
+  my $query = new BPQuery('byInternetAddr', $owner);
+  my ($recordKey) = ($query->recordKeys());
+
+  # Get serial number and country code for owners manager
+  my $mgrnum = $query->record($recordKey)->valueOf('MGRNUM');
+  my $mgrcc  = $query->record($recordKey)->valueOf('MGRCC');
+
+  # Query Bluepages for managers serial number and country code (CNUM)
+  $query = new BPQuery('byCnum', "$mgrnum$mgrcc");
+  ($recordKey) = ($query->recordKeys());
+
+  # Get managers email address
+  return $query->record($recordKey)->valueOf('INTERNET');
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetHealthCheckBody()
+# Purpose: Get the email text for the Health Check fail email
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetHealthCheckFailBody {
+  my $body = "";
+
+  $body .= "Our records indicate you are the owner/manager of an EDA Tool Kit\n";
+  $body .= "component that does not not pass required Tool Kit Health Checks.\n";
+  $body .= "The EDA Software Release team is unable to include this component\n";
+  $body .= "in the pending preview Tool Kit until these Health Checks\n";
+  $body .= "failures are fixed.\n";
+  $body .= "\n";
+  $body .= "To view specific errors visit the EDA TK health report page at\n";
+  $body .= "$healthCheckUrl\n";
+  $body .= "and click on the \"fail\" link for this component. Information\n";
+  $body .= "on the specific check is available by clicking the check's \n";
+  $body .= "column heading. That web page also contains suggestions on how\n";
+  $body .= "to resolve and prevent these errors.\n";
+
+  return $body;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetAgtsFailBody()
+# Purpose: Get the email text for the AGTS fail email
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetAgtsFailBody {
+
+  my ($myComp) = @_;
+  my $body = "";
+
+  $body .= "Our records indicate you are the owner/manager of an EDA Tool \n";
+  $body .= "Kit component that failed the All Groups to Ship (AGTS)\n";
+  $body .= "process.\n";
+  $body .= "\n";
+  $body .= "Errors can be found in this log file and must be resolved ASAP.\n";
+  $body .= GetLog($myComp) . "\n";
+
+  return $body;
+
+}
+
+#------------------------------------------------------------------------------
+# Name   : GetLog($component)
+# Purpose: Get the email text for the AGTS fail email
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetLog {
+
+  my ($myComp) = @_;
+
+  my $glob = "$LOGS_DIR/$toolKit/agts/agts.engine_" . $myComp . "_*.log";
+  my (@files) = glob $glob;
+
+  my $file = "";
+  my $newestFile = "";
+  my $newestAge = 365;
+  foreach $file (@files) {
+    my $age = -M $file;
+    $newestFile = $file if ($age < $newestAge);
+  }
+
+  return $newestFile;
+
+}

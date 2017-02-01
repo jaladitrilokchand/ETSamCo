@@ -1,0 +1,893 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: ship2tk.engine
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Eric Hull
+#    DATE: 06/25/2012
+#
+#  INPUTS: See "printHelp" methods below
+#
+# OUTPUTS: n/a
+#
+# RETURN CODES: See "printSyntax" method below.
+#
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 06/25/2012 EH  Initial coding.
+# 06/25/2012 EH  Added second updateTkComp call to set stage to xtinct.
+# 06/25/2012 EH  Changed getToolKits stage parameter to production.
+# 09/24/2012 EH  Updated for 14.1.2 ship to tk processing
+# 09/24/2012 EH  Updated options for invocation of fixPerms
+#            EH  TODO: Need to incorporate logic from ~ehull/bin/removeDotDeeFiles.
+# 12/17/2012 EH  Updated for 14.1.3 ship to tk processing 
+# 03/12/2013 EH  Added RemoveDotDeeFiles().
+# 03/13/2013 EH  Added CompInPrevProdTk() to avoid error that occurrs if 
+#                a component is not in a previous TK version and an attempt is
+#                made to change stage name to xtinct/14.1.xxx.
+# 06/25/2013 GS  Updated to support 14.1.5.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Std;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+# Global variables
+# TODO - may want to change dev to prod ...
+my $BIN_DIR      = "/afs/eda/data/edainfra/tools/enablement/dev/bin";
+my $SVN          = "/afs/eda/tools/bin/svn";
+my $svnReposUrl  = "https://greenjiffy.fishkill.ibm.com/eda/tk";
+my $excludeDir   = "/afs/eda/data/edainfra/rsync_excludes";
+my $authorizedId = "svnlib";  # temporarily disabled below for testing
+my $xtinctStageName = "customtk/tk14.1.9";
+
+# Program variables
+my $appName = "ship2tk.engine";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $noCmdExec       = 0;
+my $dryRun          = 0;
+my $toolKit         = "";
+my $component       = "";
+my $dbMode          = ""; # default is prod if empty (GS)
+my $dbType          = "";
+my $branch          = "";
+my $release         = "";
+my $selfStoreRls    = "";
+my $devFlg          = "";
+my $dbgFlg          = "";
+my $logFile         = ""; 
+my $previousToolKit = "";
+my $excludeFile     = "";
+my $revision        = "";
+my $cmdLineArgs     = "";
+my $dryRunMsg       = "";
+my $isDelivered     = 1;
+my $isCompInPrevProdTk = 1;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc  = $ERROR;
+my $startDir = $ENV{"PWD"};
+my $progRC = "";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleDIE(); };
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+# Enable logging
+$rc = setupLogging();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to complete $appName initalization", $ERROR);
+}
+
+# TODO: Run the following two commands once before processing components (PUT IN ship2tk.master):
+#
+# updateToolKit -t 14.1.4 -s production  # Dec 17 updated version
+# updateToolKit -t 14.1.3 -s xtinct      # Dec 17 updated version
+#
+# Display toolKit version for a stage name first to verify that it has not already been updated:
+# getToolKits -r 14.1 -s production -q
+# 14.1.3
+#
+# getToolKits -r 14.1 -s xtinct -q  <-- fails with "Unable to find row for query"
+#
+# But... new stage names "xtinct/tk14.1.2" and "xtinct/tk14.1.3" work
+# getToolKits -r 14.1 -s xtinct/tk14.1.2 -q
+# 14.1.2X
+
+
+# Remove dependency files (*.d files) from tkb
+$rc = RemoveDotDeeFiles($component);
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to remove all dependency files (*.d files) from tkb", $ERROR);
+}
+
+# Determine if this component is in the Tool Kit version that is being advanced
+# to xtinct (March 2013) or customTk (in the future).
+$isCompInPrevProdTk = CompInPrevProdTk();
+
+# Update stage name for 14.1.n-1 instance of this component from Production to 
+# new "xtinct stage name" if the component exists in the 14.1.n-1 Tool Kit version.
+if ($isCompInPrevProdTk) {
+  $rc = SetStageName($previousToolKit, $xtinctStageName); # 20130314 update
+  if ($rc > 0) {
+    CleanExit("ERROR: Unable to set Tool Kit stage to $xtinctStageName",
+	      $ERROR);
+  }
+}
+
+# Update stage name for 14.1.n instance of this component from Preview to Production
+$rc = SetStageName($toolKit, "production");
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to set Tool Kit stage to production", $ERROR);
+}
+
+# Determine if this component is required in ship.
+$isDelivered = SetDelivered();
+
+# Advance tkb to tk
+#   The subroutine called here also runs setup_xmit_dirs for creating .ship* directories.
+$rc = AdvanceTkb2Tk();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to advance $component", $ERROR);
+}
+
+# Execute BOM check against previous TK
+$rc = BomChecker();
+if ($rc > 0) {
+  CleanExit("ERROR: Differences were found between ship and tk instances of $component", $ERROR);
+}
+
+# Sync ACLs from SHIP to TK
+$rc = FixPerms();
+if ($rc > 0) {
+  CleanExit("ERROR: Unable to sync ship permissions to tk", $ERROR);
+}
+
+chomp(my $logDate = `date +%C%y-%m-%d\\ %H:%M:%S`);
+CleanExit("\n$logDate $appName complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  CleanExit("\n[$appName] Caught an unexpected die - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+  print "$message\n";
+  print "Return code: $rc\n";
+  close (STDOUT);
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script executes the ship to tk process for an individual component. It is 
+run to transition a component from the Preview stage to the Production stage.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tool_kit> <-c component> [-dryrun] [-db dbmode] [-h] [-k] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tool_kit  = Tool Kit version (ie, 14.1.1, 14.1.2 ...)
+  component = name of component (e.g., einstimer)
+  -dryrun     (optional) Dry run (disables commands that write to CM DB)
+  dbmode    = database mode (e.g., prod or dev) default: prod
+  -h          (optional) application help
+  -k          (optional) Suppress execution of significant commands for debugging
+  -y          (optional) Verbose (print the invocation of each command)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  my $rc = $OK;
+  my $command = "";
+  
+  # Capture command line arguments for logging (before GetOptions deletes them)
+  $cmdLineArgs = join(' ', @ARGV);
+
+  # Parse command line arguments
+  GetOptions ('tk|t=s'      => \$toolKit,
+              'component|c=s' => \$component,
+              'dryrun'      => \$dryRun,
+              'db=s'        => \$dbMode,         
+              'k'           => \$noCmdExec,
+              'y'           => \$verbose,
+              'help|h|?'    => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) must be specified\n";
+    return $ERROR;
+  }
+  if (! $component) {
+    print "ERROR: component (-c) must be specified\n";
+    return $ERROR;
+  }
+
+  # Validate specified Tool Kit.
+  $command = "$BIN_DIR/getToolKits";
+  $command .= " -r 14.1";
+  $command .= " -s PRODUCTION";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+  
+  # Run the command
+  chomp(my $validToolkit = `$command`);
+  $rc = $? >> 8;
+
+  if ($rc > 0) {
+    print "ERROR: Unable to validate specified Tool Kit $toolKit\n";
+    return $ERROR;  
+  }
+  
+  if ($toolKit ne $validToolkit) {
+    print "ERROR: Tool Kit $toolKit is not permitted for this process\n";
+    return $ERROR;
+  }
+  
+  # Validate specified component.
+  # Since getComponents outputs a csv list of valid components, translate the
+  # commas to new line characters and grep for the component name.
+  $command = "$BIN_DIR/getComponents";
+  $command .= " -t $toolKit";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+  $command .= " |tr \",\" \"\\n\"";
+  $command .= " |grep \"^$component\$\"";
+  
+  # Run the command
+  `$command`;
+  $rc = $? >> 8;
+
+  if ($rc != 0) {
+    print "ERROR: Component $component does not exist in Tool Kit $toolKit\n";
+    return $ERROR;   
+  }
+  
+  # Define Tool Kit release in 14.x format
+  $release = TkCommon::convert_tkVersion ($toolKit, "release");
+  
+  # Define Tool Kit release in 140x format (used by selfstore)
+  $selfStoreRls = TkCommon::convert_tkVersion ($toolKit, "selfstore");
+
+  # Define the next toolKit version to be worked on in the Development stage
+  # when AGTS processing is completed.
+  $previousToolKit = $release;
+  $previousToolKit .= ".";
+  $previousToolKit .= (split /\./, $toolKit)[-1] - 1;
+ 
+  $dryRunMsg = "[disabled by dryrun option]" if ($dryRun);
+  
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : UpdateSymlink()
+# Purpose: Update symlinks to tk repository
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub UpdateSymlink {
+
+  my ($tgtToolKit, $tgtLevel, $action) = @_;
+  my $rc = 0;
+  
+  print "Updating symlink from $tgtLevel/$component/14.1 to tk$tgtToolKit/$component/14.1\n";
+
+  # update_lc_complink -t 14.1.1 -c etreetest3 -s shipb -O create -g
+  # update_lc_complink -t 14.1.1 -c etreetest3 -s shipb -O delete -g
+  my $command = "$BIN_DIR/update_lc_complink";
+  $command .= " -t $tgtToolKit";
+  $command .= " -c $component";
+  $command .= " -s $tgtLevel";
+  $command .= " -O $action";
+  # -d will cause symlinks to only be written to sandbox!
+  # We should just let it default to PRODDB since we are already validating each
+  # component.
+
+  print "Running $command\n" if ($verbose);
+  
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+    
+    if ($rc > 0) {
+      print "ERROR: Unable to update symlink from parms $tgtToolKit $tgtLevel $action\n";
+      print @results;
+      return $ERROR;
+    }    
+  }
+
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetLatestRevision()
+# Purpose: Retrieve latest revision for component in prod
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub GetLatestRevision {
+
+  my $rc = 0;
+
+  # Construct the command
+  my $command = "$BIN_DIR/getRevisionsTk";
+  $command .= " -c $component";
+  $command .= " -l prod";
+  $command .= " -latest"; 
+  $command .= " -db $dbMode" if ($dbMode); # FORCE TO PROD FOR TESTING. Uncomment later.
+  
+  print "Running $command\n" if ($verbose);
+  
+  chomp(my $revision = `$command`);
+  $rc = $? >> 8;
+  
+  return ($rc, $revision);
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : AdvanceTkb2Tk()
+# Purpose: Advance from shipb to ship
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub AdvanceTkb2Tk {
+
+  my $rc = 0;
+  my @results = (); # TEMPORARY
+
+  print "Advancing $component from tkb to tk\n";
+
+  # If this component is not delivered then don't advance it
+  if (! $isDelivered) {
+    print " * This component should NOT be advanced to tk\n";
+    return $rc;
+  }
+
+  # Construct the command
+  my $command = "$BIN_DIR/svnAdvance";
+  $command .= " -r $component.$selfStoreRls";
+  $command .= " -s tkb";
+  $command .= " -d tk";
+
+  # For dryrun, disable the use of svnLog in svnAdvance to log events in CM DB
+  #$command .= " -z" if ($dryRun);
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to advance $component from tkb to tk.\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+
+  # Create .ship-xxxxx directories for transmittal window
+  SetupXmitDirs();
+
+  return $rc;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : BomChecker()
+# Purpose: Compare Bill of Materials between ship and tk levels
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub BomChecker {
+
+  my $rc = 0;
+  my @results = (); # TEMPORARY
+
+  print "Executing BOM comparison between $component in ship and tk\n";
+
+  # If this component is not delivered it wasn't advanced to ship and we
+  # don't need to run this bom check
+  if (! $isDelivered) {
+    print " * This component was NOT be advanced to ship and doesn't ";
+    print "   require BOM checking.\n";
+    return $rc;
+  }
+
+  my $command = "$BIN_DIR/bomChecker";
+  #my $command = "/afs/eda/u/ehull/edainfra/tools/enablement/dev/bin/bomChecker"; # for testing
+  $command .= " -c $component";
+
+  print "Running $command\n" if ($verbose);
+  
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      #print "ERROR: Differences were found\n";
+      print "Differences were found\n";
+      print @results;
+      #return $ERROR;
+      return $OK;
+    }
+  }  
+
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : FixPerms()
+# Purpose: Sync ship permissions to tk 
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub FixPerms {
+
+  my $rc = 0;
+  my @results = (); # TEMPORARY
+
+  print "Executing sync of permissions between $component in ship and tk\n";
+
+  # If this component is not delivered it wasn't advanced to ship and we
+  # don't need to run this bom check
+  if (! $isDelivered) {
+    print " * This component will NOT be advanced to ship and doesn't ";
+    print "   require syncing of permissions.\n";
+    return $rc;
+  }
+
+  my $command = "$BIN_DIR/fixPerms";
+  $command .= " -reflevel ship";
+  $command .= " -tgtlevel tk";
+  $command .= " -c $component";
+  $command .= " -r $release";
+  $command .= " 2>&1";  
+
+  print "Running $command\n" if ($verbose);
+  
+  # Skip command execution if the -k option was specified
+  unless ($noCmdExec) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+
+    if ($rc > 0) {
+      #print "ERROR: Differences were found\n";
+      print "There was a problem with syncing of ship permissions to tk\n";
+      print @results;
+      #return $ERROR;
+      return $OK;
+    }
+  }  
+
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : setupLogging()
+# Purpose: Enable logging
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub setupLogging {
+
+  my $logDir = "/afs/eda/data/edainfra/logs/$toolKit/ship2tk";
+
+  # Create $logDir if it does not already exist
+  mkpath($logDir) if (! -d $logDir);
+
+  # Open log file for script messages
+  chomp(my $logDate = `date +%C%y%m%d\_%H%M%S`);
+  $logFile = "$logDir/" . $appName . "_" . $component . "_" . $logDate . ".log";
+
+  # Open a filehandle for a log file only
+  #open(LOGFILE, ">$logFile") || die "open $logFile failed";
+
+  # Open a filehandle for both stdout and a log file
+  # tee: 0652-044 Cannot open /afs/eda/u/ehull/logs/test/agts.engine_etreetest3_20120428_211919.log.
+  open (STDOUT, "| tee -a $logFile") || die "ERROR: unable to open log file $logFile\n";
+  
+  my $afsId = (getpwuid($<)) [0];  
+  #if ($afsId ne "$authorizedId") {
+  #  print "\nERROR: Only the $authorizedId AFS ID is permitted to run this script\n";
+  #  return $ERROR;
+  #}
+  
+  chomp(my $dateTime = `date +%C%y-%m-%d\\ %H:%M:%S`);
+  chomp(my $machine = `hostname`);
+  print "\n$dateTime $afsId on $machine invoked $appName $cmdLineArgs\n\n";
+  
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LogComponentEvent($event, $message)
+# Purpose: Log a tool kit/component specific event for prod
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub LogComponentEvent {
+
+  my ($event, $message) = @_;
+  my @results = (); # TEMPORARY
+
+  # Construct the command
+  my $command = "$BIN_DIR/svnLog";
+  $command .= " -c $component";
+  $command .= " -e $event"; 
+  $command .= " -ft $toolKit";
+  $command .= " -l prod";
+  $command .= " -m \"$message\"" if ($message);
+  $command .= " -db $dbMode" if ($dbMode);
+
+  print "Running $command\n" if ($verbose);
+ 
+  unless ($noCmdExec || $dryRun) {
+    # Run the command
+    my @results = `$command`;
+    my $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to log component event $event\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+  
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : LogComponentEventShipb($event, $message)
+# Purpose: Log a tool kit/component specific event for shipb
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub LogComponentEventShipb {
+
+  my ($event, $message) = @_;
+  my @results = (); # TEMPORARY
+
+  # Construct the command
+  my $command = "$BIN_DIR/svnLog";
+  $command .= " -c $component";
+  $command .= " -e $event"; 
+  $command .= " -ft $toolKit";
+  $command .= " -l shipb";
+  $command .= " -m \"$message\"" if ($message);
+  $command .= " -db $dbMode" if ($dbMode);
+
+  print "Running $command\n" if ($verbose);
+ 
+  unless ($noCmdExec || $dryRun) {
+    # Run the command
+    my @results = `$command`;
+    my $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to log component event $event\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+  
+  return $OK;
+  
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetStageName()
+# Purpose: Update TK component stage
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub SetStageName {
+
+  my ($tkVersion, $stageName) = @_;
+  my $rc = 0;
+  my @results = (); # TEMPORARY
+  
+  print "Updating TK $tkVersion $component stage to \"$stageName\" in CM DB $dryRunMsg\n";
+ 
+  # Construct the command
+  my $command = "$BIN_DIR/updateTkComp";
+  $command .= " -t $tkVersion";
+  $command .= " -s $stageName";
+  $command .= " -c $component";
+  $command .= " -db $dbMode" if ($dbMode); # FORCE TO PROD FOR TESTING. Uncomment later.
+  
+  print "Running $command\n" if ($verbose);  
+ 
+  # Run the command
+  unless ($noCmdExec || $dryRun) {
+    my @results = `$command`;
+    $rc = $? >> 8;
+    if ($rc > 0) {
+      print "ERROR: Unable to update TK $tkVersion $component stage to \"$stageName\" in CM DB\n";
+      print @results;
+      return $ERROR;
+    }
+  }
+     
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : GetOS()
+# Purpose: Determine current operating system
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub GetOS {
+
+  my $osName = "";
+  my $osStr = `uname -a`;
+
+  if ($osStr =~ /^AIX/) {
+    $osName = "aix";
+  } elsif ($osStr =~ /Linux/) {
+    $osName = "linux";
+  } else {
+    $osName = "undef";
+  }
+  return ($osName);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetupXmitDirs()
+# Purpose: Create .ship-xxxxx dirs for transmittal window
+# RCs    : 0 = OK
+#          8 = 
+#------------------------------------------------------------------------------
+sub SetupXmitDirs {
+
+  # Construct the command that creates the .ship* directories in tk
+  my $command = "$BIN_DIR/setup_xmit_dirs";
+  $command .= " -t $toolKit";
+  $command .= " -c $component";
+  $command .= " -x tk";
+  $command .= " 2>&1";
+
+  print "Running $command\n" if ($verbose);
+
+  # Skip command execution if the -k option was specified
+  # Capture results, but only print if rc is bad.
+  unless ($noCmdExec) {  
+
+    my @results = `$command`;
+    my $rc = $? >> 8;
+
+    if ($rc > 0) {
+      print "ERROR: Unable to create .ship-xxxxx dirs\n";
+      print @results;
+      return $ERROR;
+    }
+  }  
+  
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetDelivered()
+# Purpose: Determine if this component should be advanced to ship
+# RCs    : 1 = delivered
+#          0 = not delivered
+#------------------------------------------------------------------------------
+sub SetDelivered {
+
+  # Construct a list of delivered components
+  my $command = "$BIN_DIR/getComponents";
+  $command .= " -t $toolKit";
+  $command .= " -ct DELIVERED,TEST_SUPPORT";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+  print "Running $command\n" if ($verbose);
+
+  my @results = `$command`;
+  my @delComps = split(/,/, $results[0]);
+
+  my $rc = 0;
+  $rc = 1 if (grep(/^$component$/, @delComps));
+
+  print "Is delivered: $rc\n" if ($verbose);
+
+  return $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : RemoveDotDeeFiles($component)
+# Purpose: Remove dependency files (*.d files) from tkb
+# RCs    : n/a
+#------------------------------------------------------------------------------
+sub RemoveDotDeeFiles {
+
+  my ($component) = @_;
+  my $rc    = $OK;
+  my $maxRc = $OK;
+  my @archDotDeeFiles = ();
+  my $dotDeeFile = "";
+
+  print "Removing dependency files (*.d files) from tkb\n";
+
+  my $tgtPath="/afs/eda/tkb/$component/14.1/";
+  
+  # Find the .d files for this component in tkb
+  chomp(my @allDotDeeFiles = `find $tgtPath -name "*.d" 2>&1`);
+  $rc = $? >> 8;
+  if ( $rc == 0 ) {
+  
+    # Only interested in files that have "Arch-" in their path
+    @archDotDeeFiles = grep(/Arch-/, @allDotDeeFiles);
+  }
+  else {
+    print("ERROR: Unable to complete search for dependency files (*.d files) in all directories\n" );
+    print join("\n", @allDotDeeFiles), "\n";
+    return $ERROR;
+  }
+
+  # Remove each .d file.
+  #
+  # Process the entire list even if the unlink command fails for some files.
+  # Any fails will update $maxRc which will report an error at the end.
+  # This approach will help to identify fails in multiple directories up front 
+  # without having to fix each directory in turn and rerun.
+  foreach $dotDeeFile (@archDotDeeFiles) {
+    unlink($dotDeeFile) unless($noCmdExec);
+
+    # Checking each file to see if it actually got deleted.
+    # Checking $! after using unlink does not appear to be a reliable indicator.
+    if (-e $dotDeeFile) {
+      print "ERROR: Unable to remove $dotDeeFile\n";
+      $maxRc = $ERROR;
+    }
+  }
+  return $ERROR if ($maxRc);
+  return $OK;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CompInPrevProdTk()
+# Purpose: Determine if this component is in the Tool Kit version that is being 
+#          advanced to xtinct (March 2013) or customTk (in the future).
+# RCs    : 1 = in TK version being advanced to xtinct/customTk
+#          0 = not in TK version being advanced to xtinct/customTk
+#------------------------------------------------------------------------------
+sub CompInPrevProdTk {
+
+  # Construct a list of components in TK version being advanced to xtinct/customTk
+  my $command = "$BIN_DIR/getComponents";
+  $command .= " -t $previousToolKit";
+  $command .= " -q";
+  $command .= " -db $dbMode" if ($dbMode);
+  print "Running $command\n" if ($verbose);
+
+  my @results = `$command`;
+  my @previousToolKitComps = split(/,/, $results[0]);
+
+  my $rc = 0;
+  $rc = 1 if (grep(/^$component$/, @previousToolKitComps));
+
+  print "$component is in TK version being advanced to $xtinctStageName: $rc\n" if ($verbose);
+
+  return $rc;
+
+}

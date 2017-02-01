@@ -1,0 +1,1407 @@
+#!/usr/bin/env perl
+use warnings;
+#use strict;
+#=============================================================================
+#    FILE: runAGTS
+#
+# CREATOR: Art Magnan
+#    DEPT: AZYX
+#    DATE: 06/22/2011
+#
+# OUTPUTS: SVN Component Branches for Entire Toolkit version
+#
+#-PURPOSE---------------------------------------------------------------------
+# Perform the functions associated with the EDA AGTS milestone for the 14.1
+# definition of a Toolkit versioned component/release tree.
+#            (/afs/eda/tk14.1.{n}/{component}/14.1)
+#
+#-NOTES---------------------------------------------------------------------
+# (1) This script will create SVN branches for either an entire Toolkit, containing
+#     all components defined for a particular version OR a single component/release.
+#     (a) If only the -t switch is specified, then an entire Toolkit version
+#         creation is attempted.
+#     (b) If the -t and -c switches are specified, then only a single component/release
+#         creation is attempted.
+# (2) The Toolkit version must be defined in the CM DB.
+# (3) This script must be run by AFS ID svnlib.
+# (4) The component(s) must be defined, and associated with this Toolkit version in the
+#     CM DB.
+#     (a) This script needs to support the "delivered" component definition.
+#     (b) This script needs to support the "build_support" component definition.
+# (5) Creates an advance entry in the .update file for use by CNYA application.
+# (6) The initialized TK version tree must already exist for all defined components.
+# (7) All CR records with commits against them (meaning associated revisions) must be closed
+#      prior to AGTS milestone.
+# (8) The processing sequence can be executed as Stop on Fail with -s switch.
+# (9) The processing sequence currently consists of eleven steps.
+#
+# PROCESSING SEQUENCE
+#
+# STEP 01  Determine if component is in CM DB (Abort, if not).
+# STEP 02  Create a change record for the SVN branch creation.
+#          Retrieve latest revision for component from EDA PROD.
+#          Create toolkit version branch in SVN.
+#          Change the state of the change record to COMPLETE.
+# STEP 03  Copy deliverable content from EDA PROD to EDA TK Version tree.
+# STEP 04  Retrieve source code from SVN toolkit version branch.
+# STEP 05  Validate file status codes from SVN checkout.
+# STEP 06  Adjust file timestamps in TK version tree from reference location
+#          EDA PROD.
+# STEP 07  Create EDA SHIPB to EDA TK version tree component link.
+# STEP 08  Log the event to signify that EDA SHIPB is set up for this component.
+# STEP 09  Change stage name association (TK version) for this component only.
+# STEP 10  Update the .update file for CNYA use.
+# STEP 11  Register the creation of TK version branch, needed by Change Mgmt.
+#
+# STEP 12  [FUTURE] Associate components that have been processed in AGTS with
+#          the next TK version in B-D-P (development version) in CM DB.
+#
+# After all defined components have been processed through AGTS milestone successfully:
+#
+# Full_TK  [FUTURE] Associate the "Preview" stagename with this TK version.
+# Full_TK  [FUTURE] Register next TK version in CM DB for SVN trunk.
+# Full_TK  [FUTURE] Change stage name association for next TK version (B-D-P) to
+#                   "development".
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 06/22/2011 AM  Initial version; based on TSG prototype
+# 07/26/2011 AM  Added code to allow single step processing through the AGTS
+#                processing flow. Improved return code processing.
+# 07/29/2011 AM  Added checks for AFS ID svnlib, log and time capability.
+#                Implemented scheme to have SVN use file commit times instead
+#                of current times during the svn checkout operation.
+# 08/01/2011 AM  Changed method to use the config file for "use-commit_times".
+#                Now do via command line option on svn checkout vs perl subroutine.
+# 08/02/2011 AM  Update code to support temporary workaround of TK version
+#                component definition. Two def files are read:
+#                  tk14.1.0.component.build_support.def
+#                  tk14.1.0.component.delivered.def
+# 08/05/2011 AM  Incorporated TSG timestamp adjustment code to replace the SVN commit
+#                time solution. Tailor for OS-specific syntax and put in its own
+#                execution step.
+#                Created check to identify non-"E" status code files resulting from
+#                the SVN checkout operation. Put in its own execution step.
+# 08/07/2011 AM  Updated to use the external component definition files. Handled by
+#                subroutines added to TkCommon Perl module.
+#                Implemented the AGTS flow as a subroutine called in either single
+#                component or full TK mode.
+# 08/18/2011 AM  Updated code to read check_tkVersion and convert_tkVersion from
+#                TkCommon.pm.
+# 08/19/2011 AM  Updated sub check_userID to accept authID and debug as input.
+#                The -c switch is now mandatory; added "full_TK" keyword to trigger
+#                all components to be processed.
+# 08/23/2011 AM  Updated to register the creation of TK version branch, needed by
+#                Change Mgmt.
+# 08/24/2011 AM  Updated to check that a component branch had been created when
+#                rerunning this script. If so, do not run the AGTS flow again.
+#                Create a switch to display the steps and their numbers so can use
+#                the start and end step capability.
+# 09/09/2011 AM  Added date to checkout log files, added creation of top path of
+#                this script log file (logTop) if does not exist.
+#                Updated step 11 to use branchUpdate instead of branchAdd.
+# 09/26/2011 AM  Added data filters to PROD copy step since data areas have not been
+#                cleaned up yet. The filters are defined in an external file.
+# 10/27/2011 AM  Updated error trapping in get_svn_branch_source subroutine.
+# 12/01/2011 AM  Removed capability to run full Toolkit in this script; use wrapper
+#                script, doTK_AGTS, instead.
+#                Changed path for svn checkout logs to ~svnlib/logs/{month} dir.
+#                Changed component checking to simply see if {component}/14.1
+#                directory exists in EDA PROD.
+#                Temporarily changed stepMax to 10 for testing; needs to be put
+#                back to 11 when running real AGTS milestone.
+# 12/13/2011 EH  Replaced SVN checkout with scheckout script (Tom G.).
+#                Added component specific rsync excludes (Tom G.).
+#                Added additional filtering of checkout.filelist content to avoid
+#                false fails in Step 5.
+# 12/14/2011 AM  Updated to handle revision string returned as "null".
+# 12/16/2011 AM  Updated sub log_event_for_shipb_advance to change svnLog location
+#                parm from SHIPB to PROD.
+# 12/20/2011 AM  Updated to make "stop on fail" the default mode.
+#                Updated to allow step 11 to be executed as part of the milestone.
+#                Ensured that a successful component is updated to stageName of
+#                PREVIEW in Step 9 for a given TK version (14.1.{n}) being processed
+#                in this AGTS milestone.. Also, need to add stageName of DEVELOPMENT
+#                for the TK version 14.1.{n+1}.
+#                Updated the branch creation step to use change management.
+# 12/22/2011 EH  Fixed bug that truncated toolkit name and caused setp 11 to fail.
+#                In step 11a, added a check to determine if registration of branch
+#                is required.
+#                Created step 11b to add the next branch to the ETREE database.
+#                Fixed problems that were causing perl warning messages.
+#=============================================================================
+#=============================================================================
+#  FUTURE ENHANCEMENTS:
+#
+#  (1) Have getRevisions API return a non-zero RC when revision is NULL.
+#=============================================================================
+#            FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub help {
+        print "\nScript to release an EDA tool component at the All Groups To Ship (AGTS) milestone.\n";
+        print "   This will perform the steps needed to process the tool component content from\n";
+        print "   EDA PROD to the TK version tree. Once there, lifecycle symlinks manage the content\n";
+        print "   through the Preview, Production, and EOL for a particular TK version.\n";
+        print "\nUsage: runAGTS -t <Toolkit version> -c <component> [-d] [-g] [-h]\n";
+        print "\nInput parameters:\n";
+        print "  -t   <EDA Toolkit release version>    e.g. 14.1.{n}\n";
+        print "  -c   <component_name>  e.g. hdp\n";
+        print "  -d   Development Mode ON\n";
+        print "  -g   Debug mode ON - no execution of data updates - will see what would execute.\n";
+        print "  -h   This help\n";
+        print "\nNOTES:\n";
+        print "   1) The EDA Toolkit version is required, use the -t switch.\n";
+        print "   2) The EDA tool component name is required, use the -c switch.\n";
+        print "\nSPECIAL OPTIONS:\n";
+        print "  -i   Display the AGTS step definition\n";
+        print "  -b   <beginning step #>      for use in single step mode.\n";
+        print "  -e   <ending step #>         for use in single step mode.\n";
+        exit 1;
+} # end help
+
+sub trimStr {
+  my ($string) = @_;
+  $string =~ s/^\s+//;
+  $string =~ s/\s+$//;
+  return ($string);
+} # end trimStr
+
+sub define_steps {
+  #
+  # Define the AGTS steps (step numbers, step text)
+  #
+  %stepData = (
+               "01" => "Determine if component/14.1 directory exists in EDA PROD (Abort, if not).",
+               "02" => "Create CR for branch; Retrieve latest revision for component from EDA PROD; Create toolkit version branch in SVN; Complete CR.",
+               "03" => "Copy deliverable content from EDA PROD to EDA TK Version tree.",
+               "04" => "Retrieve source code from SVN toolkit version branch.",
+               "05" => "Validate file status codes from SVN checkout.",
+               "06" => "Adjust file timestamps in TK version tree from reference location, EDA PROD",
+               "07" => "Create EDA SHIPB to EDA TK version tree component link.",
+               "08" => "Log the event to signify that EDA SHIPB is set up for this component.",
+               "09" => "Change stage name association (TK version) for this component only.",
+               "10" => "Update the .update file for CNYA use.",
+               "11" => "Register the creation of TK version branch, needed by Change Mgmt.",
+              );
+
+} # end define_steps
+
+sub display_steps {
+  #
+  # Display the AGTS steps and their corresonding step numbers.
+  #
+  my $stepNum;
+
+  define_steps;
+
+  print "\nThese are the AGTS steps (Step #, function):\n\n";
+  foreach $stepNum (sort keys %stepData) {
+    print "Step $stepNum: $stepData{$stepNum}\n";
+  }
+  print "\n";
+  exit 1;
+} # end display_steps
+
+sub process_cmd_line {
+
+  # --------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+  # Parms defined:  -t <Toolkit version;  e.g. 14.1.0>
+  #                 -c <component_name; e.g. hdp>
+  #                 -d [Development mode ON - using code from DEV area]
+  #                 -g [Debug mode ON - no execution of data updates - will see what would execute.]
+  #                 -h [help]
+  #                 -i  Display the test step definition
+  #                 -b  <beginning step #>      for use in single step mode.
+  #                 -e  <ending step #>         for use in single step mode.
+  # --------------------------------------------------------------
+  $opt_c = "";
+  $opt_d = "";
+  $opt_h = 0;
+  $opt_i = 0;
+  $opt_t = "";
+
+  getopts('b:c:de:it:gh');
+
+  $compName  = "$opt_c";
+  $devMode   = "$opt_d";
+  $tkVersion = "$opt_t";
+
+  # Set steps
+  if ( ${opt_b} ) {
+    $strtStep  = "$opt_b";
+  }
+  if ( ${opt_e} ) {
+    $stopStep  = "$opt_e";
+  }
+
+  # Set DEBUG mode
+  if ( ${opt_g} ) {
+    $DEBUG = 1;
+    $dbgFlg = "-g";
+  }
+  else {
+    $DEBUG = 0;
+    $dbgFlg = "";
+  }
+
+  if ( ${opt_h} ) { help(); }
+  if ( ${opt_i} ) { display_steps(); }
+
+} # end process_cmd_line
+
+sub display_script_parms {
+  #
+  # Display the input parameters entered on the command line
+  #
+  my ($compName, $tkVersion, $strtStep, $stopStep) = @_;
+
+  print "------------------------------------------------------ \n";
+  print " Parms Read By Program:        \n";
+  print " $fullScrName \n";
+  print "------------------------------------------------------ \n";
+  print "Component name = \"$compName\" \n";
+  print "TK Version     = \"$tkVersion\"\n";
+  if ($opt_b) { print "Start Step     = \"$strtStep\" \n"; }
+  if ($opt_e) { print "Stop Step      = \"$stopStep\" \n"; }
+  if ($opt_d) { print "DEV Mode       = \"ON\" \n"; }
+  else { print "DEV Mode       = \"OFF\" \n"; }
+  if ($opt_g) { print "DEBUG Mode     = \"ON\" \n"; }
+  else { print "DEBUG Mode     = \"OFF\" \n"; }
+  print "------------------------------------------------------ \n\n";
+
+} # end display_script_parms
+
+sub check_userID {
+  #
+  # AFS ID svnlib must be used to execute this script
+  #
+  my ($userID, $debug, @authID) = @_;
+  my ($found) = 1;
+
+  foreach $id (@authID) {
+    if ($debug) {
+      print "userID: \"$userID\"  authID: \"$id\"\n";
+    }
+    if ( $userID eq $id ) {
+      $found = 0;
+      last;
+    }
+  }
+  return ($found);
+} # end check_userID
+
+sub create_timestamp {
+  #
+  # Get date and time info from system
+  #
+
+  @months = qw(jan feb mar apr may jun jul aug sep oct nov dec);
+
+  @tokens = localtime(time);
+  $min  = $tokens[1];
+  $hour = $tokens[2];
+  $mday = $tokens[3];
+  $mon  = $tokens[4];
+  $year = $tokens[5];
+
+  $year = $year + 1900;
+
+  $month = $mon + 1;
+  $monthName = $months[$mon];
+  $monthDay = $monthName . $mday;
+
+  $date_now = $month . "/" . $mday . "/" . $year;
+
+  if ($min < 10) {
+    $newmin = "0" . $min;
+  }
+  else {
+    $newmin = $min;
+  }
+  $time_now = $hour . ":" . $newmin;
+} # end create_timestamp
+
+sub get_OS {
+  #
+  # Determine if script is running on Linux or AIX
+  #
+  my $osName = "";
+  my $osStr = "";
+
+  $osStr = `uname -a`;
+
+  if ($osStr =~ /^AIX/) {
+    $osName = "aix";
+  } elsif ($osStr =~ /Linux/) {
+    $osName = "linux";
+  } else {
+    $osName = "undef";
+  }
+  return ($osName);
+} # end get_OS
+
+sub log_execution {
+  #
+  # Define the logging, execution timestamps
+  #
+  my ($when, $compType) = @_;
+  my $tkVer = "";
+
+  if ($when eq "start") {
+
+    # Convert tkVersion for use in log file name
+    $tkVer = TkCommon::convert_tkVersion ($tkVersion, "selfstore");
+
+    # Set up the log file
+    create_timestamp;
+    $datetime = "$date_now at $time_now";
+
+    $logFile = "$logTop/${monthDay}.${compType}.${tkVer}.${scriptName}.${logSuffix}";
+    unless (open(STDOUT, "| tee -ai $logFile")) {
+      die ("Output file $logFile cannot be opened.\n");
+    }
+
+    # Log the start time
+    print ("#\n");
+    print ("# $fullScrName started at $datetime by $userID\n");
+    print ("#\n");
+
+    # Display the command line input parms
+    display_script_parms ($compName, $tkVersion, $strtStep, $stopStep);
+
+    # List the steps to be processed
+    print "*=====================================================*\n";
+    print "**** Executing AGTS Processing steps  $strtStep through  $stopStep ****\n";
+    print "*=====================================================*\n\n";
+
+  } elsif ($when eq "end") {
+
+    create_timestamp;
+    $datetime = "$date_now at $time_now";
+
+    # Log the end time
+    print ("#\n");
+    print ("# $fullScrName ended at $datetime by $userID\n");
+    print ("#\n");
+
+  } else {
+    print "ERROR: log_execution: Can't figure out when I need to log!\n";
+  }
+} # end log_execution
+
+sub max_rc {
+  #
+  # return the rolling maximum return code
+  #
+  my ($rc, $maxrc) = @_;
+
+  if ($rc > $maxrc) {
+    $maxrc = $rc;
+  }
+  return ($maxrc);
+} # end max_rc
+
+sub process_rc {
+  #
+  # Handle return code processing from TK common
+  #
+  my ($opName, $errMsg, $doExit, $rc) = @_;
+
+  if ($rc == 0) {
+    print "Operation successful for \"$opName\". rc=$rc\n";
+  }
+  else {
+    print "[ERROR]: Return code $rc from \"$opName\".\n";
+    if ($errMsg ne "") {
+      print "$errMsg\n";
+    }
+    if ($doExit) {
+      exit $rc;
+    }
+  }
+} # end process_rc
+
+sub change_symlink {
+  #
+  # Forces creation of a symlink to $linkPath/$linkFrom to $linkPath/$linkTo
+  #
+  my ($curPath, $linkPath, $linkFrom, $linkTo) = @_;
+
+  # Check for existing symbolic link
+  if ((-e "$linkPath/$linkFrom") && (-l "$linkPath/$linkFrom")) {
+
+    $linkedFile = readlink "$linkPath/$linkFrom";
+
+    # Check for existing linkTo file
+    if (-e "$linkPath/$linkTo") {
+
+      print "Found $linkFrom file symbolic link and $linkTo file.\n";
+      print "On entry, the \"config\" symlink is pointing at file \"$linkedFile\".\n";
+
+      # Delete the old link
+      unlink ("$linkPath/$linkFrom");
+
+      print "Deleted $linkFrom file symbolic link.\n";
+
+      # Create the new link
+      chdir ($linkPath) or die "[ERROR]: Can't change directory to $linkPath.\n";
+      $rc = symlink ("$linkTo", "$linkFrom");
+      if ($rc == 1) {
+        print "Created new symlink to $linkPath/$linkTo.\n";
+        $linkedFile = readlink "$linkPath/$linkFrom";
+        print "The \"config\" symlink is pointing at file \"$linkedFile\".\n";
+      }
+      else {
+        print "Could not create new symlink to $linkPath/$linkTo.\n";
+      }
+      chdir ($curPath) or die "[ERROR]: Can't change directory to $curPath.\n";
+    }
+    else {
+      print "Could not find $linkTo file.\n";
+    }
+  }
+  else {
+    print "Could not find $linkFrom file.\n";
+  }
+} # end change_symlink
+
+sub validate_component_in_DB {
+  #
+  # Determine if component is in CM DB (Abort, if not)
+  #
+  my ($compName, $tkVersion, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my $validCmd = "";
+
+  my $opName = "Validate component for TK $tkVersion";
+  print "*** STEP $stepNum of $stepMax: $opName started...\n";
+
+  $validCmd = "$scriptPath/validateRelComp -r 14.1 -c $compName $dbType";
+
+  # Execute the command
+  TkCommon::runcmd("$validCmd", "$DEBUG");
+  $rc = $? >> 8;
+
+  $errMsg = "ERROR: Component \"$compName\", input via the -c switch, is not associated with TK version $tkVersion.";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n";
+  return ($rc);
+} # end validate_component_in_DB
+
+sub validate_component_in_list {
+  #
+  # Determine if component is in the component definition list (Abort, if not)
+  # TEMPORARY WORKAROUND
+  #
+  my ($compName, $tkVersion, $stepNum, $stepMax, %compList) = @_;
+  my $rc = 0;
+  my $errMsg = "";
+
+  my $opName = "Validate component for TK $tkVersion";
+  print "*** STEP $stepNum of $stepMax: $opName started...\n";
+
+  if (exists $compList{$compName}) {
+    print "Component name, $compName, exists in list.\n";
+  }
+  else {
+    $rc = 4;
+    $errMsg = "ERROR: Component \"$compName\", input via the -c switch, is not associated with TK version $tkVersion.";
+  }
+
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n";
+  return ($rc);
+} # end validate_component_in_list
+
+sub validate_component_in_PROD {
+  #
+  # Determine if component/14 directory defined in EDA PROD (Abort, if not)
+  #
+  my ($compName, $rlse, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my $errMsg = "";
+
+  my $opName = "Validate component for release $rlse in EDA PROD";
+  print "*** STEP $stepNum of $stepMax: $opName started...\n";
+
+  if (-d "/afs/eda/prod/$compName/$rlse") {
+    print "Component/release directory, $compName/$rlse, exists in EDA PROD.\n";
+  }
+  else {
+    $rc = 4;
+    $errMsg = "ERROR: Component \"$compName\", input via the -c switch, has no 14.1 directory in EDA PROD.";
+  }
+
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n";
+  return ($rc);
+} # end validate_component_in_PROD
+
+sub create_change_record {
+  #
+  # Create a Change Record for use in the SVN branch creation.
+  #
+  my ($compName, $tkVersion, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my @chgRecData = ();
+  my $chgRec = "";
+  my $sevLevel = 4;
+  my $chgRecCmd = "";
+  my $line;
+  my $newLine;
+
+  $tkVersion = "14.1.0";  # <<< FOR NOW, HARDCODE. REMOVE AFTER AGTS TK VERSION 14.1.0 COMPLETED!!!!
+
+  my $opName = "Create a change record for the SVN branch creation";
+  print "\n*** STEP $stepNum of $stepMax: $opName started for $compName...\n";
+
+  $chgRecCmd = "$scriptPath/cr.create -t $tkVersion -c $compName -d \"Creating branch for TK version $tkVersion.\" -feature -sev $sevLevel $dbType";
+
+  if ($DEBUG) {
+    print "\n[DEBUG MODE ON]: Command, \"$chgRecCmd\", will not be executed.\n";
+  }
+  else {
+    # Execute the command
+    @chgRecData = `$chgRecCmd`;
+    $rc = $? >> 8;
+    $errMsg = "";
+    process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+    # Parse the chgRecData to get the CR number
+    foreach $line (@chgRecData) {
+      print "Line: $line\n";
+      chomp ($line);
+      $newLine = trimStr ($line);
+      if ($newLine =~ /^Change Request: /) {
+        # Get the CR number
+        $chgRec = substr ($newLine, 16, 13);
+      }
+    }
+
+    if ($chgRec eq "") {
+      $rc = 4;
+    }
+  }
+  print "  *******\n\n" ;
+  return ($rc, $chgRec);
+
+} # end create_change_record
+
+sub change_record_complete {
+  #
+  # Complete the Change Record used in the SVN branch creation.
+  #
+  my ($compName, $chgRec, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my $chgRecCmd = "";
+  my $chgMsg = "";
+
+  my $opName = "Complete the change record used for the SVN branch creation";
+  print "\n*** STEP $stepNum of $stepMax: $opName started for $compName...\n";
+
+  $chgRecCmd = "$scriptPath/cr.complete -cr $chgRec -y $dbType";
+
+  if ($DEBUG) {
+    print "\n[DEBUG MODE ON]: Command, \"$chgRecCmd\", will not be executed.\n";
+  }
+  else {
+    # Execute the command
+    $chgMsg = `$chgRecCmd`;
+    $rc = $? >> 8;
+
+    if ($chgMsg ne "") {
+      print "CR complete message from CM DB: $chgMsg\n";
+    }
+
+    $errMsg = "";
+    process_rc ($opName, $errMsg, $stopOnFail, $rc);
+  }
+  print "  *******\n\n" ;
+  return ($rc);
+
+} # end change_record_complete
+
+sub get_latest_revision {
+  #
+  # Retrieve latest revision for component from EDA PROD
+  #
+  my ($compName, $tkVersion, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my $revision = "null";
+  my $getRevCmd = "";
+
+  my $opName = "Component revision retrieval from EDA PROD";
+  print "\n*** STEP $stepNum of $stepMax: $opName started for $compName...\n";
+
+  $getRevCmd = "$scriptPath/getRevisions -t $tkVersion -c $compName -l prod -latest $dbType";
+
+  # Execute the command
+  $revision = `$getRevCmd`;
+  $rc = $? >> 8;
+  $errMsg = "Unable to get revision for $compName in TK version $tkVersion.";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  if ($revision eq "null") {
+    $rc = 4;
+  }
+  else {
+    chomp ($revision);
+    print "Revision: $revision\n";
+  }
+
+  print "  *******\n\n" ;
+  return ($rc, $revision);
+
+} # end get_latest_revision
+
+sub register_svnBranch {
+  #
+  # Register the new tkVersion SVN branch created in the CM DB.
+  #
+  my ($compName, $tkVersion, $branchName, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my $regBrCmd = "";
+
+  my $opName = "Register the new tkVersion SVN branch created in the CM DB.";
+  print "\n*** STEP $stepNum of $stepMax: $opName started for $compName...\n";
+
+  $regBrCmd = "$scriptPath/branchUpdate -t $tkVersion -c $compName -b trunk -n $branchName";
+
+  # Execute the command
+  TkCommon::runcmd ("$regBrCmd", "$DEBUG");
+  $rc = $? >> 8;
+
+  $errMsg = "Unable to register new SVN branch \"$branchName\" for \"$compName\" in TK \"$tkVersion\".";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n" ;
+  return ($rc);
+
+} # end register_svnBranch
+
+sub add_svnBranch {
+  #
+  # Add the next branch to the ETREE database
+  #
+  my ($compName, $next_tkVersion, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my $addBrCmd = "";
+
+  my $opName = "Add the new tkVersion SVN branch";
+  print "\n*** STEP $stepNum of $stepMax: $opName started for $compName...\n";
+
+  $addBrCmd = "$scriptPath/branchAdd -t $next_tkVersion -c $compName -b trunk";
+
+  # Execute the command
+  TkCommon::runcmd ("$addBrCmd", "$DEBUG");
+  $rc = $? >> 8;
+
+  $errMsg = "Unable to add $next_tkVersion as next branch for \"$compName\".";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n" ;
+  return ($rc);
+
+} # end add_svnBranch
+
+sub check_svnBranch {
+  #
+  # Check the new tkVersion SVN branch created in the CM DB.
+  #
+  my ($compName, $tkVersion, $branchName) = @_;
+  my $rc = 0;
+  my $chkBrCmd = "";
+
+  my $opName = "Check the new tkVersion SVN branch created in the CM DB.";
+
+  $chkBrCmd = "$scriptPath/branchCheck -c $compName -b \"$branchName\" $dbType";
+
+  # Execute the command
+  TkCommon::runcmd ("$chkBrCmd", "$DEBUG");
+  $rc = $? >> 8;
+
+  $errMsg = "Unable to check new SVN branch \"$branchName\" for \"$compName\" in TK \"$tkVersion\".";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n" ;
+  return ($rc);
+
+} # end check_svnBranch
+
+sub check_branchCheckResult {
+  #
+  # Check branchCheck output
+  # Gregg says: if a 1 is displayed on stdout then you don't need to run the branchUpdate command.
+  #
+  my ($compName, $branchName, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my $chkBrCmd = "";
+  my $branchCheckResult = "";
+
+  my $opName = "Check branchCheck output";
+  print "\n*** STEP $stepNum of $stepMax: $opName started for $compName...\n";
+
+  $chkBrCmd = "$scriptPath/branchCheck -c $compName -b $branchName";
+
+  # Execute the command
+  $branchCheckResult = `$chkBrCmd`;
+  $rc = $? >> 8;
+  $errMsg = "Unable to check branch $branchName for $compName";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n" ;
+  return ($rc, $branchCheckResult);
+
+} # end check_branchCheckResult
+
+sub create_svn_TKbranch {
+  #
+  # Create toolkit version branch in SVN
+  #
+  my ($compName, $tkVersion, $REPOS, $tkPrefix, $revision, $chgRec, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my $branchCmd = "";
+
+  my $opName = "SVN Toolkit branch creation";
+  print "\n*** STEP $stepNum of $stepMax: \"$opName\" started on $compName...\n";
+
+  $branchCmd = "$SVN copy \"$REPOS/$compName/trunk\@$revision\" \"$REPOS/$compName/branches/${tkPrefix}${tkVersion}\" -m \"$chgRec: creating release branch $tkPrefix$tkVersion\" 2>&1";
+
+  # Execute the command
+  TkCommon::runcmd("$branchCmd", "$DEBUG");
+  $rc = $? >> 8;
+
+  $errMsg = "";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n" ;
+  return ($rc);
+
+} # end create_svn_TKbranch
+
+sub copy_prod_to_tkversion_tree {
+  #
+  # Copy deliverable content from EDA PROD to EDA TK Version tree
+  #
+  my ($compName, $tkVersion, $prodTop, $dataPath, $release, $excludeFile, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my $copyCmd = "";
+
+  # Exclude based on the filter file
+  my $excludeDef="--exclude-from $excludeDir/$compName";
+
+  my $opName = "EDA PROD to TK version tree copy";
+  print "*** STEP $stepNum of $stepMax: \"$opName\" started on $compName...\n";
+
+  $copyCmd = "/usr/bin/rsync -rlptvz --delete-excluded $excludeDef $prodTop/$compName/$release/ $dataPath/$compName/$release";
+
+  # Execute the command
+  TkCommon::runcmd("$copyCmd", "$DEBUG");
+  $rc = $? >> 8;
+
+  $errMsg = "";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n" ;
+  return ($rc);
+
+} # end copy_prod_to_tkversion_tree
+
+sub get_svn_branch_source {
+  #
+  # Retrieve source code from SVN toolkit version branch.
+  #
+  my ($compName, $tkVersion, $REPOS, $tkPrefix, $dataPath, $release, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my $coCmd = "";
+
+  $opName = "Checkout from SVN to SVN WC";
+  print "*** STEP $stepNum of $stepMax: \"$opName\" started for $compName...\n";
+
+  $coCmd = "/afs/eda/data/edainfra/tools/enablement/prod/bin/scheckout $compName $REPOS/$compName/branches/$tkPrefix$tkVersion $dataPath/$compName/$release 2>&1 >$compSrcFile";
+
+  # Execute the command
+  TkCommon::runcmd ("$coCmd", "$DEBUG");
+  $rc = $? >> 8;
+
+  $errMsg = "";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n" ;
+  return ($rc);
+
+} # end get_svn_branch_source
+
+sub validate_svn_file_checkout {
+  #
+  # Validate the files checked out from SVN
+  # All files checked out from SVN should have status code "E"
+  #
+  my ($coSrcFile, $resultsFile, $compName, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my ($fileCnt, $goodCnt, $badCnt) = (0, 0, 0);
+  my ($fileName);
+
+  $opName = "Validate the SVN file checkout operation";
+  print "*** STEP $stepNum of $stepMax: \"$opName\" started for $compName...\n";
+
+  if (! $DEBUG) {
+    open (SVNSRC, "<$coSrcFile") or die "cannot open $coSrcFile for READ...exiting\n";
+    my (@coSrcList) = <SVNSRC>;
+    close (SVNSRC);
+
+    open (RESULTS, ">$resultsFile") or die "cannot open $resultsFile for WRITE...exiting\n";
+    print RESULTS "RESULTS OF SVN CHECKOUT FILE CHECK\n\n";
+
+    my $totalFiles = @coSrcList;     # total number of SVN src lines read
+    print "Read in $totalFiles files from $coSrcFile to be analyzed.\n";
+
+    # Test to make sure we got something!
+    print "Total SVN Src files read: $totalFiles\n";     # <= DEBUG
+
+    # Look for status codes that are not "E" in col 1
+    foreach $fileName (@coSrcList) {
+      chomp ($fileName);
+      #if ($fileName =~ /^E/) {
+      if (substr($fileName,0,1) eq "E") {
+        $goodCnt++;
+      } elsif ($fileName =~ /^Checked/) {
+      } elsif ($fileName =~ /^Updated/) {
+      } elsif (substr($fileName,0,2) eq " U") {
+        # Exclude filter
+      }
+      else {
+        $badCnt++;
+        print RESULTS "Line $fileCnt) $fileName\n";
+      }
+      $fileCnt++;
+    }
+
+    # File check results
+    if ($badCnt > 0) {
+      $rc = 4;
+    }
+    else {
+      print RESULTS "All files were checked and meet criteria for success.\n";
+    }
+    close (RESULTS);
+  }
+  else {
+    print "In DEBUG mode...will not execute code to check the SVN files that were checked out.\n";
+  }
+
+  $errMsg = "Found $badCnt out of $fileCnt files that did not have the expected SVN status code \"E\".";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n" ;
+  return ($rc);
+
+} # end validate_svn_file_checkout
+
+sub adjust_tkVersion_tree_timestamps {
+  #
+  # Adjust the timestamps in the TK version tree to match those in EDA PROD
+  #
+  my ($fromTree, $toTree, $osType, $compName, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+  my $subName = "adjust_tkVersion_tree_timestamps";
+  my $tdsCmd;
+
+  $opName = "Adjust the file timestamps in $toTree to match EDA PROD";
+  print "*** STEP $stepNum of $stepMax: \"$opName\" started for $compName...\n";
+
+  # Ensure the reference and target trees exist
+  chdir("$toTree") or die "$!";
+  chdir("$fromTree") or die "$!";
+
+  # Call OS-specific command syntax
+  if ($osType eq "linux") {
+    # Linux version
+    $tdsCmd = "find . -type f | xargs -i sh -c \"touch -r {} --no-create $toTree/{}\"";
+
+  } elsif ($osType eq "aix") {
+    # AIX version - old syntax
+    #$tdsCmd = "find . -type f | xargs -i sh -c \"touch -r {} -c $toTree/{}\"";
+
+    # AIX version - new syntax
+    $tdsCmd = "find . -type f | /afs/eda/data/edainfra/tools/admin/trunk/bin/gargs \"touch -r {} -c $toTree/{}\"";
+
+  } else {
+    $rc = 4;
+  }
+
+  if ($rc == 0) {
+    # Execute the command
+    TkCommon::runcmd("$tdsCmd", "$DEBUG");
+    $rc = $? >> 8;
+
+    $errMsg = "";
+    process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+    print "  ******* rc=$rc\n\n" ;
+  }
+  else {
+    print "ERROR: Unable to determine OS in $subName\n";
+  }
+  return ($rc);
+
+} # end adjust_tkVersion_tree_timestamps
+
+sub create_shipb_links_to_tkversion_tree {
+  #
+  # Create EDA SHIPB to EDA TK version tree component link
+  #
+  my ($compName, $tkVersion, $opName, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+
+  $opName = "Link EDA SHIPB to TK $tkVersion component tree";
+  print "*** STEP $stepNum of $stepMax: \"$opName\" started for $compName...\n";
+
+  $linkCmd = "$scriptPath/update_lc_linktree -t $tkVersion -c $compName -s shipb -O create $devFlg $dbgFlg";
+
+  # Execute the command
+  TkCommon::runcmd("$linkCmd", "$DEBUG");
+  $rc = $? >> 8;
+
+  $errMsg = "";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n" ;
+  return ($rc);
+
+} # end create_shipb_links_to_tkversion_tree
+
+sub log_event_for_shipb_advance {
+  #
+  # Log the event to signify that EDA SHIPB is set up for this component
+  #
+  my ($compName, $tkVersion, $opName, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+
+  $opName = "CM DB event logging for EDA SHIPB setup";
+  print "*** STEP $stepNum of $stepMax: \"$opName\" started for $compName...\n";
+
+  $eventCmd = "${scriptPath}/svnLog -t $tkVersion -c $compName -l PROD -e \"ADVANCED_TO_SHIPB\" -m \"AGTS Milestone\" $dbType";
+
+  # Execute the command
+  TkCommon::runcmd("$eventCmd", "$DEBUG");
+  $rc = $? >> 8;
+
+  $errMsg = "";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n" ;
+  return ($rc);
+} # end log_event_for_shipb_advance
+
+sub change_component_stagename {
+  #
+  # Change stage name for this component only in AGTS TK version
+  #
+  my ($compName, $tkVersion, $opName, $stageName, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+
+  $opName = "CM DB component stagename association";
+  print "*** STEP $stepNum of $stepMax: \"$opName\" started for $compName...\n";
+  $compStgCmd = "${scriptPath}/updateTkComp -t $tkVersion -s $stageName -c $compName $dbType";
+
+  # Execute the command
+  TkCommon::runcmd("$compStgCmd", "$DEBUG");
+  $rc = $? >> 8;
+
+  $errMsg = "";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n" ;
+  return ($rc);
+
+} # end change_component_stagename
+
+sub update_advance_file {
+  #
+  # Update the .update file for CNYA use
+  #
+  my ($compName, $tkVersion, $opName, $stepNum, $stepMax) = @_;
+  my $rc = 0;
+
+  $opName = "Log the advance operation in .update file for CNYA use";
+  print "*** STEP $stepNum of $stepMax: \"$opName\" started for $compName...\n";
+
+  $timedate = `(date +"%D %H:%M")`;
+  chomp ($timedate);
+  $treetop = "$dataPath/$compName/14.1";
+  if (-e "$treetop") {
+    chdir ($treetop) or die "[ERROR]: Can't change directory to $treetop.\n";
+  }
+
+  $updateFile = ".update";
+  open (UPDATE, ">$updateFile") or die "cannot open $updateFile for WRITE...exiting\n";
+  print UPDATE "$compName.1401 $timedate advance\n";
+  close (UPDATE);
+
+  $errMsg = "";
+  process_rc ($opName, $errMsg, $stopOnFail, $rc);
+
+  print "  *******\n\n" ;
+  return ($rc);
+
+} # end update_advance_file
+
+sub runFlow {
+  #
+  # These are the steps that comprise the full EDA AGTS flow.
+  # Any or all steps can be run by selecting the starting and/or ending
+  # step on the command line.
+  #
+  my ($tkVersion, $compName, $release, $prodTop, $dataPath) = @_;
+  my $rc = 0;
+  my $maxRC = 0;
+  my $chgRec = "";
+  my $revision = "";
+  my $opName;
+  my $thisSubStep;
+  my $stageName;
+
+  my $refTree = "$prodTop/$compName/$release";
+  my $tgtTree = "$dataPath/$compName/$release";
+
+  #--- STEP 01 ---
+  $thisStep = 1;
+  if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+    #
+    # Determine if component is in CM DB (Abort, if not)
+    #
+    $rc = validate_component_in_PROD ($compName, $release, $thisStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+  }  # end of Step 1
+
+  #--- STEP 02 ---
+  $thisStep = 2;
+  if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+    #
+    # Create a Change Record for use in the SVN branch creation.
+    #
+    $opName = "Step 2a";
+    $thisSubStep = "2a";
+    ($rc, $chgRec) = create_change_record ($compName, $tkVersion, $thisSubStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+
+    $errMsg = "Unable to get a change record value for $compName in TK version $tkVersion.";
+    process_rc ($opName, $errMsg, $stopOnFail, $maxRC);
+
+    #
+    # Retrieve latest revision for component in EDA PROD from CM DB.
+    #
+    $opName = "Step 2b";
+    $thisSubStep = "2b";
+    ($rc, $revision) = get_latest_revision ($compName, $tkVersion, $thisSubStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+
+    $errMsg = "Unable to get a latest revision value for $compName in TK version $tkVersion.";
+    process_rc ($opName, $errMsg, $stopOnFail, $maxRC);
+
+    #
+    # Create toolkit version branch in SVN, if get a revision number and a change record.
+    #
+    $opName = "Step 2c";
+    $thisSubStep = "2c";
+    $rc = create_svn_TKbranch ($compName, $tkVersion, $REPOS, $tkPrefix, $revision, $chgRec, $thisSubStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+
+    #
+    # Complete the change record when SVN branch is created.
+    #
+    $opName = "Step 2d";
+    $thisSubStep = "2d";
+    $rc = change_record_complete ($compName, $chgRec, $thisSubStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+
+    $errMsg = "Unable to complete the change record $chgRec for $compName in TK version $tkVersion.";
+    process_rc ($opName, $errMsg, $stopOnFail, $maxRC);
+
+  }  # end of Step 2
+
+  #--- STEP 03 ---
+  $thisStep = 3;
+  if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+    #
+    # Copy deliverable content from EDA PROD to EDA TK Version tree
+    #
+    $rc = copy_prod_to_tkversion_tree ($compName, $tkVersion, $prodTop, $dataPath, $release, $excludeFile, $thisStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+  }  # end of Step 3
+
+  #--- STEP 04 ---
+  $thisStep = 4;
+  if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+    #
+    # Retrieve source code from SVN toolkit version branch.
+    #
+    $rc = get_svn_branch_source ($compName, $tkVersion, $REPOS, $tkPrefix, $dataPath, $release, $thisStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+  }  # end of Step 4
+
+  #--- STEP 05 ---
+  $thisStep = 5;
+  if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+    #
+    # Check the SVN checkout filelist for valid status codes
+    #
+    $rc = validate_svn_file_checkout ($compSrcFile, $resultsFile, $compName, $thisStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+  }  # end of Step 5
+
+  #--- STEP 06 ---
+  $thisStep = 6;
+  if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+    #
+    # Adjust the timestamps in the TK version tree to match those in EDA PROD
+    #
+    $rc = adjust_tkVersion_tree_timestamps ($refTree, $tgtTree, $osType, $compName, $thisStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+  }  # end of Step 6
+
+  #--- STEP 07 ---
+  $thisStep = 7;
+  if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+    #
+    # Create EDA SHIPB to EDA TK version tree component link
+    #
+    $rc = create_shipb_links_to_tkversion_tree ($compName, $tkVersion, $opName, $thisStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+  }  # end of Step 7
+
+  #--- STEP 08 ---
+  $thisStep = 8;
+  if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+    #
+    # Log the event to signify that EDA SHIPB is set up for this component
+    #
+    $rc = log_event_for_shipb_advance ($compName, $tkVersion, $opName, $thisStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+  }  # end of Step 8
+
+  #--- STEP 09 ---
+  $thisStep = 9;
+  if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+    #
+    # Change stage name to PREVIEW for AGTS TK version for this component, only if PASSED.
+    #
+    $thisSubStep = "9a";
+    $stageName = "PREVIEW";
+
+    $rc = change_component_stagename ($compName, $tkVersion, $opName, $stageName, $thisSubStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+
+    #
+    # Change stage name to DEVELOPMENT for next AGTS TK version for this component, only if PASSED.
+    #
+    $thisSubStep = "9b";
+    $stageName = "DEVELOPMENT";
+
+    $rc = change_component_stagename ($compName, $next_tkVersion, $opName, $stageName, $thisSubStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+
+  }  # end of Step 09
+
+  #--- STEP 10 ---
+  $thisStep = 10;
+  if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+    #
+    # Update the .update file for CNYA use
+    #
+    $rc = update_advance_file ($compName, $tkVersion, $opName, $thisStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+  }  # end of Step 10
+
+  #--- STEP 11 ---
+  $thisStep = 11;
+  if (($thisStep >= $strtStep) && ($thisStep <= $stopStep)) {
+    # Step 11a
+    # Register the creation of TK version branch, needed by Change Mgmt.
+    #
+    $thisSubStep = "11a";
+
+    ($rc, $branchCheckResult) = check_branchCheckResult ($compName, $branchName, $thisSubStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+
+    if ($branchCheckResult != 1) {
+      $rc = register_svnBranch ($compName, $tkVersion, $branchName, $thisSubStep, $stepMax);
+      $maxRC = max_rc ($rc, $maxRC);
+    }
+    else {
+      print "Registration of branch was skipped.\n";
+    }
+
+    # Step 11b
+    # Add the next branch to the ETREE database
+    #
+    $thisSubStep = "11b";
+    $rc = add_svnBranch ($compName, $next_tkVersion, $thisSubStep, $stepMax);
+    $maxRC = max_rc ($rc, $maxRC);
+
+  }  # end of Step 11
+
+  return ($maxRC);
+
+} # end runFlow
+
+#============================================================================================
+#         MAIN ROUTINE
+#============================================================================================
+use Env;
+use Getopt::Std;
+use File::Path qw(mkpath) ;
+use Cwd;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+our $rc = 0;
+our $maxRC = 0;
+our %compList = ();
+
+our $osType = "";
+our $stopOnFail = 1;
+
+our $scriptName = "runAGTS";
+our $fullScrName = $0;
+
+our $codePath = "/afs/eda/data";      # Top path of script location.
+#our $codePath = "/afs/eda/u/ehull";      # Top path of script location.
+
+our $excludeFile = "/afs/eda/u/svnlib/toolkit/data/rsyncFilter";
+our $excludeDir  = "/afs/eda/data/edainfra/rsync_excludes";
+
+our %stepData = ();
+our $stepMin = 1;           # Minimum step number that can be run in this script
+our $stepMax = 11;          # Maximum step number that can be run in this script
+
+our $strtStep = $stepMin;   # Default start step
+our $stopStep = $stepMax;   # Default stop step
+
+# Only AFS ID svnlib should run this script to update the TK version tree!!!
+our $userID = $LOGNAME;
+our $mainAuthID = "svnlib";
+my (@authID) = ($mainAuthID);
+$rc = check_userID ($userID, 0, @authID);
+if ($rc) {
+  print "\nERROR: You MUST run this script as AFS ID \"@authID\" to execute the AGTS milestone!!!\n\n";
+  exit 8;
+} else {
+  print "\nINFO: Running script using authorized AFS ID.\n\n";
+}
+
+# Get inputs from command line
+process_cmd_line;
+
+# Make sure the required parameters are provided
+if ($tkVersion eq "") {
+  print "\nERROR: Missing Toolkit version.\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+if ($compName eq "") {
+  print "\nERROR: Missing component name.\n";
+  print "       You must specify the EDA TK component name, using the -c switch.\n\n";
+  exit 8;
+}
+
+# Ensure tkVersion is in correct format
+$rc = TkCommon::check_tkVersion ($tkVersion);
+if ($rc != 0) {
+  print "\nERROR: Toolkit version specified in an invalid format!\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+} else {
+  # Define the EDA release
+  $release = TkCommon::convert_tkVersion ($tkVersion, "release");    # Release, e.g. 14.1
+  $relVer = TkCommon::convert_tkVersion ($tkVersion, "selfstore");   # Release, e.g. 1401
+
+  # Get next TK version after AGTS
+  $tkVer_suffix = (split /\./, $tkVersion)[-1];
+  $new_tkVer_suffix = $tkVer_suffix + 1;
+  $next_tkVersion = $release . "." . $new_tkVer_suffix;
+
+  #print "Next TK version: $next_tkVersion\n\n";
+}
+
+# Check start and stop step ranges
+if (($strtStep < $stepMin) || ($strtStep > $stepMax)) {
+  print "\nERROR: You must specify a starting step from $stepMin to $stepMax.\n\n";
+  exit 8;
+}
+if (($stopStep < $stepMin) || ($stopStep > $stepMax)) {
+  print "\nERROR: You must specify an stop step from $stepMin to $stepMax.\n\n";
+  exit 8;
+}
+if (($stopStep < $strtStep) || ($strtStep > $stopStep)) {
+  print "\nERROR: You must specify a start step less than or equal to a stop step.\n\n";
+  exit 8;
+}
+
+# Define location of Subversion code
+$SVN = "/afs/eda/tools/bin/svn";
+$REPOS = "https://greenjiffy.fishkill.ibm.com/eda/tk";     # Production SVN repository
+
+# Define top path of EDA PROD location (srcDir for rsync).
+$prodTop = "/afs/eda/prod";
+$dbType = "-db GPROD";                             # defaults to production CM DB
+
+# Set location of enablement code based on DEV or PRODUCTION (default) mode
+if ($devMode) {
+  $tkPrefix = "__";                                  # Prefix on the branch name of tkVersion for test.
+  $dataTop = "/afs/eda/u/svnlib";                    # Top part of TK version tree path
+  $dataPath = "${dataTop}/tk${tkVersion}";           # TK version tree path (tgtDir for symlinks).
+  $scriptPath = "${codePath}/edainfra/tools/enablement/dev/bin";
+  $logSuffix = "devlog";
+  $devFlg = "-d";
+}
+else {
+  $tkPrefix = "tk";                                  # Default: no prefix when running for real.
+  $dataTop = "/afs/eda";                             # Top part of TK version tree path
+  $dataPath = "${dataTop}/tk${tkVersion}";           # TK version tree path (tgtDir for symlinks).
+  $scriptPath = "${codePath}/edainfra/tools/enablement/prod/bin";
+  $logSuffix = "log";
+  $devFlg = "";                                      # defaults to production mode for execution
+}
+
+# Define the SVN branch name
+our $branchName = "${tkPrefix}${tkVersion}";
+
+# Determine the OS since some sytem commands are OS-specific
+$osType = get_OS;
+
+#
+# Process the single component flow
+#
+
+# Set up logging definitions
+create_timestamp;
+$logTop  = "/afs/eda/u/svnlib/logs/${monthName}";
+if (! -d $logTop) {
+  `mkdir -p $logTop`;
+}
+# SVN checkout log and checking result files
+$compSrcFile = "$logTop/${monthDay}.$compName.$relVer.checkout.filelist";
+$resultsFile = "$logTop/${monthDay}.$compName.$relVer.checkout.results";
+
+log_execution ("start", $compName);
+
+# Determine if this component has already been processed in this TK version.
+# If the TK branch is registered, then it has been run through the AGTS process.
+# Do not process this component again - if in stopOnFail mode.
+
+$rc = check_svnBranch ($compName, $tkVersion, $branchName);
+$maxRC = max_rc ($rc, $maxRC);
+
+# Execute the AGTS flow on this component.
+$rc = runFlow ($tkVersion, $compName, $release, $prodTop, $dataPath);
+$maxRC = max_rc ($rc, $maxRC);
+
+log_execution ("end", "");
+print "LOG file located at $logFile.\n\n";
+close (STDOUT);
+exit ($maxRC);

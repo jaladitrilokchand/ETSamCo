@@ -1,0 +1,296 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: xmit.updateDefs
+# CREATOR: Gregg Stadtlander
+#
+# PURPOSE ---------------------------------------------------------------------
+# See "printHelp" method.
+# -----------------------------------------------------------------------------
+#
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 02/13/2014 GS  Initial coding.
+# =============================================================================
+use warnings;
+use strict;
+use Getopt::Long;
+use File::Copy;
+Getopt::Long::Configure ("no_ignore_case");
+use FindBin qw($RealBin);
+
+
+use lib "$RealBin/../libperl";
+use TKutils;
+use IcofFile;
+
+
+# Global variables
+my $BIN_DIR = $RealBin;
+my $LOGS_DIR = "/afs/eda/data/edainfra/logs";
+
+# Program variables
+my $appName = "xmit.updateDefs";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $dbMode          = "";  # default is prod if empty
+my $dryRun          = 0;
+my $toolKit         = "";
+my $release         = "";
+my $component       = "";
+my $startDir;
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc     = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleInterruption(); };
+
+
+# Read the command line arguments
+$rc = processArgs();
+if ($rc == $ERROR) {
+  print "\n[$appName] Use -h to get more details.\n";
+  exit $ERROR;
+}
+
+
+# Create a list of components
+my @components = SetComponents($toolKit, $component);
+
+
+# Process each component
+foreach $component (@components) {
+
+  my $file = "/afs/eda/data/edainfra/xmit_windows/$release/$component";
+  my $goodFile = $file . ".good";
+
+  my @contents = ();
+  if (-f $goodFile) {
+    IcofFile::ReadFileToList($goodFile, \@contents, 0);
+    print "Reading -> $goodFile\n" if ($verbose);
+  }
+  else {
+    IcofFile::ReadFileToList($file, \@contents, 0);
+    copy($file, $goodFile);
+    print "Reading -> $file\n" if ($verbose);
+  }
+
+  my @newContents = AddLinks(@contents);
+
+  IcofFile::WriteListToFile($file, 0, @newContents);
+
+}
+
+
+CleanExit("\nApplication complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : cleanup($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+
+  # Log application end event
+  #LogAppEvent("end");
+
+  print "$message\n";
+  print "Return code: $rc\n";
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Script description here ...
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-t tk> [- ccomponent]
+                  [-dryrun] [-y] [-db dbMode] [-h]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  tk        = Tool Kit version which must exist (ie, 14.1.1 ...)
+  component = Process this component only
+  -dryrun   = Run script in dryrun mode
+  dbMode    = Database mode [default = PROD] (PROD, DEV, TEST)
+  -h        = Application usage help
+  -y        = Verbose mode
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('t=s'       => \$toolKit,
+              'c=s'       => \$component,
+	      'db=s'      => \$dbMode,
+	      'dryrun'    => \$dryRun,
+	      'y'         => \$verbose,
+	      'help|h|?'  => \$help)
+    || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required input
+  if (! $toolKit) {
+    print "ERROR: Tool Kit (-t) is a required parameter\n";
+    return $ERROR;
+  }
+  $release = TKutils::GetRelease($toolKit, ".");
+
+  print "Running in DRY RUN mode ...\n" if ($dryRun);
+
+  return $OK;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : SetComponents()
+# Purpose: Create a list of components ready for this Tool Kit
+# RCs    : List of component names or empty list
+#------------------------------------------------------------------------------
+sub SetComponents {
+
+  my ($tk, $comp) = @_;
+  print " Querying for components in $tk ...\n" if ($verbose);
+
+  # Query the DB for tk/components for the src tool kit
+  my @list = TKutils::GetComponents($tk, $comp, "");
+  print "Found " . scalar(@list) . " components\n" if ($verbose);
+
+  return @list;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name : Add64BitLInks(@contents) Purpose : Update the xmit window
+# file to include symlinks to bin, lib and dll dirs
+# RCs : n/a
+#------------------------------------------------------------------------------
+sub AddLinks {
+
+  my (@contents) = @_;
+
+  print " Updating bin, dll and lib entries ...\n" if ($verbose);
+
+  my @newContents = ();
+  my $foundBin = 0;
+  my $foundDll = 0;
+  my $foundLib = 0;
+  foreach my $line (sort(@contents)) {
+    next if ($line eq "");
+    print "LINE -> $line\n" if ($verbose);
+
+    my $newLine = $line;
+
+    if ($line =~ /\/bin-64/) {
+      $newLine = UpdateLine($line, "bin-64", "bin");
+      $foundBin = 1;
+    }
+    elsif ($line =~ /\/dll-64/) {
+      $newLine = UpdateLine($line, "dll-64", "dll");
+      $foundDll = 1;
+    }
+    elsif ($line =~ /\/lib-64/) {
+      $newLine = UpdateLine($line, "lib-64", "lib");
+      $foundLib = 1;
+    }
+
+    push(@newContents, $newLine);
+
+  }
+
+  push(@newContents, ".ship-64-amd64_linux26_RH6/bin-64 -> bin") if ($foundBin);
+  push(@newContents, ".ship-64-amd64_linux26_RH6/dll-64 -> dll") if ($foundDll);
+  push(@newContents, ".ship-64-amd64_linux26_RH6/lib-64 -> lib") if ($foundLib);
+
+  return @newContents;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name : UpdateLine($line, $old, $new
+# Purpose : Update the line replacing old with new
+# RCs : updated line
+#------------------------------------------------------------------------------
+sub UpdateLine {
+
+  my ($line, $old, $new) = @_;
+
+  print "Updating $old -> $new ===> $line\n" if ($verbose);
+  $line =~ s/$old/$new/g;
+  print " new line: $line\n" if ($verbose);
+
+  return $line;
+
+}

@@ -1,0 +1,1 @@
+Replaced -cq switch with -cr.  Replaced -active with -default.  Renamed cr.activate to cr.defaultSet and cr.deactivate to cr.defaultUnset.  Added cr.isValid and advStatus applications. Updated cr.commit to return 0 only if commit was successful.

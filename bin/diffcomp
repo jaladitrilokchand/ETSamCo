@@ -1,0 +1,14 @@
+#!/usr/bin/env ksh
+
+diff -r -q          \
+--exclude=".svn*"   \
+--exclude="private" \
+--exclude="include" \
+--exclude="html"    \
+--exclude="*Arch-*" \
+--exclude="dll*"    \
+--exclude=".dll*"   \
+--exclude="bin*"    \
+--exclude=".bin*"   \
+--exclude="lib*"     \
+--exclude=".lib*"   $1  $2  | sort

@@ -1,0 +1,385 @@
+#!/usr/bin/env perl
+#use warnings;
+#use strict;
+#=============================================================================
+#    FILE: doTK_cleanAGTS
+#
+# CREATOR: Art Magnan
+#    DEPT: AZYX
+#
+# RETURN CODES: 0 = OK
+#               8 = error
+#
+#-PURPOSE---------------------------------------------------------------------
+# For all defined components in a given Toolkit version: 
+#   1) Remove the SVN branch for that TK version.
+#   2) Remove the EDA SHIPB component/release symlink to TK Version Tree.
+#   3) Initialize the component tree, removing all data content, reestablishing 
+#      the default component treetop structures.
+#
+#-CHANGE LOG------------------------------------------------------------------
+# 11/16/2011 AM  Initial version
+# 11/17/2011 AM  Not using -a switch (hidden), instead using fixed component attributes.
+#                AGTS operation uses component attributes of DELIVERED,
+#                BUILD_SUPPORT, and TEST_SUPPORT.
+#=============================================================================
+#=============================================================================
+#			       FUNCTIONS and SUBROUTINES
+#=============================================================================
+sub help {
+        print "Script to clean AGTS flow structures as part of Dry Run Test setup/initialization.\n";
+        print "Cleans across all components defined for a specific Toolkit version and a particular set of attribute types.\n";
+				print "\n>>>> WARNING <<<<: Do NOT use this script after the 14.1.0 PREVIEW toolkit has been through the AGTS milestone!!!\n";
+        print "\nUsage:  doTK_cleanAGTS -t <Toolkit version> [-d] [-g] [-h]\n";
+        #print "\nUsage:  doTK_cleanAGTS -t <Toolkit version> -a <component attibute types> [-d] [-g] [-h]\n";
+        print "\nInput parameters:\n";
+				print "  -t <EDA Toolkit release version> e.g. 14.1.{n}\n";
+				#print "  -a <component definition attributes>   e.g. DELIVERED,BUILD_SUPPORT,TEST_SUPPORT,32-BIT \n";
+        print "  -d [Development Mode ON]\n";
+				print "  -g [Test mode ON - will see what would execute.]\n";
+				print "  -h This help\n";
+        print "\nNOTES:\n";
+        exit 1;
+} # end help
+
+sub process_cmd_line {
+	#
+  # ---------------------------------------------------------------------
+  # Description  : This routine processes command line parameters
+  # Parms defined:  -t <Toolkit version;  e.g. 14.1.0>
+  #                 -a <component definition attributes>
+  #                 -d [Development Mode ON - using code from DEV area]
+  #                 -g [Test mode ON - will see what would execute.]
+  #                 -h [help]
+  # ---------------------------------------------------------------------
+	getopts('a:dght:');
+	
+  $tkVersion    = "$opt_t";
+  $compAttrList = "$opt_a";
+
+  # Set DEVMODE
+	if ( ${opt_d} ) {
+		$devMode = 1;
+	}
+	else {
+		$devMode = 0;
+	}
+
+	# Set DEBUG mode
+	if ( ${opt_g} ) {
+		$DEBUG = 1;
+		$dbgHdr = "[DEBUG ON]:";
+	}
+	else {
+		$DEBUG = 0;
+		$dbgHdr = "";
+	}
+	
+	# Display help if requested
+	if ( ${opt_h} ) { help(); }
+
+} # end process_cmd_line
+
+sub check_userID {
+	#
+	# AFS ID svnlib must be used to execute this script
+	#
+	my ($userID, $debug, @authID) = @_;
+  my ($found) = 1;
+	
+	foreach $id (@authID) {
+		if ($debug) {
+			print "userID: \"$userID\"  authID: \"$id\"\n";
+		}
+		if ( $userID eq $id ) {
+			$found = 0;
+			last;
+		}
+	}
+  return ($found);
+} # end check_userID
+
+sub create_timestamp {
+	#
+	# Get date and time info from system
+	#
+	
+	@months = qw(jan feb mar apr may jun jul aug sep oct nov dec);
+	
+  ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+	
+  $year = $year + 1900;
+	
+	$month = $mon + 1;
+  $monthName = $months[$mon];
+	$monthDay = $monthName . $mday;
+	
+  $date_now = $month . "/" . $mday . "/" . $year;
+	
+  if ($min < 10) {
+    $newmin = "0" . $min;
+  }
+  else {
+    $newmin = $min;
+  }
+  $time_now = $hour . ":" . $newmin;	
+} # end create_timestamp
+
+sub log_execution {
+	#
+	# Define the logging, execution timestamps
+	#
+	my ($when, $compType) = @_;
+	my $tkVer = "";
+	
+	if ($when eq "start") {
+
+    # Convert tkVersion for use in log file name
+    $tkVer = TkCommon::convert_tkVersion ($tkVersion, "selfstore");
+
+		# Set up the log file
+		create_timestamp;
+		$datetime = "$date_now at $time_now";
+
+		$logTop  = "/afs/eda/u/svnlib/logs/${monthName}";
+		if (! -d $logTop) {
+			`mkdir -p $logTop`;
+		}
+		$logFile = "$logTop/${monthDay}.${compType}.${tkVer}.${scriptName}";
+		unless (open(STDOUT, "| tee -ai $logFile")) {
+			die ("Output file $logFile cannot be opened.\n");
+		}
+		
+		# Log the start time
+		print ("#\n");
+		print ("# $fullScrName started at $datetime by $userID\n");
+		print ("#\n");
+		
+	} elsif ($when eq "end") {
+
+		create_timestamp;
+		$datetime = "$date_now at $time_now";
+		
+		# Log the end time
+		print ("#\n");
+		print ("# $fullScrName ended at $datetime by $userID\n");
+		print ("#\n");
+		
+	} else {
+		print "ERROR: log_execution: Can't figure out when I need to log!\n";
+	}
+} # end log_execution
+
+#============================================================================================
+#					MAIN ROUTINE
+#============================================================================================
+use Env;
+use Getopt::Std;
+use File::Path qw(mkpath) ;
+use Cwd;
+use lib '/afs/eda/data/edainfra/tools/enablement/dev/libperl';
+use TkCommon;
+
+$codePath = "/afs/eda/data";
+#$codePath = "/afs/eda/u/amagnan";
+
+our $scriptName = "doTK_cleanAGTS";
+our $fullScrName = $0;
+our $rc = 0;
+our $maxRC = 0;
+our $dbType="";
+our %valid_attrs = map {$_ => 1} qw(DELIVERED BUILD_SUPPORT TEST_SUPPORT 32-bit);
+
+our $opt_a = "";
+our $opt_t = "";
+
+my $compList;
+my $compAttr;
+my $compCnt = 0;
+my $comp;
+my $compRel;
+
+# Only AFS ID svnlib should run this script!!!
+our $rlseID = "svnlib";
+our $userID = $LOGNAME;
+my (@authID) = ($rlseID);
+$rc = check_userID ($userID, 0, @authID);
+if ($rc) {
+  print "\nERROR: You MUST run this script as AFS ID \"@authID\" to perform the AGTS cleaning operation!!!\n\n";
+  exit 8;
+} else {
+	print "\nINFO: Running script using authorized AFS ID.\n\n";
+}
+
+# Process parms from command line
+process_cmd_line;
+
+# Make sure the required parameters are provided
+if ($tkVersion eq "") {
+  print "\nERROR: Missing Toolkit version.\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+# Ensure tkVersion is in correct format
+$rc = TkCommon::check_tkVersion ($tkVersion);
+if ($rc != 0) {
+  print "\nERROR: Toolkit version specified in an invalid format!\n";
+  print "       You must specify the EDA Toolkit version, in format 14.1.{n}, using the -t switch.\n\n";
+  exit 8;
+}
+if ($compAttrList eq "") {
+  #print "\nINFO: No component group attribute specified.\n";
+  print "Using default component attribute definition of DELIVERED BUILD_SUPPORT TEST_SUPPORT\n";
+	$compDef = "DELIVERED,BUILD_SUPPORT,TEST_SUPPORT";
+}
+else {
+  my $onetime = 1;
+	# Validate the input attributes
+	print "\nComponent attributes specified:\n";
+	foreach $compAttr (sort split(/ /, $compAttrList)) {
+		print "$compAttr\n";
+		if (! $valid_attrs{$compAttr}) {
+			print "Found an invalid parameter on the -a switch\n";
+			exit 4;
+		}
+		else {
+			if ($onetime) {
+				$compDef = $compAttr;
+        $onetime = 0;
+			} else {
+				$compDef = $compDef . "," . $compAttr;
+			}
+		}
+	}
+}
+
+#
+# Set up the SVN code path
+#
+$SVN = "/afs/eda/tools/bin/svn";
+
+#
+# Set up program parameters
+#
+if ($devMode) {
+	our $scriptPath = "${codePath}/edainfra/tools/enablement/dev/bin";
+} else {
+	our $scriptPath = "${codePath}/edainfra/tools/enablement/prod/bin";
+}
+
+# Start the logging
+log_execution ("start", "full_TK");
+
+print "Using component definition: \"$compDef\"\n";
+
+#
+# Get the TK version-specific component definition
+#
+my $cmdbCmd = "$scriptPath/getComponents -t $tkVersion -ct $compDef -q $dbType";
+$compList = `$cmdbCmd`;
+chomp ($compList);
+$rc = $? >> 8;
+
+if ($rc) {
+	print "ERROR: Return code $rc from $cmdbCmd.\n";
+	exit $rc;
+} else {
+	print " \n";
+	print "Component list created. rc=$rc\n";
+	if ($DEBUG) {
+		print "Results:\n";
+		$compCnt = 0;
+		foreach $comp (sort split(/,/, $compList)) {
+			$compCnt++;
+			print "$compCnt) $comp\n";	
+		}
+	}
+}
+
+#
+# Process commands against the list of defined components
+#
+$compCnt = 0;
+my $badCnt1 = 0;
+my $badCnt2 = 0;
+my $badCnt3 = 0;
+
+# Convert tkVersion for use in badcomp file name
+$tkVer = TkCommon::convert_tkVersion ($tkVersion, "selfstore");
+
+# Define badcomp file
+my $badLogTop   = "/afs/eda/u/svnlib/logs/${monthName}";
+my $badCompFile = "$badLogTop/${monthDay}.badcomps.${tkVer}.${scriptName}";
+unless (open (BADCOMP, ">$badCompFile") ) {
+	die ("Output file $badCompFile cannot be opened.\n");
+}
+
+foreach $comp (sort split(/,/, $compList)) {
+	$compCnt++;
+	print "\n$compCnt) $comp\n\n";
+
+  # STEP 1: Remove the SVN TK version branch
+	$stepName1 = "remove SVN branch";
+	$validCmd1 = "$SVN delete --force -m \"Deleting AGTS branch prior to rerun of testing.\" https://greenjiffy.fishkill.ibm.com/eda/tk/$comp/branches/tk14.1.0/";
+
+	# Execute the command
+	TkCommon::runcmd("$validCmd1", "$DEBUG");
+	$rc = $? >> 8;
+	
+	if ($rc) {
+		$badCnt1++;
+    print BADCOMP "$comp;fail step:$stepName1\n";
+		print "\n[ERROR]: Command, \"$validCmd1\", did NOT execute successfully.\n\n";
+	}
+	else {
+		print "$dbgHdr Removed the SVN branch for $comp/14.1.\n\n";
+	}
+
+  # STEP 2: Delete the SHIPB release symlink
+	$stepName2 = "delete the SHIPB release symlink";
+	$validCmd2  = "${scriptPath}/update_lc_linktree -t 14.1.0 -c $comp -s shipb -O delete";
+	
+	# Execute the command
+	TkCommon::runcmd("$validCmd2", "$DEBUG");
+	$rc = $? >> 8;
+	
+	if ($rc) {
+		$badCnt2++;
+    print BADCOMP "$comp;fail step:$stepName2\n";
+		print "\n[ERROR]: Command, \"$validCmd2\", did NOT execute successfully.\n\n";
+	}
+	else {
+		print "$dbgHdr Deleted the SHIPB release symlink for $comp/14.1.\n\n";
+	}
+
+  # STEP 3: Clean the component treetop; initialize
+	$stepName3 = "clean the component tree";
+	$validCmd3  = "${scriptPath}/clean_tkversion_tree -t $tkVersion -c $comp";
+	
+	# Execute the command
+	TkCommon::runcmd("$validCmd3", "$DEBUG");
+	$rc = $? >> 8;
+	
+	if ($rc) {
+		$badCnt3++;
+		print BADCOMP "$comp;fail step:$stepName3\n";
+		print "\n[ERROR]: Command, \"$validCmd3\", did NOT execute successfully.\n\n";
+	}
+	else {
+		print "$dbgHdr Cleaned and initialized the $comp/14.1 directory.\n\n";
+	}
+} # loop thru compList
+
+print "\nFinished with $badCnt1 out of $compCnt components having errors in step \"$stepName1\".\n";
+print "\nFinished with $badCnt2 out of $compCnt components having errors in step \"$stepName2\".\n";
+print "\nFinished with $badCnt3 out of $compCnt components having errors in step \"$stepName3\".\n";
+
+log_execution ("end", "");
+print "\nLOG file located at $logFile.\n\n";
+if ( ($badCnt1 > 0) || ($badCnt2 > 0) || ($badCnt3 > 0) ) {
+	print "\nFile containing list of failed components and failed step located at $badCompFile.\n\n";
+}
+else {
+  unlink $badCompFile;
+}
+close (STDOUT);

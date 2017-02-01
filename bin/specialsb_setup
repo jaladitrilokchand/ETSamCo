@@ -1,0 +1,1149 @@
+#!/bin/ksh
+#===================================================================================
+# Script Name: specialsb_setup
+# Function: Create a sandbox directory from /afs/eda/special area, named for 
+#           the dll the library belongs to, and generate a customized Makefile.
+# 
+# 12/06/10 Created from cm_setup to support /afs/eda/special temp area for 
+#          14.1 development. 
+#===================================================================================
+help()
+{
+cat << \EOF
+# Usage:    specialsb_setup [-h] -f|-n [-b|-d|-p] [-u] [-R] [-H] [-N] -c|-r <component>
+#
+#	    -h shows this help
+#
+#           Required for initial sandbox use:
+#           (automagically determined on subsequent uses)
+#	    -f use "fractional (partial) sandbox"
+#	    -n use "dll-named sandbox"
+#
+#	    -u update execution environment
+#	    Note: updates bin/dll/lib symlinks from sandbox to build tree
+#  
+#	    -R replace sandbox Makefile (force; no prompt)
+#
+#	    -H create  sandbox DLLs in HOME directory
+#	    -N do not check_for/create sandbox dll directory
+#
+#	    -c <component> create specified sandbox directory
+#	    -r <component> delete specified sandbox directory
+#		(specify dll-name, leaf build-tree directory, or "all")
+#
+EOF
+}
+
+goodbye()
+{
+  RC=$1
+  [[ -n $2 ]] && print "$2"
+  exit "${RC:-0}"
+}
+
+sbox_setup()
+{
+  $CMSET_X
+  CMPLIST=$1
+  [[ -n $CMDEBUG ]] && { TIME="time"; DBG="-D"; } || { TIME=; DBG=; }
+  print "$BLDTOOLS/CM_ssbox -c "$CMPLIST" -b $BUILDDIR -s $SANDBOX $DBG"
+  print "This takes 1-2 minutes.  Please be patient!"
+  $TIME $BLDTOOLS/CM_ssbox -c "$CMPLIST" -b $BUILDDIR -s $SANDBOX $DBG
+}
+
+# This function adds a new dll-name directory to the sandbox top-level
+# Make.config and puts it in the correct order according to dll dependencies
+insert_dllname()
+{
+ $CMSET_X
+ # figure out which dllnames $DLL_NAME is dependent on,
+ #   then figure out which is the last one listed in SANDBOX Make.config
+ #
+ PREV=$(egrep "$(print $(print $(cat $BUILDDIR/.dll-aix/Arch-aix/$DLL_NAME-O.dll.d \
+                                  | sed 's/ /\\n/g'
+                               ) \
+                          | grep '\.\./dll' \
+                          | awk '{x+=1;lines[x]=$0}END{for(i=x;i>0;i--){print lines[i]}}' \
+                          | cut -d/ -f3 | cut -d- -f1
+                       ) \
+                  | sed 's/ /|/g'
+               )" $SANDBOX_CFG \
+         | tail -1
+      )
+
+ # Search backward for PREV (leaves at end if Prev = "")
+ #
+ SEARCH="/$PREV"
+
+ # command to add the NEW dllname
+ #
+ NEW="o	$DLL_NAME"
+
+ # command to add the "\" line continuation
+ #
+ LINECONT="A \\"
+
+ if [[ -n $(print $PREV | grep '\\$') ]]
+  then
+   CMD="$SEARCH\$NEW$LINECONT"
+  elif [[ $PREV = "" ]] then
+   CMD="$SEARCH$NEW$LINECONT"
+  else
+   CMD="$SEARCH$LINECONT$NEW"
+ fi
+
+ vi $SANDBOX_CFG >/dev/null 2>&1 <<-EOVI
+        :se noai$CMD:wq
+EOVI
+}
+
+##############################
+# function delete_dll_links
+##############################
+delete_dll_links()
+{
+  $CMSET_X
+  # Need to link build tree dll's to sandbox dll directory
+  print "Refreshing symlinks to dlls in $BUILDDIR"
+  for ARCH in $ARCHS
+   do
+    [[ -n $CMDEBUG ]] && print "\n   [D] Processing $ARCH"
+    # Only need to symlink dlls if dll-named sandbox, setup_sandbox does that
+    # automatically for partial sb
+    if [[ -n $DLL_SB &&  -d $SANDBOX/.dll-$ARCH && -n $(/bin/ls $BUILDDIR/.dll-$ARCH/*.dll 2>/dev/null) ]]
+     then
+       # Symlink dlls from build tree
+      [[ -n $CMDEBUG ]] && { print "   [D] symlink dlls to build tree"; XFLAG="-t"; } || XFLAG=
+      \ls -1 $BUILDDIR/.dll-$ARCH/*.[de]* | grep -v -- -[Og] | xargs $XFLAG -i ln -s {} $SANDBOX/.dll-$ARCH 2>/dev/null
+    fi
+    # Remove symlinks in dll directory that correspond to sandbox directory
+    # - every time refreshing step above is run all dll "holes" are filled
+    #for DIR in $(\ls -l | grep ^d | awk '{print $NF}')
+    # For dll-named, need to get list of directories and delete the 
+    # corresponding dll from it.
+    # For partial, need to get corresponding dll for each directory in
+    # sandbox and delete it
+    if [[ -n $DLL_SB ]]
+     then
+      LIST="$(cd $SANDBOX; \ls -1 | egrep -v "^bin|^tcl|^etc|^pixmap|^Make|^html|^dll|^lib|^TAGS|^export.includes|^LEVEL")"
+      DLL_LIST=$LIST
+     else
+      LIST=$(cd $SANDBOX; /bin/grep "^DIRECTORIES +=" $SANDBOX_CFG 2>/dev/null | grep -v "+= dll" | awk '{print $NF}')
+      for DIR in $LIST
+       do
+        DLL_LIST="$DLL_LIST $($BLDTOOLS/cm_get_dll $(basename $DIR) $BUILDDIR/Make.config 2>/dev/null)" 
+      done
+      DLL_LST=$(print "$(print $DLL_LIST | sed 's/ /\\n/g')" | sort -u)
+    fi
+    for DLL_NAME in $DLL_LIST
+     do
+      if [[ -L $SANDBOX/.dll-$ARCH/$DLL_NAME.dll ]]
+       then
+        [[ -n $CMDEBUG ]] && print "[D] rm -f $SANDBOX/.dll-$ARCH/$DLL_NAME.* $SANDBOX/.dll-$ARCH/$DLL_NAME-?.*  2>/dev/null"
+        \rm -f $SANDBOX/.dll-$ARCH/$DLL_NAME.* $SANDBOX/.dll-$ARCH/$DLL_NAME-?.*  2>/dev/null
+      fi
+    done
+  done
+} # end of function delete_dll_links
+
+check_for_dup_dll()
+{
+ $CMSET_X
+ # Only want to process a particular dll name only once for each
+ # component name. Check to see if dll name has already been processed
+ DLL_COMP=$($BLDTOOLS/cm_get_dll $(basename $COMP) $BUILDDIR/Make.config)
+ if [[ -n $DLL_COMP ]]
+  then
+   REMOVE_IT=
+   if [[ -d $SANDBOX/$DLL_COMP ]]
+    then
+     if [[ -z $REMOVE ]]  
+      then
+       [[ -n $CMDEBUG ]] && print "dll name for $COMP already exists in sandbox"
+#####       continue
+      else
+       REMOVE_IT=TRUE
+     fi
+    else
+     [[ -n $REMOVE ]] && print "$DLL_COMP directory has already been removed"
+   fi
+  else
+   if [[ -d $SANDBOX/$(basename $COMP) ]]
+    then
+     REMOVE_IT=TRUE
+   fi
+ fi
+} # End of function check_for_dup_dll
+
+######################
+# Script starts here #
+######################
+SCRIPT=${0##*/}
+
+# Since parameters are required, if no parameters show help.
+[[ $# = 0 ]] && { help; goodbye 1; }
+
+# If CHECK_DEPEND is set, only depend_chk() will be run.  
+#   This set and called by cm_depsearch.
+#
+unset PART_SB DLL_SB COMPONENT LEVEL LINE
+unset CREATE REMOVE REPLACE UPDATE HOMEDIR NODLL
+#unset XVER
+#typeset -i COUNT=0
+while getopts :hc:fnr:uNRDH-: OPTION
+ do
+  case "$OPTION" in
+    h) help; goodbye 1;;
+    c) CREATE=TRUE; COMPONENT=$OPTARG;;
+    f) PART_SB=TRUE; SBOX_FLAG="'-$OPTION' (partial)";;
+    n) DLL_SB=TRUE; SBOX_FLAG="'-$OPTION' (dll-named)";;
+    r) REMOVE=TRUE; COMPONENT=$OPTARG;;
+    u) UPDATE=TRUE;;
+    H) HOMEDIR=TRUE;;
+    N) NODLL=TRUE;;
+    R) REPLACE=TRUE;;
+    D) CMDEBUG=TRUE;;
+    -) if [[ $OPTARG = version ]]
+        then
+         FILETIME=$(/bin/ls -l $0 2>/dev/null | awk '{print $6 " " $7 " " $8}')
+         goodbye 0 "$SCRIPT version 1.1 ($FILETIME)"
+        else
+         goodbye 1 "only \"--version\" is recognized"
+       fi;;
+    :) help; goodbye 1 "\n*** Option -$OPTARG requires a parameter.";;
+    ?) help; goodbye 1 "\n*** Option -$OPTARG is not recognized.";;
+  esac
+done
+shift $(($OPTIND -1))
+
+if [[ -n $CMDEBUG ]]
+ then
+  print "\nDo you want to trace the script? [Yes: type y]: \c"
+  read REPLY
+  [[ -n $REPLY ]] && { set -x; CMSET_X='set -x'; }
+fi
+
+# Error checking for parameters
+SANDBOX=$(pwd)
+
+if [[ -z $UPDATE ]]
+ then
+  [[ -z $COMPONENT ]] && { help; goodbye 1 "\n*** No component specified."; }
+  # covers if neither or both specified
+  [[ ${CREATE}${REMOVE} != TRUE ]] && { help; goodbye 2 "\n*** One, and only one, of '-c|-r' must be specified."; }
+ else
+  [[ ${CREATE}${REMOVE}${PART_SB}${DLL_SB} != "" ]] && { help; goodbye 2 "\n*** Option '-u' is not used with any other options."; }
+fi
+
+# Perfrom some sandbox checking
+. /afs/eda/u/cmlib/bin/specialsb_check
+
+# If user wants to purge entire sandbox contents, do it quickly and exit.
+if [[ -n $REMOVE && $COMPONENT = all ]]
+ then
+  print "About to delete: $SANDBOX/*"
+  print "Are your sure? [Yes: type Y/y]: \c"
+  read REPLY
+  [[ $REPLY = [yY]* ]] && /bin/rm -fr $SANDBOX/* $SANDBOX/.[a-zA-Z]*
+  goodbye 0 "$SANDBOX has been thoroughly cleansed"
+fi
+
+BIN_LEVEL=prod
+LEVEL=special
+PRODUCT=$(basename $(dirname $(pwd)))
+V_R=$(basename $(pwd))
+BUILDDIR=/afs/eda/$LEVEL/$PRODUCT/$V_R
+[[ ! -d $BUILDDIR ]] && goodbye 1 "$BUILDDIR cannot be read"
+
+if [[ -n $DLL_SB ]] 
+ then
+  SANDBOX_CFG=$SANDBOX/Make.config
+ else
+  SANDBOX_CFG=$SANDBOX/Make.config.partial
+  SMCDP=$SANDBOX/Make.config.dll.partial
+fi
+
+# read build tree Make.config in order to figure out nutshell version
+# build/tools directory is based on version of nutshell
+NUT_VER=$(grep "^NUTSH_VERSION" $BUILDDIR/Make.rules | awk '{print $3}')
+NUTSHELL=/afs/eda/$BIN_LEVEL/nutshell/$NUT_VER
+case $NUT_VER in
+ 2.0) BTOOLS=1.1; BTLEVEL=build;;
+ 3.0) BTOOLS=3.0; BTLEVEL=build;;
+   *) BTOOLS=$NUT_VER; BTLEVEL=prod;;
+esac
+
+BLDTOOLS=/afs/eda/$BTLEVEL/tools/$BTOOLS/.bin-aix
+BLDTOOLSMK=/afs/eda/$BTLEVEL/tools/$BTOOLS/mk
+
+if [[ -n $UPDATE ]]
+ then
+  print "\nUpdating bin/dll/lib sandbox symlinks...."
+  sbox_setup "dll"
+  # That's all folks!
+  goodbye 0 "\nSandbox bin/dll/lib symlinks updated!"
+fi
+
+# COMP needs to be non-leaf/leaf in order to find the leaf Make.config in build tree
+COMPS=
+[[ -n $CREATE ]] && { cd $BUILDDIR; } || cd $SANDBOX
+[[ -n $CMDEBUG ]] && print "   [D] Locating specified component(s) in $(pwd)"
+# Developer wants only a part of the build tree
+
+if [[ $COMPONENT != "all" ]]
+then
+  print "\nSearching $(pwd) for $COMPONENT...."
+  if [[ -r $BUILDDIR/$COMPONENT/Make.config && -n $(grep '^[ 	]*DIRECTORIES' $BUILDDIR/$COMPONENT/Make.config) ]]
+  then
+    # COMPONENT is non-leaf
+    [[ -n $DLL_SB && -n $REMOVE ]] && COMPDIR=$BUILDDIR || COMPDIR=$(pwd)
+    COMPS=$(print $(cd $COMPDIR; \ls -ld $COMPONENT/* | grep ^d | awk '{print $NF}'))
+    # This is to handle comclass/comclass and idm/idm
+    if [[ -n $(cd $COMPDIR; /bin/ls -d $COMPONENT/$COMPONENT 2>/dev/null) ]]
+    then
+      print "It appears that $COMPONENT is both a leaf and non-leaf component"
+      PS3='Please select number from above list: '
+      select NUM in "leaf component ($COMPONENT/$COMPONENT)" "all-leaf components ($COMPONENT/*)"
+      do
+        case $NUM in
+          "leaf component ($COMPONENT/$COMPONENT)") COMPS=$COMPONENT/$COMPONENT; break;;
+              "all-leaf components ($COMPONENT/*)") break;;
+                                                 *) print 'Invalid selection';;
+        esac
+      done
+    else
+    #  Case of nutcracker when it is both a non-leaf and a dll name
+      if [[ -n $DLL_SB &&  -n $(/bin/grep ${COMPONENT}_DLL_LIBS $BUILDDIR/Make.config) ]]
+      then
+        print "It appears that $COMPONENT is both a non-leaf component and a dll"
+        PS3='Please select number from above list: '
+        select NUM in "dll ($COMPONENT)" "all-leaf components ($COMPONENT/*)"
+        do
+          case $NUM in
+                             "dll ($COMPONENT)") COMPS=$COMPONENT; break;;
+           "all-leaf components ($COMPONENT/*)") break;;
+                                              *) print 'Invalid selection';;
+          esac
+        done
+      fi
+    fi
+  else
+    # COMPONENT is leaf
+    # Use 3-tier search for performance
+    if [[ $COMPONENT = @(bin|lib|tcl|html|etc|Makefile) ]] 
+    then
+      OUTPUT=$COMPONENT
+      if [[ -z $REMOVE ]]
+      then
+        print ">>> $COMPONENT is automatically generated"
+      else
+        print ">>> $COMPONENT cannot be removed from your sandbox"
+      fi
+    else  
+      OUTPUT=$(/bin/ls -ld $COMPONENT 2>/dev/null | grep ^d | awk '{print $NF}')
+      [[ -z $OUTPUT ]] && OUTPUT=$(/bin/ls -ld */$COMPONENT 2>/dev/null | grep ^d | awk '{print $NF}')
+      if [[ -z $OUTPUT && -n $DLL_SB ]] 
+      then
+        [[ -n $(/bin/grep ${COMPONENT}_DLL_LIBS $BUILDDIR/Make.config) ]] && { OUTPUT=$COMPONENT; DLL_SPECIFIED=$COMPONENT; }
+      fi
+      [[ -z $OUTPUT ]] && { print "Please be patient...."; OUTPUT=$(find . -name $COMPONENT -type d); }
+      [[ $(print $OUTPUT | wc -w) -gt 1 ]] && goodbye 9 "$COMPONENT does not uniquely resolve!\n$OUTPUT"
+      if [[ -z $OUTPUT ]] 
+      then
+        if [[ -n $REMOVE ]]
+        then
+          if [[ -n $DLL_SB ]]
+  	  then
+            # Check to see if component name resolves to a dll name in sandbox
+            DLL_NAME=$($BLDTOOLS/cm_get_dll $(basename $COMPONENT) $BUILDDIR/Make.config 2>/dev/null) 
+            [[ -n $DLL_NAME ]] && OUTPUT=$(/bin/ls -d $DLL_NAME)
+            [[ -z $OUTPUT ]] && goodbye 3 "could not find $DLL_NAME in your sandbox"
+          else
+            goodbye 3 "$COMPONENT does not exist in your sandbox"
+          fi
+        else
+          goodbye 3 "$COMPONENT appears to be an invalid component name."
+        fi 
+      fi
+      COMPS=$OUTPUT
+    fi
+  fi
+ else
+  # COMPONENT=all and REMOVE - condition is already handled
+  print "You have requested to link all directories.  This may take a couple of minutes."
+  find * -name Makefile -print | egrep -v "include|private|^Make|^bin|^lib|^html|^tcl|^etc|^msg" |
+  while read LINE
+   do
+    COMP=$(dirname $LINE)
+    # Don't want to set up any debug directories (i.e. pcr-g, idm-g)
+    [[ -n $(print $COMP | grep -- -g$) ]] && continue
+    # Skip non-leaf directories
+    [[ -n $(grep ^DIRECTORIES $COMP/Make.config 2>/dev/null) ]] && continue
+    COMPS="$COMPS $COMP"
+  done
+fi
+[[ -n $CMDEBUG ]] && print "   [D] COMPS $COMPS"
+
+ARCHS="aix aix64 linux linux64"
+cd $SANDBOX
+
+for COMP in $COMPS
+do
+  [[ -n $REMOVE ]] && COMPDIR=$SANDBOX || COMPDIR=$BUILDDIR
+  if [[ -n $DLL_SPECIFIED ]] 
+  then
+    NEWCOMP=$COMP
+    continue
+  fi
+  if [[ -z $(ls -l $COMPDIR/$COMP/Makefile | egrep "Makefile$|Makefile.sub") ]]
+  then
+    if [[ -n $REMOVE ]]
+    then
+      print "You cannot remove $COMP from your sandbox\n"
+    else
+      print "You do not need to create $COMP.  It is automatically created.\n"
+    fi
+    continue
+  else
+    NEWCOMP="$NEWCOMP $COMP"
+  fi
+done
+COMPS=$NEWCOMP
+
+# For a partial sandbox, collect the list of components and call setup_sandbox
+# only once with multiple entries of -- only xxxx
+if [[ -z $DLL_SB && -n $CREATE ]]
+then
+  [[ -n $CMDEBUG ]] && print "   [D] COMPS:" $COMPS
+  for COMP in $COMPS
+  do
+    COMPLIST="$COMP $COMPLIST"
+  done
+  COMPLIST=$(print $COMPLIST)
+  # Set up the sandbox (via setup_sandbox)
+  if [[ -n $COMPS ]]
+  then
+    print "\nSeeding your sandbox...."
+    sbox_setup "$COMPLIST"
+  fi
+fi
+
+for COMP in $COMPS
+do
+  if [[ -z $DLL_SPECIFIED ]]
+  then
+    PROMPT=
+    CM_get_dll_RESULT=$($BLDTOOLS/cm_get_dll $(basename $COMP) $BUILDDIR/Make.config)
+    if [[ $(print $CM_get_dll_RESULT | wc -w) -gt 1 ]]
+    then
+      if [[ -n $REMOVE ]]
+      then
+        # determine if prompt needed when in REMOVE mode
+        if [[ $(/bin/ls -d $SANDBOX/$CM_get_dll_RESULT 2>/dev/null | wc -w) -gt 1 ]]
+        then
+          PROMPT=TRUE
+        else
+          # Need to find out which one is in the sandbox
+          LIST_RESULT=
+          for RESULT in $CM_get_dll_RESULT
+          do
+            if [[ -n $(/bin/ls $SANDBOX/$RESULT 2>/dev/null) ]]
+            then
+              LIST_RESULT="$LIST_RESULT $RESULT"
+              break
+            else
+              if [[ -n $(/bin/grep $RESULT $SMCDP) ]]
+              then
+	        LIST_RESULT="$LIST_RESULT $RESULT"
+              fi
+            fi
+          done
+        fi
+      else
+        # always prompt when in ADD mode if a dll-name sandbox
+        [[ -n $DLL_SB ]] && PROMPT=TRUE
+      fi
+
+      if [[ -n $PROMPT ]]
+      then
+        print "It appears that $(basename $COMP) is used in more than one DLL"
+        PS3='Please select number from above list: '
+        select NUM in $CM_get_dll_RESULT
+        do
+          case $NUM in
+           *) if [[ $NUM = @($(print $CM_get_dll_RESULT | sed 's/ /|/g')) ]]
+               then
+                LIST_RESULT=$NUM
+                break
+               else
+                print 'Invalid selection'
+              fi;;
+          esac
+        done
+      fi
+      DLL_NAME=$LIST_RESULT
+    elif [[ -n $(/bin/grep ^$(basename $COMP)_DLL_LIBS $BUILDDIR/Make.config) ]] then
+      DLL_NAME=$(basename $COMP)
+    else
+      DLL_NAME=$CM_get_dll_RESULT
+    fi 
+    D_NAME_LIST="$D_NAME_LIST $DLL_NAME"
+    D_NAME_LIST=$(print "$(print $D_NAME_LIST | sed 's/ /\\n/g')" | sort -u)
+  fi
+  [[ -n $CMDEBUG ]] && print "   [D] DLL COMPS" $COMPS
+  [[ -n $DLL_SPECIFIED ]] && DLL_NAME=$DLL_SPECIFIED
+  print "\nProcessing $(basename $COMP)...."
+  [[ -n $(print $COMP | grep -- -g$) ]] && { print "\n*** Debug-only directories are not used in sandbox.\n"; /bin/rm -r $SANDBOX/$COMP 2>/dev/null; continue; }
+  [[ -n $CMDEBUG ]] && print "Processing $SANDBOX/$COMP"
+  [[ -z $REMOVE ]] && check_for_dup_dll
+
+
+#  [[ -z $DLL_NAME ]] && find_dup_dll
+  if [[ -n $(ls -l $BUILDDIR/$COMP/Makefile 2>/dev/null | egrep "Makefile$|Makefile.sub") ]]
+  then
+    [[ -n $DLL_SB && -z $DLL_NAME ]] && { print "\n*** Cannot find which dll '$COMP' belongs to....skipping"; continue; }
+
+  fi
+  ############################
+  # Partial Sandbox - Create #
+  ############################
+  if [[ -n $PART_SB && -n $CREATE ]]
+   then
+    [[ -n $CMDEBUG ]] && print "\n   [D] >>> Partial Sandbox - Create <<<\n"
+    # Make.config.dll.partial contains commented out dll rule(s) for sandbox
+    if [[ -n $DLL_NAME ]]
+     then
+      if [[ -z $(grep ${DLL_NAME}_DLL_LIBS $SMCDP 2>/dev/null) ]]
+       then
+        [[ -n $CMDEBUG ]] && print "   [D] Adding rule for $DLL_NAME to $(basename $SMCDP)"
+        [[ -a $SMCDP ]] && print >> $SMCDP
+        print "$($BLDTOOLS/cm_get_dll_rule $DLL_NAME $BUILDDIR/Make.config)" >> $SMCDP
+       else
+        [[ -n $CMDEBUG ]] && print "   [D] Rule for '$DLL_NAME' already in $(basename $SMCDP) - not added."
+      fi
+     else
+      [[ -n $CMDEBUG ]] && print "   [D] No dll rule for '$COMP' found in $BUILDDIR/Make.config - not added."
+    fi
+    # Create or update Make.config.partial in developer's sandbox top-level directory
+    if [[ ! -a $SANDBOX_CFG ]]
+    then
+      [[ -n $CMDEBUG ]] && print "   [D] Creating $SANDBOX_CFG"
+      print "BUILD_TOP=${BUILDDIR}/" > $SANDBOX_CFG
+      print "SANDBOX=TRUE" >> $SANDBOX_CFG
+      print "SHOW_PROGRESS=1" >> $SANDBOX_CFG
+      print "include /afs/eda/u/hdplib/rules/CM_mergelib_rule" >> $SANDBOX_CFG
+      print "## Remove the comment from the following line if you want to" >> $SANDBOX_CFG
+      print "## build only the dlls that map to the directories in your sandbox" >> $SANDBOX_CFG
+      print "#DLL_LIB_DEPENDS_ONLY=1" >> $SANDBOX_CFG
+      print "APP_NAME = $PRODUCT" >> $SANDBOX_CFG
+      print "PARTIAL_SANDBOX=TRUE" >> $SANDBOX_CFG
+      print "DIRECTORIES :=" >> $SANDBOX_CFG
+      print 'INCLUDE_DIRECTORIES += $(BUILD_TOP)/include $(BUILD_TOP)/private' >> $SANDBOX_CFG
+      print "# Expiration date for all developer-generated dlls" >> $SANDBOX_CFG
+      print "DLL_EXPDATE ?= -expire_in=0days" >> $SANDBOX_CFG
+      print 'LINK_DLL_FLAGS += $(DLL_EXPDATE)\n' >> $SANDBOX_CFG
+      print "\n" >> $SANDBOX_CFG
+      print "#" >> $SANDBOX_CFG
+      print "# The following line creates a symlink to either " >> $SANDBOX_CFG
+      print "# foo.dll to either foo-O.dll or foo-g.dll" >> $SANDBOX_CFG
+      print "# depending on whether or not you do opt or debug" >> $SANDBOX_CFG
+      print "#" >> $SANDBOX_CFG
+      print 'SYMLINK_LIBEXT = $(LIBEXT)' >> $SANDBOX_CFG
+      print "\n" >> $SANDBOX_CFG
+      if [[ -n $HOMEDIR ]]
+      then
+	print "DLLDIR = $(HOME)/dll$V_R$(64BIT)" >> $SANDBOX_CFG
+      fi
+    fi
+    # File already exists, so append to it.  
+    # Ensure last line always says DIRECTORIES += dll$(64BIT)
+    if [[ -z $(grep '$COMP"$"' $SANDBOX_CFG) ]] 
+    then
+      [[ -n $CMDEBUG ]] && print "   [D] Appending '$COMP' to $SANDBOX_CFG"
+      # Need to sed out DIRECTORIES += dll line and add to end of Make.cofig.partial
+      cat $SANDBOX_CFG | \grep -v '^[ 	]*DIRECTORIES[ 	]*+=[ 	]*dll' > $SANDBOX_CFG.new
+      print "DIRECTORIES += $COMP" >> $SANDBOX_CFG.new
+      print "INCLUDE_DIRECTORIES += $COMP" >> $SANDBOX_CFG.new
+      print "INCLUDE_DIRECTORIES += \$(BUILD_TOP)/${COMP}\n" >> $SANDBOX_CFG.new
+      print 'DIRECTORIES += lib$(64BIT) dll$(64BIT)' >> $SANDBOX_CFG.new
+      # awk - remove multiple blank lines
+      cat $SANDBOX_CFG.new | uniq > $SANDBOX_CFG
+      [[ -z $CMDEBUG ]] && /bin/rm -f $SANDBOX_CFG.new
+    fi 
+ 
+    # Create Make.config.partial file if component parent is not build tree top
+    if [[ -n $(print $COMP | grep /) ]]
+    then
+      # The specified component is part of a subtree (i.e. wiring, editor, etc.)
+      # Need to create Make.config.partial in sandbox director(y|ies) containing
+      # list of only the directories in developer's sandbox subdirector(y|ies).
+      unset PARENT_COMP
+      for CURR_COMP in $(print $COMP | sed 's|/| |g')
+      do
+        if [[ -n $PARENT_COMP ]]
+        then
+          if [[ ! -a $SANDBOX/$PARENT_COMP/Make.config.partial ]]
+          then
+            [[ -n $CMDEBUG ]] && print "   [D] Creating $SANDBOX/$PARENT_COMP/Make.config.partial"
+            print "DIRECTORIES :=" > $SANDBOX/$PARENT_COMP/Make.config.partial
+          fi
+          for DIR in $(/bin/ls -1 $SANDBOX/$PARENT_COMP | grep -v Make)
+          do
+            [[ -n $(grep $DIR $SANDBOX/$PARENT_COMP/Make.config.partial) ]] && continue
+            [[ -n $CMDEBUG ]] && print "   [D] Adding '$DIR' to $SANDBOX/$PARENT_COMP/Make.config.partial"
+            print "DIRECTORIES += $DIR" >> $SANDBOX/$PARENT_COMP/Make.config.partial
+          done
+        fi	## if -n PARENT_COMP
+        PARENT_COMP=$(print ${PARENT_COMP}/${CURR_COMP} | sed 's|^/||')
+      done	## for CURR_COMP
+    fi
+    # Remove any symlinks to libs added by successive setup_sandbox calls w/o make inbetween
+    for DIR in $(grep "^DIRECTORIES +=" $SANDBOX_CFG 2>/dev/null | grep -v "+= dll" | awk '{print $NF}')
+    do
+      for ARCH in $ARCHS
+      do
+        LIST=$(\ls -l $SANDBOX/.lib-$ARCH/lib$(basename $DIR)-?.a 2>/dev/null | grep ^l | awk '{print $(NF-2)}')
+        [[ -z $LIST ]] && continue
+        [[ -n $CMDEBUG ]] && print "$LIST" | sed -e 's!^!   [D] /bin/rm -f !' -e "s!$SANDBOX!<SBOX>!"
+        /bin/rm -f $LIST
+      done
+    done
+    delete_dll_links
+    continue
+  fi
+  # END: Partial Sandbox - Create
+
+  ############################
+  # Partial Sandbox - Remove #
+  ############################
+  if [[ -n $PART_SB && -n $REMOVE ]]
+  then
+    [[ -n $CMDEBUG ]] && print "\n   [D] >>> Partial Sandbox - Remove <<<\n"
+    print "\nAbout to delete: $SANDBOX/$COMP"
+    print "Are your sure? [Yes: type Y/y]: \c"
+    read REPLY
+    [[ $REPLY != [yY]* ]] && { print "\nNo action was taken on '$COMP'."; continue; }
+
+    # Need to delete the $COMPONENT entry in the top-level Make.config.partial file
+    [[ -n $CMDEBUG ]] && print "   [D] Removing '$COMP' from $SANDBOX_CFG"
+    cat $SANDBOX_CFG | sed "/$(print $COMP | sed 's|/|\\/|g')/d" | awk '{if(NF != 0){print;L=0}else if(L==0){print ;L+=1}}' > $SANDBOX_CFG.new
+    mv $SANDBOX_CFG.new $SANDBOX_CFG
+
+    # If exists another sbox dir in same dll, dll still needed in sbox
+    if [[ -n $DLL_NAME ]]
+    then
+      for DLL in $DLL_NAME
+      do
+        DLL_ISNEEDED=
+        for DIR_LEFT in $(grep "^DIRECTORIES +=" $SANDBOX_CFG | grep -v "+= dll" | awk '{print $NF}')
+        do
+          [[ $DLL = $($BLDTOOLS/cm_get_dll $(basename $DIR_LEFT) $BUILDDIR/Make.config) ]] && { DLL_ISNEEDED=TRUE; break; }
+        done
+      done
+    fi
+
+    # Need to remove library in sandbox and symlink it to build tree.
+    if [[ -n $(ls -l $BUILDDIR/$COMP/Makefile | egrep "Makefile$|Makefile.sub") ]]
+    then
+      print "Removing lib$(basename $COMP)-?.a from all lib directories"
+      print "Symlink lib$(basename $COMP)-?.a back to $BUILDDIR"
+      for ARCH in $ARCHS
+      do
+        [[ -n $CMDEBUG ]] && print "\n   [D] Processing $ARCH"
+        #
+        # lib
+        #
+        [[ -n $CMDEBUG ]] && print "   [D] /bin/rm -f $SANDBOX/.lib-$ARCH/lib$(basename $COMP)-?.a"
+        /bin/rm -f $SANDBOX/.lib-$ARCH/lib$(basename $COMP)-?.a 2>/dev/null
+        [[ -n $CMDEBUG ]] && print "   [D] ln -sf $BUILDDIR/.lib-$ARCH/lib$(basename $COMP)-?.a $SANDBOX/.lib-$ARCH"
+        ln -sf $BUILDDIR/.lib-$ARCH/lib$(basename $COMP)-?.a $SANDBOX/.lib-$ARCH 2>/dev/null
+        #
+        # dll
+        #
+        [[ -z $DLL_NAME ]] && continue
+        # if upstreamfiles blank or real (dll of interest depends on other sbox dlls)
+        # - rm dll of interest
+        # if upstreamfiles links (first built dll in sbox)
+        # - just need to relink dll of interest
+        ARCHDIR=$SANDBOX/.dll-$ARCH/Arch-$ARCH
+        [[ ! -d $ARCHDIR ]] && continue
+
+        for TYPE in O g
+        do
+          # DOWN_DLL_LIST = sorted list of dlls recursively dependent on dll of interest
+          #
+          # The list of dll.d files which use the "dll of interest"
+          FULL_LIST=$(grep -l $DLL_NAME $ARCHDIR/*-$TYPE.dll.d 2>/dev/null)
+          REMAINING_LIST="$FULL_LIST"
+          # Cycle through the sandbox dependency (.d) files
+          print $(while CURR=$(print "$REMAINING_LIST" | head -1) ; [[ -n $REMAINING_LIST ]]
+          do
+            # get dll name from .d name
+            DLL=$(print $CURR | awk -F/ '{print $NF}' | cut -d- -f1)
+            # how many .d files contain DLL
+            USED_BY=$(grep -l $DLL $ARCHDIR/*-$TYPE.dll.d)
+            NUM_USED_BY=$(print $USED_BY | wc -w)
+            # Print this info so it can be sorted
+            #  CMDEBUG info goes to stderr so as not to effect the sort...
+            [[ -n $CMDEBUG ]] && printf "%10s %20s %s\n" $NUM_USED_BY $DLL $USED_BY 1>&2
+            print $NUM_USED_BY $DLL
+            # Look for dlls not in the original list (FULL_LIST)
+            NEWBIES=$(print "$USED_BY\n$FULL_LIST\n$FULL_LIST" | sort | uniq -u | grep -v '^$')
+            # Add the NEWBIES to both LISTS (REMAINING & FULL)
+            REMAINING_LIST="$REMAINING_LIST\n$NEWBIES"
+            FULL_LIST="$FULL_LIST\n$NEWBIES"
+            # REMOVE "CURRent DLL" from REMAINING_LIST as it has been processed.
+            REMAINING_LIST=$(print "$REMAINING_LIST" | egrep -v "^$CURR$|^$")
+          done | sort -rn | awk '{print $NF}') | read DOWN_DLL_LIST
+          [[ -n $CMDEBUG ]] && print "   [D] DOWN_DLL_LIST: $DOWN_DLL_LIST"
+
+          for DLL in $DOWN_DLL_LIST
+          do
+            [[ -L $SANDBOX/.dll-$ARCH/$DLL-$TYPE.dll ]] && continue
+            # Remove cases (dll still needed in sbox):
+            #   $? != 0 					one of up dlls missing
+            #   -n $(print "$UP_DLL_LIST" | grep ^-)	one of up dlls real
+            #   -n $DLL_ISNEEDED				another lib for dll exists
+            # else
+            #   symlink dll back to build tree
+          #  UP_DLL_LIST=$(ls -l $(print "$(sed  's| |\\n|g' $ARCHDIR/$DLL-$TYPE.dll.d)" | grep '^\.\./dll' | grep -v ${DLL_NAME}- | awk -F/ '{print $NF}') 2>/dev/null)
+            UP_DLLS=$(print "$(sed 's| |\\n|g' $ARCHDIR/$DLL-$TYPE.dll.d)" | grep '^\.\./dll' | grep -v ${DLL_NAME}- | awk -F/ '{print $NF}')
+	    [[ -z $UP_DLLS ]] && UP_DLL_LIST= || UP_DLL_LIST=$(ls -l $UP_DLLS 2>/dev/null)
+            if [[ $? != 0 || -n $(print "$UP_DLL_LIST" | grep ^-) || -n $DLL_ISNEEDED ]]
+            then
+              [[ -n $CMDEBUG ]] && print "   [D] /bin/rm -f $SANDBOX/.dll-$ARCH/$DLL[-.]*" ||\
+              print "...removing .dll-$ARCH/$DLL[-.]*"
+              /bin/rm -f $SANDBOX/.dll-$ARCH/$DLL[-.]* 2>/dev/null
+            else
+              [[ -n $CMDEBUG ]] && print "   [D] ln -sf $BUILDDIR/.dll-$ARCH/$DLL-?.[de]?? $SANDBOX/.dll-$ARCH" ||\
+              print "...linking .dll-$ARCH/$DLL[-.] to build tree*"
+              ln -sf $BUILDDIR/.dll-$ARCH/$DLL-?.[de]?? $SANDBOX/.dll-$ARCH 2>/dev/null
+            fi
+          done
+        done
+      done
+    fi
+    # delete dll entry out of Make.config.dll.partial (if no longer required)
+    if [[ -z $DLL_ISNEEDED && -n $DLL_NAME ]]
+    then
+      for DLL_RULE in $DLL_NAME
+      do
+        [[ -n $CMDEBUG ]] && print "   [D] Removing '$DLL_RULE' dll rule from Make.config.dll.partial"
+        print "$($BLDTOOLS/cm_delete_dll_rule $DLL_NAME $BULIDDIR/Make.config)" >> $SMDCP
+      done
+      if [[ -z $(grep -v '^[ 	]*$'  $SMCDP) ]]
+      then
+        [[ -n $CMDEBUG ]] && print "   [D] /bin/rm -f $SMCDP"
+        /bin/rm -f $SMCDP
+      fi
+    fi
+
+    # Remove the directory
+    [[ -n $CMDEBUG ]] && print "   [D] /bin/rm -fr $SANDBOX/$COMP"
+    /bin/rm -fr $SANDBOX/$COMP
+
+    # Need to check if there is a Make.config.partial in non-tree-top component
+    if [[ $COMP = */* ]]
+    then
+      CURR_COMP=$COMP
+      while PREV_COMP=$(basename $CURR_COMP) ; \
+            CURR_COMP=$(dirname $CURR_COMP) ; \
+            [[ $CURR_COMP != . ]]
+      do
+        # if a CURR_COMP/Make.config.partial exists (it should)
+        #   remove PREV_COMP from the "DIRECTORIES +=" list
+        #
+        if [[ -a $SANDBOX/$CURR_COMP/Make.config.partial ]]
+        then
+          [[ -n $CMDEBUG ]] && print "   [D] Removing '$PREV_COMP' from $SANDBOX/$CURR_COMP/Make.config.partial.new"
+          cat $SANDBOX/$CURR_COMP/Make.config.partial | sed "/$PREV_COMP/d" > $SANDBOX/$CURR_COMP/Make.config.partial.new
+          mv $SANDBOX/$CURR_COMP/Make.config.partial.new $SANDBOX/$CURR_COMP/Make.config.partial
+        fi
+
+        # Check to see if any files/directories exist in CURR_COMP
+        #   if not, remove the CURR_COMP directory
+        #
+        DIRS=$(/bin/ls -1 $SANDBOX/$CURR_COMP | egrep -v Make)
+        if [[ -z $DIRS ]]
+        then
+          print ">>> $SANDBOX/$CURR_COMP is now empty...deleting <<<"
+          [[ -n $CMDEBUG ]] && print "   [D] /bin/rm -fr $SANDBOX/$CURR_COMP"
+          /bin/rm -fr $SANDBOX/$CURR_COMP
+        else
+          #
+          # MUST Stop here or we will remove too much!!!
+          #
+          break
+        fi
+
+      done ##  while CURR_COMP != .
+ 
+    fi	##  if $COMP = */*
+    continue
+  fi
+  # END: Partial Sandbox - Remove
+
+  ##############################
+  # dll-named Sandbox - Create #
+  ##############################
+  if [[ -n $DLL_SB && -n $CREATE ]]
+  then
+    [[ -n $CMDEBUG ]] && print "\n   [D] >>> dll-named Sandbox - Create <<<\n"
+    print ">>> $DLL_NAME.dll <<<"
+    PROCESSED=TRUE
+    if [[ ! -d $SANDBOX/$DLL_NAME ]]
+    then
+      mkdir -p $SANDBOX/$DLL_NAME || goodbye 1 "Cannot create $SANDBOX/$DLL_NAME."
+    fi
+    MAKEFILE=$SANDBOX/$DLL_NAME/Makefile
+    # Check to see if Makefile already exists in the sandbox directory.
+    if [[ -z $REPLACE ]]
+    then
+      if [[ -a $MAKEFILE ]]
+      then
+        print "\nMakefile already exists in $SANDBOX/$DLL_NAME."
+        print "Do you want to replace it? [Yes: type y]: \c"
+        read REPLY
+        [[ $REPLY = [yY]* ]] && REPLACE=TRUE
+      else
+        REPLACE=TRUE
+      fi  
+    fi
+
+    # Replace Makefile
+    if [[ -n $REPLACE ]]
+    then
+      # Replace Makefile
+      [[ -a $MAKEFILE && ! -w $MAKEFILE ]] && goodbye 1 "$MAKEFILE exists but cannot be modified"
+      [[ -a $MAKEFILE ]] && TEXT=Replacing || TEXT=Creating
+      print "...$TEXT $DLL_NAME/Makefile"
+      if [[ -n $HOMEDIR ]]
+      then
+        cat $BLDTOOLSMK/Makefile_sandbox | \
+	  sed -e "s|^MAKE_TOOLS.*|MAKE_TOOLS ?= $BLDTOOLSMK|" \
+              -e "s|^TOP.*|TOP = $BUILDDIR|" \
+              -e "s|^DLL_NAME.*|DLL_NAME = $DLL_NAME|" \
+              -e "s|^DLL_OUTDIR.*|DLL_OUTDIR = \$\(HOME\)/dll${V_R}\$\(64BIT\)|" \
+          > $MAKEFILE || goodbye 1 "Could not open $MAKEFILE"
+      else
+        cat $BLDTOOLSMK/Makefile_sandbox | \
+	  sed -e "s|^MAKE_TOOLS.*|MAKE_TOOLS ?= $BLDTOOLSMK|" \
+              -e "s|^TOP.*|TOP = $BUILDDIR|" \
+              -e "s|^DLL_NAME.*|DLL_NAME = $DLL_NAME|" \
+              -e "s|^DLL_OUTDIR.*|DLL_OUTDIR = \..\/dll\$\(64BIT\)|" \
+          > $MAKEFILE || goodbye 1 "Could not open $MAKEFILE"
+      fi
+
+      # Need to copy dll rule into developer's sandbox makefile
+      print "$($BLDTOOLS/cm_get_dll_rule $DLL_NAME $BUILDDIR/Make.config)" >> $MAKEFILE
+      # Need to put the include information at the end of the developer's Makefile
+      INCLUDE_LIST=$($BLDTOOLS/cm_get_dll_include $DLL_NAME $BUILDDIR/Make.config)
+      if [[ -n $INCLUDE_LIST ]]
+      then
+        print "\n# Add include dependencies not in build-tree include directory" >> $MAKEFILE
+      fi
+      cd $BUILDDIR
+      for NAME in $INCLUDE_LIST
+      do
+        COMP_INCDIR=$(/bin/grep ^$(basename $NAME)_INCLUDE_DIRECTORIES $BUILDDIR/Make.config | awk '{ print $1 }')
+        # Need to see if component is multi-tier
+	QUAL_NAME=$(/bin/ls -d $NAME 2>/dev/null)
+        [[ -z $QUAL_NAME ]] && QUAL_NAME=$(/bin/ls -1d */$NAME | egrep -v html 2>/dev/null)
+        [[ -z $QUAL_NAME ]] && QUAL_NAME=$(find . -name $NAME -type d)
+        [[ -z $QUAL_NAME ]] && { print "\nCould not find $NAME!  Please report this error to CMTeam!"; continue; }
+        if [[ -n $COMP_INCDIR ]]
+        then
+          print "INCLUDE_DIRECTORIES += \$($COMP_INCDIR) \$(TOP)/$QUAL_NAME" >> $MAKEFILE 
+        else
+	  ########  Start here
+          if [[ -n $(cd $COMPDIR; /bin/ls -d $NAME/$NAME 2>/dev/null) ]]
+          then
+	     print "INCLUDE_DIRECTORIES += \$(TOP)/$QUAL_NAME/$QUAL_NAME" >> $MAKEFILE
+          else
+	    print "INCLUDE_DIRECTORIES += \$(TOP)/$QUAL_NAME" >> $MAKEFILE
+          fi
+        fi
+      done
+    fi
+    # Check to see if <comp>_CPPFLAGS exists in build tree's Make.config.  If so, need to
+    # put that in sandbox Makefile
+    LINE=$(grep ${COMPONENT}_CPPFLAGS $BUILDDIR/Make.config  | grep -v "#")
+    # Need to get the flags and add them to CPPFLAGS variable in Makefile
+    # Check to see if <component>_CPPFLAGS exists in sandbox Makefile
+    if [[ -n $LINE && -z $(grep ${COMPONENT}_CPPFLAGS $MAKEFILE) ]]
+    then
+      print "CPPFLAGS += \$(${COMPONENT}_CPPFLAGS)" >> $MAKEFILE
+    fi
+
+    # Checking to see if Make.config exists in Build Tree
+    if [[ -a $BUILDDIR/$COMP/Make.config ]]
+    then
+      if [[ -n $(/bin/grep "^# EXTRA_MAKE_CONFIGS" $MAKEFILE) ]]
+      then
+        cat $MAKEFILE | sed "s|^# EXTRA_MAKE_CONFIGS.*|EXTRA_MAKE_CONFIGS += \$\(TOP\)/$COMP/Make.config|" > $MAKEFILE.new || goodbye 1 "Cannot open $MAKEFILE.new"
+      else
+        if [[ -z $(/bin/grep "\$(TOP)/$COMP/Make.config" $MAKEFILE) ]]
+        then
+          EDITOR=${EDITOR:-"vi"}
+          print "\n***************************************************************************"
+          print "*  WARNING!   WARNING!  WARNING!  WARNING!  WARNING!  WARNING!  WARNING!  *"
+          print "***************************************************************************\n"
+          print "About to append an additional Make.config to EXTRA_MAKE_CONFIGS."
+          print "Invoking $EDITOR to show contents of each included Make.config"
+          print "\nAfter leaving the editor, you will have to make a choice on how to proceed!"
+          print "press enter to continue....\c"
+          read
+          #
+          print "############################" > /tmp/$SCRIPT.$$
+          print "#  Current Make.config(s)  #" >> /tmp/$SCRIPT.$$
+          print "############################" >> /tmp/$SCRIPT.$$
+          for EMC in $(grep ^EXTRA_MAKE_CONFIGS $MAKEFILE | sed "s/EXTRA_MAKE_CONFIGS +=//" | sed "s|\$(TOP)|$BUILDDIR|g")
+           do
+            print "\n>>>" >> /tmp/$SCRIPT.$$
+            print ">>> $EMC" >> /tmp/$SCRIPT.$$
+            print ">>>\n" >> /tmp/$SCRIPT.$$
+            cat $EMC >> /tmp/$SCRIPT.$$
+          done
+          print "##########################" >> /tmp/$SCRIPT.$$
+          print "#  Incoming Make.config  #" >> /tmp/$SCRIPT.$$
+          print "##########################\n" >> /tmp/$SCRIPT.$$
+          print "\n>>>" >> /tmp/$SCRIPT.$$
+          print ">>> $BUILDDIR/$COMP/Make.config" >> /tmp/$SCRIPT.$$
+          print ">>>\n" >> /tmp/$SCRIPT.$$
+          cat $BUILDDIR/$COMP/Make.config >> /tmp/$SCRIPT.$$
+       #   cat /tmp/$SCRIPT.$$ | awk '{if(NF != 0){print;L=0}else if(L==0){print ;L+=1}}' >> /tmp/${SCRIPT}p.$$
+          cat /tmp/$SCRIPT.$$ | uniq >> /tmp/${SCRIPT}p.$$
+          $EDITOR /tmp/${SCRIPT}p.$$
+          print "\nWhat do you want to do with the Make.configs?"
+          PS3='Enter choice: '
+          select NUM in "keep all" "remove old; keep only new" "irreconcilable; exit"
+          do
+            case $NUM in
+              k*) [[ -n $CMDEBUG ]] && print "   [D] KEEP ALL"
+                  cat $MAKEFILE | sed "/^EXTRA_MAKE_CONFIGS/s|$| \$\(TOP\)/$COMP/Make.config|" > $MAKEFILE.new || goodbye 1 "Cannot open $MAKEFILE.new"
+                  break;;
+              r*) [[ -n $CMDEBUG ]] && print "   [D] REMOVE OLD"
+                  cat $MAKEFILE | sed "/^EXTRA_MAKE_CONFIGS/s|+=.*|+= \$\(TOP\)/$COMP/Make.config|" > $MAKEFILE.new || goodbye 1 "Cannot open $MAKEFILE.new"
+                  break;;
+              i*) [[ -n $CMDEBUG ]] && print "   [D] IRRECONCILABLE"
+                  goodbye 7 "\nGoodbye.  Recommend you use the partial sandbox!";;
+            esac
+          done
+        fi
+      fi
+      [[ -a $MAKEFILE.new ]] && { mv $MAKEFILE.new $MAKEFILE || goodbye 1 "Cannot open $MAKEFILE"; } || /bin/rm -f $MAKEFILE.new
+    fi
+
+    # Process sandbox top-level Make.config
+    #
+    if [[ ! -s $SANDBOX_CFG || -z $(grep "^DIRECTORIES" $SANDBOX_CFG) ]]
+    then
+      print "...Creating top-level sandbox Make.config file"
+      print "DIRECTORIES = \\" > $SANDBOX_CFG
+      print "	$DLL_NAME" >> $SANDBOX_CFG
+    elif [[ -z $(grep $DLL_NAME $SANDBOX_CFG) ]]
+    then
+      print "...Adding $DLL_NAME to sandbox Make.config file"
+      insert_dllname
+    fi
+
+    # Symlink the top-level Make.rules and Makefile from the build tree if they
+    # don't exist.
+    for FILE in Make.rules Makefile
+    do
+      if [[ ! -s $SANDBOX/$FILE ]] 
+      then
+        print "...Creating top-level sandbox $FILE symlink"
+        [[ -n $CMDEBUG ]] && print "   [D] ln -sf $BUILDDIR/$FILE $SANDBOX/$FILE"
+        ln -sf $BUILDDIR/$FILE $SANDBOX/$FILE
+      fi
+    done
+#    if [[ -z $NODLL ]] 
+#     then
+#      [[ -n $HOMEDIR ]] && FLAG=-H || FLAG=
+#      cd $SANDBOX
+#      $BLDTOOLS/cm_createSandDLLDir $FLAG
+#    fi
+
+    if [[ -z $HOMEDIR ]]
+    then
+      delete_dll_links
+    fi
+  fi
+  # END: dll-named Sandbox - Create
+
+  ##############################
+  # dll-named Sandbox - Remove #
+  ##############################
+  if [[ -n $DLL_SB && -n $REMOVE ]]
+  then
+    check_for_dup_dll
+    if [[ -n $REMOVE_IT ]]
+    then
+      [[ -n $CMDEBUG ]] && print "\n   [D] >>> dll-named Sandbox - Remove <<<\n"
+      print "\nAbout to delete: $SANDBOX/$DLL_NAME"
+      print "Are your sure? [Yes: type Y/y]: \c"
+      read REPLY
+      [[ $REPLY != [yY]* ]] && { print "\nNo action was taken"; continue; }
+      [[ -n $CMDEBUG ]] && print "   [D] /bin/rm -fr $SANDBOX/$DLL_NAME"
+      /bin/rm -fr $SANDBOX/$DLL_NAME || goodbye 1 "could not remove $SANDBOX/$DLL_NAME"
+      print "\nDeleted '$DLL_NAME' directory from sandbox...."
+      # Remove entry from SANDBOX Make.config
+      print "Adjusting sandbox $(basename $SANDBOX_CFG) file(s)...."
+      sed "/$DLL_NAME/d" $SANDBOX_CFG >> $SANDBOX_CFG.tmp
+      [[ $? = 0 ]] && { mv $SANDBOX_CFG.tmp $SANDBOX_CFG || goodbye 1 "Could not modify $SANDBOX_CFG"; } || /bin/rm -f $SANDBOX_CFG.tmp
+      if [[ -z $(grep -v DIRECTORIES $SANDBOX_CFG) ]]
+      then
+        print "Sandbox is empty!\nRemoving top-level Make* files...."
+        /bin/rm -f $SANDBOX/Make*
+        if [[ -z $HOMEDIR ]] 
+        then
+          print "Removing dlls from dll directory"
+          for ARCH in $ARCHS
+          do
+            [[ -n $CMDEBUG ]] && print "\n   [D] Processing $ARCH"
+            [[ -n $CMDEBUG ]] && print "   [D] rm -fr $SANDBOX/.dll-$ARCH/*"
+            \rm -fr $SANDBOX/.dll-$ARCH/* 2>/dev/null
+          done
+        fi
+        goodbye
+      fi
+      # If developer is NOT using -H flag to have dll's in top-level directory,
+      # then need to delete their generated dll from the sandbox and relink
+      # it back to the build tree; otherwise, remove it from their HOME/dllV.R
+      # directory
+      if [[ -z $HOMEDIR ]]
+      then
+        print "Removing $DLL_NAME dlls from $SANDBOX/dll directory"
+        print "Symlinking $DLL_NAME dlls to $BUILDDIR/dll directory"
+        for ARCH in $ARCHS
+        do
+          [[ -n $CMDEBUG ]] && print "\n   [D] Processing $ARCH"
+          if [[ -d $SANDBOX/.dll-$ARCH ]]
+          then
+            [[ -n $CMDEBUG ]] && print "   [D] /bin/rm -f $SANDBOX/.dll-$ARCH/$DLL_NAME.*"
+            /bin/rm -f $SANDBOX/.dll-$ARCH/$DLL_NAME.* 2>/dev/null
+            [[ -n $CMDEBUG ]] && print "   [D] ln -sf $BUILDDIR/.dll-$ARCH/$DLL_NAME.* $SANDBOX/.dll-$ARCH"
+            ln -sf $BUILDDIR/.dll-$ARCH/$DLL_NAME.* $SANDBOX/.dll-$ARCH
+          fi
+        done
+      else
+        print "Removing $DLL_NAME dlls from $HOME/dll${V_R} directory"
+        for ARCH in $ARCHS
+        do
+          [[ -n $CMDEBUG ]] && print "\n   [D] Processing $ARCH"
+          if [[ -d $HOME/.dll${V_R}-$ARCH ]]
+          then
+            [[ -n $CMDEBUG ]] && print "   [D] /bin/rm -f $HOME/.dll${V_R}-$ARCH/$DLL_NAME.*"
+            /bin/rm -f $HOME/.dll${V_R}-$ARCH/$DLL_NAME.* 2>/dev/null
+          fi
+        done
+      fi
+    fi
+    continue
+  fi
+  # END: dll-named Sandbox - Remove
+
+done  
+# END: COMPS loop
+
+# Remove mode can exit now
+[[ -n $REMOVE ]] && goodbye 0
+
+# Need to do this for both dll-name and partial sandbox modes
+if [[ -n $DLL_SB &&  -z $NODLL ]] 
+then
+  [[ -n $HOMEDIR ]] && FLAG=-H || FLAG=
+  cd $SANDBOX
+  $BLDTOOLS/cm_createSandDLLDir $FLAG
+fi
+[[ -z $HOMEDIR ]] &&  delete_dll_links
+case $PRODUCT in
+    hdp) LINK_NAME="chipbench";;
+ wizard) LINK_NAME="wiz";;
+      *) LINK_NAME=$PRODUCT;;
+esac
+print "...Checking bin/dll directories"
+for ARCH in $ARCHS
+do
+  [[ -n $CMDEBUG ]] && print "\n   [D] Processing $ARCH"
+  # app symlinks to nutsh exe
+  if [[ -d $BUILDDIR/.bin-$ARCH ]]
+  then
+    for NUT in "" -pure -quant
+    do
+      [[ $ARCH != sun* && $NUT = -@(pure|quant) ]] && continue
+      if [[ ! -L $SANDBOX/.bin-$ARCH/${LINK_NAME}${NUT} ]]
+      then
+        [[ -n $CMDEBUG ]] && print "   [D] ln -sf $NUTSHELL/.bin-$ARCH/nutsh${NUT} $SANDBOX/.bin-$ARCH/${LINK_NAME}${NUT}"
+        ln -sf $NUTSHELL/.bin-$ARCH/nutsh${NUT} $SANDBOX/.bin-$ARCH/${LINK_NAME}${NUT} 2>/dev/null
+      fi
+    done
+  fi
+  # Add any symlinks in sandbox bin/dll for Makefile or Make.config
+  [[ -n $PART_SB ]] && DIRS=".bin-$ARCH .dll-$ARCH" || DIRS=".bin-$ARCH"
+  for DIR in $DIRS
+  do
+    if [[ -d $SANDBOX/$DIR ]]
+    then
+      for FILE in Makefile Make.config
+      do
+        if [[ -a $BUILDDIR/$DIR/$FILE ]]
+        then
+          if [[ ! -L $SANDBOX/$DIR/$FILE ]]
+          then
+            LINKSRC=$(/bin/ls -l $BUILDDIR/$DIR/$FILE | awk '{print $NF}')
+            [[ -n $CMDEBUG ]] && print "   [D] ln -sf $LINKSRC $SANDBOX/$DIR/$FILE"
+            ln -sf $LINKSRC $SANDBOX/$DIR/$FILE 2>/dev/null
+          fi
+        fi
+      done
+    fi
+  done
+  # Add any symlinks in sandbox dll for Make.config.partial
+  if [[ -a $SMCDP && -d $BUILDDIR/.dll-$ARCH ]]
+  then
+    if [[ ! -L $SANDBOX/.dll-$ARCH/Make.config.partial ]]
+    then
+      [[ -n $CMDEBUG ]] && print "   [D] ln -sf ../Make.config.dll.partial $SANDBOX/.dll-$ARCH/Make.config.partial"
+      ln -sf ../Make.config.dll.partial $SANDBOX/.dll-$ARCH/Make.config.partial
+    fi
+  fi
+done
+
+[[ -n $CMDEBUG ]] && print
+# Also need to symlink other directories from build tree in order to run in sbox
+for DIR in etc tcl pixmaps
+do
+  # exist in build tree?
+  # exist in sandbox? Leave alone if dir or symlink_to_dir already exists
+  [[ -z $(ls $SANDBOX/$DIR 2>/dev/null) ]] && \rm -fr $SANDBOX/$DIR
+  if [[ -d $BUILDDIR/$DIR && ! -d $SANDBOX/$DIR ]]
+  then
+    print "...Creating '$DIR' symlink in sandbox tree-top"
+    [[ -n $CMDEBUG ]] && print "   [D] ln -sf $BUILDDIR/$DIR $SANDBOX/$DIR"
+    ln -sf $BUILDDIR/$DIR $SANDBOX/$DIR
+  fi
+done
+# Make html directories if absent
+for DIR in msghelp msgref
+do
+  if [[ ! -d $SANDBOX/html/$DIR ]]
+  then
+    \rm -fr $SANDBOX/html/$DIR 2>/dev/null
+    [[ -n $CMDEBUG ]] && print "   [D] mkdir -p $SANDBOX/html/$DIR"
+    mkdir -p $SANDBOX/html/$DIR
+  fi
+done
+
+# Log usage into ~hdplib/public/write/cm_setup_usage_log
+OUTLOG=/afs/eda.fishkill.ibm.com/u/hdplib/public/write/cm_setup_usage_log.$(hostname | cut -f1 -d.).$$
+
+# Don't log any usage for CMteam
+IGNORE_USERS="mannk sylvestk mwheat"
+
+if [[ -z $(print $IGNORE_USERS | grep $LOGNAME 2>/dev/null) ]]
+then
+  [[ -n $DLL_SB ]] && TEXT=dll-named || TEXT=partial
+  print "$(date): User=$LOGNAME, Machine=$(hostname), Product=$PRODUCT, V.R=$V_R, Sandbox type=$TEXT, Component=$COMPONENT" >> $OUTLOG  2>/dev/null
+fi

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<CqUpdate>
+	<login>
+		<username>asuren</username>
+		<password>fake</password>
+		<database>PROT0</database>
+		<schema>mdcms</schema>
+	</login>
+	<client>
+		<app-name>CQServiceTest</app-name>
+	</client>
+	<update>
+		<record_type>tk_patch</record_type>
+		<record_id>PROT000078820</record_id>
+		<action>Available</action>
+	</update>
+</CqUpdate>

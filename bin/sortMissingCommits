@@ -1,0 +1,289 @@
+#!/usr/bin/perl
+#
+# =============================================================================
+#
+# FILE: sortMissingCommits
+#
+# PURPOSE ---------------------------------------------------------------------
+# Parses a list of commit data files (from post_commit hook) and sorts the
+# commit data by component and TK.
+# -----------------------------------------------------------------------------
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 09/24/2013 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+
+#
+# Global variables
+#
+my $BUILD   = "/afs/eda/build/";
+
+
+# Program name
+my $appName = "sortMissingCommits";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+    $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help    = "";
+my $verbose = 0;
+my $inFile  = "";
+
+# Return codes
+my $OK        = 0;
+my $ERROR     = 8;
+
+# Generic application variables
+my $entry = "";
+my @tokens = ();
+
+
+# Program's global return code - initialize to ERROR
+my $progRC  = $ERROR;
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+#
+# Define the current directory
+#
+my $startDir = $ENV{"PWD"};
+
+#
+# To exit cleanly from a Ctrl+C or an unexpected die()
+#
+$SIG{'INT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{'QUIT'} = sub { handleInterruption(); exit($ERROR); };
+$SIG{__DIE__}  = sub { handleDIE(); };
+
+#
+# Read the command line arguments
+#
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    #printSyntax();
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+#
+# Define custom perl libs path and modules depending on the
+# application mode.
+#
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use IcofFile;
+use TKutils;
+
+#
+# Read the input file
+#
+my @files = ();
+if (! IcofFile::ReadFileToList($inFile, \@files, 0)) {
+  print "ERROR: unable to read input file\n";
+  exit $ERROR;
+}
+
+#
+# Process each commit log file
+#
+my @toolKits;
+my @components;
+my %changeReqs;
+foreach my $file (@files) {
+
+  next if ($file eq "");
+
+  # Read the file
+  my @contents = ();
+  if (! IcofFile::ReadFileToList($file, \@contents, 0)) {
+    print "ERROR: unable to read commit log file .. $file\n";
+    exit $ERROR;
+  }
+
+  # Read the component and CR
+  my $component = "";
+  my $changeReq = "";
+  my $toolKit = "";
+  my $revision = "";
+  foreach my $line (@contents) {
+    next if ($line eq "");
+    if ($line =~ /^COMPONENT/) {
+      @tokens = split(/ +/, $line);
+      $component = TKutils::Trim($tokens[2]);
+    }
+    elsif ($line =~ /^CHANGE_REQ/) {
+      @tokens = split(/ +/, $line);
+      $changeReq = TKutils::Trim($tokens[2]);
+    }
+    elsif ($line =~ /^REVISION/) {
+      @tokens = split(/ +/, $line);
+      $revision = TKutils::Trim($tokens[2]);
+    }
+    elsif ($line =~ /^CHANGED/) {
+      @tokens = split(/ +/, $line);
+      my $file = TKutils::Trim($tokens[4]);
+      if ($file =~ /^trunk/) {
+        $toolKit = "14.1.build";
+      }
+      elsif ($file =~ /^branches/) {
+        @tokens = split(/\//, $file);
+        $toolKit = TKutils::Trim($tokens[1]);
+      }
+    }
+  }
+
+  if (($toolKit ne "") && ($component ne "") && ($changeReq ne "")) {
+    if (! exists($changeReqs{$toolKit}{$component})) {
+      my @crs = ();
+      push(@crs, "$changeReq($revision)");
+      $changeReqs{$toolKit}{$component} = \@crs;
+    }
+    else {
+      my $crs = $changeReqs{$toolKit}{$component};
+      push(@$crs, "$changeReq($revision)");
+      $changeReqs{$toolKit}{$component} = $crs;
+    }
+    push(@toolKits, $toolKit) if (! grep(/$toolKit/, @toolKits));
+    push(@components, $component) if (! grep(/^$component$/, @components));
+  }
+  else {
+    print "Tool Kit  : $toolKit\n";
+    print "Component : $component\n";
+    print "Change Req: $changeReq\n";
+    exit $ERROR;
+  }
+}
+
+#
+# Dump the results
+#
+foreach my $tk (sort(@toolKits)) {
+  foreach my $comp (sort(@components)) {
+    if (defined($changeReqs{$tk}{$comp})) {
+      my $crs = $changeReqs{$tk}{$comp};
+      print "$tk $comp " . join(",", @$crs) . "\n";
+    }
+  }
+}
+
+
+exit $OK;
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+
+  print "\n[$appName] Caught interruption - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+
+  print "\n[$appName] Caught an unexpected die - Exiting with a cleanUp\n";
+  chdir($startDir);
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+Parses a list of commit data files (from post_commit hook) and sorts the
+commit data by component and TK.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-f input_file> [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  -f  Input file containing a list of commit logs
+  -h  Application help (optional)
+  -y  Verbose mode (optional)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  # Parse command line arguments
+  GetOptions ('file|f=s'       => \$inFile,
+              'verbose|y'      => \$verbose,
+              'help|h|?'       => \$help
+              ) || return $ERROR;
+
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+
+  # Verify required parameters
+  my $msg = "";
+  if (! $inFile) {
+    $msg = "ERROR: Input File (-f) is a required parameter\n";
+  }
+  elsif (! -e $inFile) {
+    $msg = "ERROR: Input File does not exist\n";
+  }
+
+
+  # Return
+  if ($msg ne "") {
+    print $msg;
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+

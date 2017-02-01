@@ -1,0 +1,247 @@
+#!/usr/bin/perl
+# =============================================================================
+#
+#    FILE: ET_RunStuckRegs
+#  SYNTAX: See "printHelp" methods below or execute the program with -h
+#
+# CREATOR: Gregg Stadtlander
+#    DATE: 10/19/2012
+#
+# CHANGE LOG ------------------------------------------------------------------
+# 10/19/2012 GS  Initial coding.
+# =============================================================================
+
+use warnings;
+use strict;
+use Getopt::Long;
+Getopt::Long::Configure ("no_ignore_case");
+use File::Path;
+use lib '/afs/eda/data/edainfra/tools/enablement/prod/libperl';
+use TkCommon;
+
+# Global variables
+my $BIN_DIR      = "/afs/eda/data/edainfra/tools/enablement/prod/bin";
+
+# Program variables
+my $appName = "ET_RunStuckRegs";
+my $progInvocation = $appName;
+foreach (@ARGV) {
+  $progInvocation .= " " . $_;
+}
+
+# Program arguments
+my $help            = "";
+my $verbose         = 0;
+my $release         = "";
+my $dryRun          = 0;
+my $command         = "";
+my $component       = "";
+my $platform        = "";
+my $level           = "build";
+
+# Return codes
+my $OK    = 0;
+my $ERROR = 8;
+
+# Generic application variables
+my @tokens = ();
+my $entry  = "";
+my $rc  = $ERROR;
+my $startDir = $ENV{"PWD"};
+my $progRC = "";
+
+
+#-----------------------------------------------------------------------------#
+#                 M A I N   P R O G R A M                                     #
+#-----------------------------------------------------------------------------#
+
+# Deal nicely with unexpected exits
+$SIG{'INT'}   = sub { handleInterruption(); };
+$SIG{'QUIT'}  = sub { handleInterruption(); };
+$SIG{__DIE__} = sub { handleDIE(); };
+
+
+# Read the command line arguments
+$progRC = processArgs();
+if ($progRC == $ERROR) {
+    print "\n[$appName] Use -h to get more details.\n";
+    exit $ERROR;
+}
+
+
+# Parse the component and relName from the release
+if ($release !~ /\./) {
+  CleanExit("Release name must contain a \".\"\n", $ERROR);
+}
+@tokens = split(/\./, $release);
+$component = $tokens[0];
+my $tempRel = $tokens[1];
+@tokens = split(//, $tempRel);
+my $minorVer = pop(@tokens);
+pop(@tokens);
+my $majorVer = join("", @tokens);
+if ($verbose) {
+  print "Component: $component\n";
+  print "Version (mjr): $majorVer\n";
+  print "Version (mnr): $minorVer\n";
+}
+
+
+# Process stuck regression tests
+my $relDir = $majorVer . "." . $minorVer;
+my $regDir = "/afs/eda/$level/$component/$relDir/build/etc/complock/$platform";
+print "Complock dir: $regDir\n" if ($verbose);
+my @files = glob("$regDir/*");
+
+my $subCmd = "";
+foreach $entry (@files) {
+  @tokens = split(/\//, $entry);
+  my $test = pop(@tokens);
+  print "$test\n";
+
+  $command = "/afs/eda/u/einslib/bin/ET_runregS";
+  $command .= " -r $release";
+  $command .= " -p $platform";
+  $command .= " -t $test";
+  if ($majorVer ne "13") {
+    ($subCmd = $command) =~ s/ /##/g;  # need to replace space with ##
+    my $llCmd = "$BIN_DIR/ll.run_forget";
+    $llCmd .= " -r $relDir";
+    $llCmd .= " -c $component";
+    $llCmd .= " -l $level";
+    $llCmd .= " -p $platform";
+    $llCmd .= " -e $subCmd";
+    $llCmd.= " -u $test";
+    $command = $llCmd;
+  }
+
+  if (! $dryRun) {
+    print "Running ... \n$command\n";
+    `$command`;
+    sleep(5);  
+  }
+  else {
+    print "Would have run ... \n$command\n";
+  }
+
+}
+
+
+CleanExit("Complete", $OK);
+
+
+#-----------------------------------------------------------------------------#
+#                F U N C T I O N  D E F I N I T I O N S                       #
+#-----------------------------------------------------------------------------#
+
+#------------------------------------------------------------------------------
+# Name   : handleInterruption()
+# Purpose: To handle Ctrl+C interrruption
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleInterruption {
+  CleanExit("\n[$appName] Caught interruption - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : handleDIE()
+# Purpose: To handle an unexpected die().
+# RCs    : none
+#------------------------------------------------------------------------------
+sub handleDIE {
+  CleanExit("\n[$appName] Caught an unexpected die - exiting\n", $ERROR);
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : CleanExit($message, $rc)
+# Purpose: Performs any applicatin clean up and exits with rc
+# RCs    : none
+#------------------------------------------------------------------------------
+sub CleanExit {
+  my ($message, $rc) = @_;
+  print "$message\n";
+  print "Return code: $rc\n";
+  close (STDOUT);
+  chdir($startDir) if (defined($startDir));
+  exit $rc;
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : printHelp()
+# Purpose: Prints discription and full usage to console
+# RCs    : none
+#------------------------------------------------------------------------------
+sub printHelp {
+
+  my $progDescription = "
+This script restarts regression tests that are hung.  LoadLeveler is used for 
+14.1 and newer releases whereas 13.1 jobs continue to use rsh.
+";
+
+  my $syntax = "
+SYNTAX:
+  $appName <-r release> <-p platform> [-l level] [-dryrun] [-h] [-y]
+
+RETURN CODES:
+  0(ok) 8(error)
+";
+
+  my $where ="
+WHERE:
+  release   = Component.release_number (einstimer.1401 ... )
+  platform  = Platform to process (64-rs_aix61 or 64-linux50)
+  level     = (optional) level of code to process (build = default, shipb, tkb)
+  -dryrun   (optional) Dry run (don't run actual commands)
+  -h        (optional) application help
+  -y        (optional) Verbose (print the invocation of each command)
+";
+
+  print $progDescription;
+  print $syntax;
+  print $where;
+
+}
+
+
+#------------------------------------------------------------------------------
+# Name   : processArgs()
+# Purpose: Read and verify command line arguments
+# RCs    : 0 = OK
+#          8 = ERROR
+#------------------------------------------------------------------------------
+sub processArgs {
+
+  my $rc = $OK;
+  my $command = "";
+
+  # Parse command line arguments
+  GetOptions ('r=s'         => \$release,
+              'p=s'         => \$platform,
+              'dryrun'      => \$dryRun,
+              'y'           => \$verbose,
+              'help|h|?'    => \$help) || return $ERROR;
+
+  # If help requested, show usage
+  if ($help) {
+    printHelp();
+    return $ERROR;
+  }
+
+  # Validate required inputs
+  if (! $release) {
+    print "ERROR: Release (-r) must be specified\n";
+    return $ERROR;
+  }
+  if (! $platform) {
+    print "ERROR: Platform (-p) must be specified\n";
+    return $ERROR;
+  }
+
+  return $OK;
+
+}
+
+

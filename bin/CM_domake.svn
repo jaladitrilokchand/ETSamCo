@@ -1,0 +1,180 @@
+#!/usr/bin/ksh
+
+# script to build individual component directories, as called 
+# through rsh for parallel builds
+# written 06/27/2003 -- Matthew Wheaton
+#
+# 06/21/10 AM  Copied from original and modified to handle DEVMODE which
+#              forces build flow to run in a test environment.
+#              Also, dots in a modified CM_common.svn script for same reason.
+# 07/06/10 AM  Removed DEVMODE always true statement.
+# 07/07/10 AM  Updated svnclib definition in DEVMODE to point at the enablement/dev/bin directory.
+# 05/13/11 AM  Changed all references to btv/edainfra to eda/edainfra for SVN migration.
+# 08/20/12 GS  Added -l switch to support non build areas like tkb and shipb.
+# 01/10/12 GS  Updated to support xtinct TKs
+
+# function definitions
+function help
+{
+cat << \EOF
+#Usage  CM_domake.svn -r <release> -c <component> -p <platform> [-d -f -l <level>]
+#         -p <platform> 
+#         -r <release>  
+#         -c <subcomponent> 
+#         -f build component with flexelint
+#         -d puts in DEVMODE
+#         -l <level> location (default = build) [ build|tkb|shipb|xtinct/tk14.1.x ] 
+# Function: Build a specific subcomponent.
+
+EOF
+}
+
+function ciao
+{
+  print "$(date +"%a %D %T"): CM_domake ending on $HOSTNAME" >> $LOGFILE
+  /bin/rm -f $COMPLOCK  >> $LOGFILE 2>&1
+  rc="$1"
+  [[ -n $2 ]] && print "$2"
+  exit "${rc:-0}"
+}
+
+# getopts
+while getopts :dhc:p:r:fl: OPTION
+ do
+  case "$OPTION" in
+    h) help; ciao 1;;
+    c) SUBCOMP=$OPTARG;;
+    d) DEVMODE=TRUE;;
+    f) FLEXLINT=TRUE;;
+    l) LEVEL=$OPTARG;;
+    p) PLATFORM=$OPTARG;;
+    r) RELEASE=$OPTARG;;
+    :) help; ciao 1 "\n*** Option -$OPTARG requires a paramter.";;
+    ?) help; ciao 1 "\n*** Option -$OPTARG is not recognized.";;
+ esac
+done
+shift $(($OPTIND - 1))
+
+#Error Checking for parameters
+[[ -z $RELEASE ]] && { help; ciao  "\n*** Release required."; exit; }
+[[ -z $SUBCOMP ]] && { help; ciao  "\n*** Component required."; exit; }
+[[ -z $PLATFORM ]] && { help; ciao  "\n*** Platform required."; exit; }
+
+[[ -z $LEVEL ]] && LEVEL="build"
+if [[ $LEVEL = @(build|tkb|shipb) ]]
+then
+  print "Level: $LEVEL"
+elif [[ $LEVEL = *+(xtinct/tk1)* ]]
+then
+  print "Level: $LEVEL"
+else 
+  help
+  ciao "\n*** $LEVEL is invalid -- must be build, shipb, tkb or xtinct/tk14.1.x ***"  
+fi
+
+# set constants and import common code
+# ----------------------------------------
+# . <COMMON CODE>
+NOUSELOG=TRUE
+
+if [[ $DEVMODE = TRUE ]]
+then
+  SVNCLIB=/afs/eda/data/edainfra/tools/enablement/dev/bin
+else
+  SVNCLIB=/afs/eda/data/edainfra/tools/enablement/prod/bin
+fi
+. $SVNCLIB/CM_common.svn
+
+# turn a $SUBCOMP of /html/etutils to html.etutils
+# for log & complock names
+SUBCOMPFILE=$(print $SUBCOMP | sed 's!/!.!g')
+LOGFILE=${LOGDIR}/$SUBCOMPFILE
+
+# authenticate for open AFS
+# if [[ $PLATFORM = 64-linux30 ]] 
+# then
+#   USER=`whoami`
+#   # print USER: $USER
+#   PASS=$(cat /tmp/local/$USER)
+#   /usr/afsws/bin/klog -c eda.fishkill -pass $PASS >> $LOGFILE 2>&1
+#   export KAUTH=afs
+#   tokens >> $LOGFILE
+# fi
+
+COMPLOCK=${COMPLOCKDIR}/$SUBCOMPFILE
+DOTFILE="/afs/eda/u/${USER}/.build.config"
+GETVAL="/afs/eda/u/cmlib/bin/cm_getval"
+HOSTNAME=$(print $(hostname) | cut -f1 -d.)
+
+MAKE=/afs/eda/${BTLEVEL}/tools/${BTOOLS}/bin/make
+USER=$(whoami)
+
+# retrieve the platform list from this release and verify that we
+# are building on one of them
+VALID_PLATS=$($GETVAL ${COMP}${REL_VER}_PLATS)
+PLAT_ORS=$(print $VALID_PLATS | sed 's/ /|/g')
+eval [[ $PLATFORM != @($PLAT_ORS) ]] && INVALID=TRUE
+if [[ -n $INVALID ]]
+ then
+   # logfile won't be there either, cron will turn this into email
+   print "platform $PLATFORM is not valid for $RELEASE"
+   exit
+fi
+
+######################################################################
+# . <RELEASE SPECIFIC CODE>
+# should contain the TARGETS value set for release and platform
+######################################################################
+if [[ -r $DOTFILE ]]
+then
+  . $DOTFILE
+fi
+######################################################################
+
+# if TARGETS is not set, set to something reasonable
+if [[ -z $TARGETS ]]
+then
+  print "$DOTFILE did not set TARGETS, setting TARGETS to 'opt'" >> $LOGFILE
+  TARGETS="opt"
+fi
+
+# flexlint processing
+if [[ -n $FLEXLINT ]] 
+ then
+  LINTFILE="$LOGFILE.e"
+  TARGETS="$TARGETS lint"
+  make lint >> $LINTFILE 2>&1
+
+  # Need to blowaway the build_warnings.lint* files since the information is
+  # kept in the build tree's logdir .e files
+  # Also filter out the VERBOSE statements that get written into the .e files
+  # so that only the errors remain (kls 08/30/01)
+  /bin/rm -f $BUILDDIR/build_warnings.lint* $BUILDDIR/lint*
+  cat $LINTFILE | egrep -v "make lint|eflexlint" > $LINTFILE.new
+  mv $LINTFILE.new $LINTFILE
+fi
+
+# write to complock file and let the logfile know we're starting
+print "$(date +"%a %D %T"): CM_domake starting on $HOSTNAME" >> $LOGFILE
+print "TARGETS set to: $TARGETS" >> $LOGFILE
+print $HOSTNAME > $COMPLOCK
+
+# cd to build environment and do make <target>
+cd $BUILDDIR/$SUBCOMP
+# test to verify that cd worked
+if [[ $? -ne 0 ]]
+then
+  print "cd to $BUILDDIR/$SUBCOMP failed" >> $LOGFILE
+  ciao
+fi
+
+# note BITS is set by CM_common (dotted in) and inherited by make
+for TARGET in $TARGETS
+do
+  print "$(date +"%a %D %T"): $MAKE $TARGET VERBOSE=1" >> $LOGFILE
+  $MAKE $TARGET VERBOSE=1 >> $LOGFILE 2>&1
+
+done
+
+# post build cleanup
+ciao
